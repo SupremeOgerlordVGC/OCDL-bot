@@ -1,0 +1,8 @@
+# Core bot
+discord.py>=2.3.0
+
+# Google Sheets integration (OPTIONAL).
+# The bot runs fine without these installed - all sheet features simply
+# report "Google Sheets is not configured" instead.
+gspread>=6.0.0
+google-auth>=2.0.0

@@ -1,0 +1,30 @@
+# systemd unit for the draft bot.
+#
+#   sudo cp draftbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now draftbot
+#
+# Adjust User= and the two paths if you did not follow the README exactly.
+
+[Unit]
+Description=Pokemon Draft League Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/OCDL-Bot
+ExecStart=/home/ubuntu/OCDL-Bot/.venv/bin/python bot.py
+
+# Restart on any exit, including a crash or a VM reboot. This plus the
+# SQLite database is what stops a reboot losing a draft.
+Restart=always
+RestartSec=10
+
+# Logs go to the journal: view them with `journalctl -u draftbot -f`
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
