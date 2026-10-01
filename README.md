@@ -447,13 +447,21 @@ If the bot was offline when a deadline passed, the current player's timer is
 restarted from scratch and the channel is told, because downtime is the host's
 fault and not the drafter's.
 
+**The bot will not run a clock nobody can see.** If it cannot post in the draft
+channel — usually a missing **View Channel** or **Send Messages** permission —
+the turn is paused rather than timed, because skipping players for a permission
+problem and halving their timers on the way would be unfair. Picks, rosters and
+budgets are all still recorded normally. Grant the permission and restart the
+bot: the paused turn opens again and the player is pinged. The log says exactly
+which channel is the problem.
+
 ## Tests
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-101 tests, no Discord connection and no network needed. They cover snake order
+107 tests, no Discord connection and no network needed. They cover snake order
 for every player count from 2 to 16, round transitions, channel isolation,
 timer halving and the makeup cascade, the snake-boundary case (one halving for
 two lost rounds, none at all if the queue was sniped), queued picks and the
@@ -461,7 +469,8 @@ exhausted-queue exception, duplicates, wrong rounds, budgets, pick limits,
 ending early when everyone is broke, trade caps, admin-created picks, roster
 blocks after trades, Pokédex name resolution and banned Pokémon, behaviour
 during a Google outage, restart recovery, the spreadsheet cell mapping, and a
-randomised full-draft simulation that checks the invariants that matter
+behaviour when the bot is refused permission to post, and a randomised
+full-draft simulation that checks the invariants that matter
 (nobody owns the same Pokémon twice, budgets never go negative, spent +
 remaining always equals the starting budget, pick order has no gaps).
 
@@ -475,8 +484,12 @@ Also check the bot was invited with the `applications.commands` scope.
 channel they were typed in. Run them in the draft's own channel, or use the
 `channel:` option where one is offered.
 
-**The bot cannot post.** Give it **Send Messages** in both the draft channel and
-the admin channel.
+**The bot cannot post** (`403 Forbidden`, `Missing Access`). Right-click the
+channel → **Edit Channel** → **Permissions**, add the bot or its role, and allow
+**View Channel** and **Send Messages**. Do the same for the admin channel, since
+trades are posted there. Error code 50001 means the bot cannot even see the
+channel; 50013 means it can see it but not post. While this is unresolved the
+turn clock stays paused, so nobody is skipped — fix it and restart the bot.
 
 **A pick worked but the sheet did not update.** That is by design — the pick is
 already saved locally. Check `journalctl -u draftbot -f` for the Google error,

@@ -125,15 +125,21 @@ class DraftBot(commands.Bot):
             rules.open_turn_clock(self.conn, draft["id"], deadline)
             log.info("draft %s restarted the clock (%ss)", draft["id"], seconds)
 
-            if channel is not None:
-                try:
-                    await channel.send(
-                        f"🔄 The bot restarted. <@{player['user_id']}>, you are still on the "
-                        f"clock for **Round {draft['current_round']}** and your timer has been "
-                        f"restarted at **{ui.format_seconds(seconds)}**."
-                    )
-                except discord.DiscordException:
-                    log.exception("could not post the restart notice")
+            posted = await ui.safe_send(
+                channel,
+                f"🔄 The bot restarted. <@{player['user_id']}>, you are still on the "
+                f"clock for **Round {draft['current_round']}** and your timer has been "
+                f"restarted at **{ui.format_seconds(seconds)}**.",
+            )
+            if not posted:
+                # No point running a clock nobody can see - see ui.announce.
+                self.timers.cancel(draft["id"])
+                rules.open_turn_clock(self.conn, draft["id"], None)
+                log.warning(
+                    "draft %s: clock PAUSED - I cannot post in channel %s. Grant the bot "
+                    "View Channel and Send Messages there, then restart.",
+                    draft["id"], draft["channel_id"],
+                )
 
     # ---- timers ---------------------------------------------------------
 

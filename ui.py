@@ -223,10 +223,35 @@ async def announce(bot, draft_id, events, channel=None):
     if channel is None:
         log.warning("draft %s: channel %s is not visible to the bot",
                     draft_id, draft["channel_id"])
+        _stop_unwatched_clock(bot, draft_id, events)
         return
 
+    posted = False
     for message in pack_messages(lines):
-        await safe_send(channel, message)
+        posted = await safe_send(channel, message) or posted
+
+    if not posted:
+        _stop_unwatched_clock(bot, draft_id, events)
+
+
+def _stop_unwatched_clock(bot, draft_id, events):
+    """Pause a turn whose announcement could not be delivered.
+
+    Running a timer in a channel the bot cannot post in would skip players
+    for a permission problem that is not theirs, and halve their timers on
+    the way. So the clock is stopped instead and the draft waits. Fix the
+    permission and restart the bot: resume_drafts sees a turn with no
+    deadline and opens it again properly.
+    """
+    if not any(event["type"] == "turn_started" for event in events):
+        return
+
+    bot.timers.cancel(draft_id)
+    rules.open_turn_clock(bot.conn, draft_id, None)
+    log.warning(
+        "draft %s: the turn clock has been PAUSED because the bot cannot post in its "
+        "channel. Grant View Channel and Send Messages, then restart the bot.", draft_id
+    )
 
 
 def _start_timer(bot, draft_id, event):

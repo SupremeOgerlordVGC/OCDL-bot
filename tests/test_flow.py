@@ -378,30 +378,55 @@ class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await ui.safe_send(FakeChannel(1), "hello"))
         self.assertFalse(await ui.safe_send(None, "hello"))
 
-    async def test_the_clock_still_starts_when_the_bot_cannot_post(self):
-        events = rules.start_draft(self.conn, self.draft())
-        await ui.announce(self.bot, self.draft_id, events)      # must not raise
-
-        live = self.draft()
-        self.assertEqual(live["status"], "active")
-        self.assertIsNotNone(live["turn_deadline"],
-                             "the turn must be on the clock even if nobody could be told")
-        self.assertIn(self.draft_id, self.bot.timers.tasks)
-        self.bot.timers.cancel_all()
-
     async def test_a_pick_survives_a_failed_announcement(self):
         await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
         _, events = rules.make_pick(self.conn, self.draft(), 11, 1, "Garchomp", 12)
         await ui.announce(self.bot, self.draft_id, events)      # must not raise
 
+        # The pick is recorded and the turn has moved on, even though nobody
+        # could be told. Only the clock waits.
         picks = rules.round_picks(self.conn, self.draft_id, 1)
         self.assertEqual([p["pokemon"] for p in picks], ["Garchomp"])
         self.assertEqual(rules.current_player(self.conn, self.draft())["display_name"], "Alex")
+        self.assertEqual(rules.get_player(self.conn, self.draft_id, 11)["budget_remaining"], 88)
+        self.assertIsNone(self.draft()["turn_deadline"], "clock paused until posting works")
+        self.bot.timers.cancel_all()
+
+    async def test_the_clock_is_paused_rather_than_skipping_players_silently(self):
+        # Running a timer nobody can see would skip players for a permission
+        # problem that is not theirs. The turn waits instead.
+        events = rules.start_draft(self.conn, self.draft())
+        await ui.announce(self.bot, self.draft_id, events)
+
+        live = self.draft()
+        self.assertEqual(live["status"], "active")
+        self.assertIsNone(live["turn_deadline"], "the clock should be paused, not running")
+        self.assertNotIn(self.draft_id, self.bot.timers.tasks)
+
+        # Nobody has been skipped or penalised.
+        larry = rules.get_player(self.conn, self.draft_id, 11)
+        self.assertEqual(larry["current_timer"], 120)
+        self.assertEqual(larry["skip_count"], 0)
+        self.assertEqual(rules.current_player(self.conn, live)["display_name"], "Larry")
+
+    async def test_the_paused_turn_resumes_once_posting_works(self):
+        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        self.assertIsNone(self.draft()["turn_deadline"])
+
+        # Permission granted, bot restarted: the turn opens properly.
+        working = FakeChannel(4242)
+        self.bot.channel = working
+        events = rules.begin_turn(self.conn, self.draft_id)
+        await ui.announce(self.bot, self.draft_id, events)
+
         self.assertIsNotNone(self.draft()["turn_deadline"])
+        self.assertIn("<@11>", working.text)
         self.bot.timers.cancel_all()
 
     async def test_a_timer_expiry_still_skips_when_the_bot_cannot_post(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        # If a clock was already running when posting broke, the expiry still
+        # has to resolve cleanly rather than raising.
+        rules.start_draft(self.conn, self.draft())
         token = (self.draft()["current_round"], self.draft()["current_turn_index"])
         await self.bot.on_timer_expired(self.draft_id, token)
 
