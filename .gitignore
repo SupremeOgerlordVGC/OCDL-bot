@@ -1,5 +1,10 @@
 .env
+# Google service-account keys. These contain a PRIVATE KEY - never commit one.
+# The bot reads credentials.json; the other patterns catch keys straight out
+# of the Google Cloud console, which are named <project>-<hash>.json.
 credentials.json
+*service-account*.json
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
 *.db
 *.db-wal
 *.db-shm

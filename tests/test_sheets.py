@@ -22,6 +22,19 @@ class CostParsingTests(unittest.TestCase):
         self.assertEqual(sheets.parse_cost("3.0"), 3)
         self.assertEqual(sheets.parse_cost(1), 1)
 
+    def test_currency_formatting_is_tolerated(self):
+        # The template's cost column is formatted as currency. The bot asks
+        # Google for unformatted values, but a league that types costs as
+        # text can still produce "$12" - which must not read as banned.
+        self.assertEqual(sheets.parse_cost("$12"), 12)
+        self.assertEqual(sheets.parse_cost("$2"), 2)
+        self.assertEqual(sheets.parse_cost(" $ 14 "), 14)
+        self.assertEqual(sheets.parse_cost("1,200"), 1200)
+        # A currency symbol does not rescue a banned marker or a placeholder.
+        self.assertIsNone(sheets.parse_cost("$99"))
+        self.assertIsNone(sheets.parse_cost("$"))
+        self.assertIsNone(sheets.parse_cost("$B"))
+
     def test_banned_and_unpriced_forms(self):
         # Blank, any text, and the placeholder numbers all mean "not draftable".
         for raw in ["", None, " ", "B", "Banned", "BANNED", "banned", "-", "n/a",

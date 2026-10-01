@@ -68,17 +68,24 @@ def normalize(name):
     return " ".join(str(name).strip().lower().split())
 
 
+# Characters to ignore when reading a cost: the cost column is formatted as
+# currency, so a league that types values as text can produce "$12" or
+# "1,200". Only these are stripped - a marker like "B" or "Banned" still has
+# no number left in it and so still counts as banned.
+COST_NOISE = str.maketrans("", "", "$£€¥, \t")
+
+
 def parse_cost(raw):
     """Cost as an int, or None when the Pokémon is banned or unpriced.
 
-    Blank, any text, and the placeholder numbers in config.BANNED_COST_VALUES
-    all mean "not draftable".
+    Blank, anything without a number in it, and the placeholder numbers in
+    config.BANNED_COST_VALUES all mean "not draftable".
     """
     text = str(raw).strip() if raw is not None else ""
     if not text:
         return None
     try:
-        value = int(float(text))
+        value = int(float(text.translate(COST_NOISE)))
     except ValueError:
         return None
     if value in config.BANNED_COST_VALUES:
@@ -183,9 +190,13 @@ class SheetSync:
         cost_col = layout["pokedex_cost_column"]
 
         try:
-            # One request for both columns.
-            names, costs = tab.batch_get([f"{name_col}{first}:{name_col}",
-                                          f"{cost_col}{first}:{cost_col}"])
+            # One request for both columns. UNFORMATTED_VALUE matters: the
+            # cost column is formatted as currency, so the default would
+            # hand back "$12" instead of 12.
+            names, costs = tab.batch_get(
+                [f"{name_col}{first}:{name_col}", f"{cost_col}{first}:{cost_col}"],
+                value_render_option="UNFORMATTED_VALUE",
+            )
         except Exception as error:
             raise SheetError(f"Could not read the {layout['pokedex_tab']} tab: {error}") from error
 

@@ -29,6 +29,27 @@ logging.basicConfig(
 )
 log = logging.getLogger("draftbot")
 
+
+class HideIrrelevantWarnings(logging.Filter):
+    """Drop two discord.py warnings that do not apply to this bot.
+
+    * PyNaCl / voice - this bot never joins a voice channel.
+    * "Privileged message content intent is missing" - discord.py warns
+      because a command prefix is set, but every command here is a slash
+      command, which does not need that intent. Left in, the warning sends
+      you hunting for a problem that is not there.
+    """
+
+    IGNORED = ("PyNaCl is not installed",
+               "Privileged message content intent is missing")
+
+    def filter(self, record):
+        return not record.getMessage().startswith(self.IGNORED)
+
+
+for _name in ("discord.client", "discord.ext.commands.bot"):
+    logging.getLogger(_name).addFilter(HideIrrelevantWarnings())
+
 COGS = ["cogs.admin", "cogs.drafting", "cogs.extras"]
 
 
