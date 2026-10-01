@@ -170,6 +170,34 @@ def pack_messages(lines):
 # --------------------------------------------------------------------------
 
 
+async def safe_send(channel, message):
+    """Post to a channel. Returns False if Discord refused, never raises.
+
+    Public announcements are best effort on purpose. Work is written to
+    SQLite before anything is announced, so a missing permission must not
+    undo a pick, abort the rest of a command, or stop a timer starting.
+    """
+    if channel is None:
+        return False
+    try:
+        await channel.send(message)
+        return True
+    except discord.Forbidden:
+        log.warning("not allowed to post in channel %s - check View Channel "
+                    "and Send Messages for the bot there", channel.id)
+        return False
+    except discord.DiscordException:
+        log.exception("could not post to channel %s", channel.id)
+        return False
+
+
+def permission_hint(channel):
+    """Shown to an admin when the bot could not post publicly."""
+    where = channel.mention if channel is not None else "that channel"
+    return (f"\n\n⚠️ I could not post in {where}. Give me **View Channel** and "
+            f"**Send Messages** there. Everything is saved — nothing was lost.")
+
+
 async def announce(bot, draft_id, events, channel=None):
     """Post events publicly, start the next timer, and update Sheets.
 
@@ -198,10 +226,7 @@ async def announce(bot, draft_id, events, channel=None):
         return
 
     for message in pack_messages(lines):
-        try:
-            await channel.send(message)
-        except discord.DiscordException:
-            log.exception("could not post to channel %s", draft["channel_id"])
+        await safe_send(channel, message)
 
 
 def _start_timer(bot, draft_id, event):

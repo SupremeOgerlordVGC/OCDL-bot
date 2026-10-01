@@ -15,6 +15,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import discord      # noqa: E402
+
 import config       # noqa: E402
 import database     # noqa: E402
 import draft as rules   # noqa: E402
@@ -37,6 +39,19 @@ class FakeChannel:
     @property
     def text(self):
         return "\n".join(self.messages)
+
+
+class SilentResponse:
+    """Minimal stand-in for an aiohttp response, to build discord.Forbidden."""
+    status = 403
+    reason = "Forbidden"
+
+
+class ForbiddenChannel(FakeChannel):
+    """A channel the bot is not allowed to post in."""
+
+    async def send(self, content):
+        raise discord.Forbidden(SilentResponse(), "Missing Access")
 
 
 class FakeSheets:
@@ -335,3 +350,62 @@ class PokedexRuleTests(unittest.IsolatedAsyncioTestCase):
         self.bot.sheets = FakeSheets()
         name = await self.cog.resolve_pokemon(self.draft, "Homebrew Mon", 3)
         self.assertEqual(name, "Homebrew Mon")
+
+
+class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
+    """A channel the bot cannot post in must not break the draft.
+
+    This is the case that actually bit in testing: /draft saved the draft as
+    active, then the announcement was refused, and the draft was left running
+    with nobody on the clock.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = ForbiddenChannel(4242)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.draft_id = rules.create_draft(
+            self.conn, guild_id=1, channel_id=4242, admin_channel_id=1,
+            admin_role_id=7, budget=100, min_picks=1, max_picks=3, base_timer=120,
+            players=[(11, "Larry"), (22, "Alex")],
+        )
+
+    def draft(self):
+        return rules.get_draft(self.conn, self.draft_id)
+
+    async def test_safe_send_reports_refusal_instead_of_raising(self):
+        self.assertFalse(await ui.safe_send(self.channel, "hello"))
+        self.assertTrue(await ui.safe_send(FakeChannel(1), "hello"))
+        self.assertFalse(await ui.safe_send(None, "hello"))
+
+    async def test_the_clock_still_starts_when_the_bot_cannot_post(self):
+        events = rules.start_draft(self.conn, self.draft())
+        await ui.announce(self.bot, self.draft_id, events)      # must not raise
+
+        live = self.draft()
+        self.assertEqual(live["status"], "active")
+        self.assertIsNotNone(live["turn_deadline"],
+                             "the turn must be on the clock even if nobody could be told")
+        self.assertIn(self.draft_id, self.bot.timers.tasks)
+        self.bot.timers.cancel_all()
+
+    async def test_a_pick_survives_a_failed_announcement(self):
+        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        _, events = rules.make_pick(self.conn, self.draft(), 11, 1, "Garchomp", 12)
+        await ui.announce(self.bot, self.draft_id, events)      # must not raise
+
+        picks = rules.round_picks(self.conn, self.draft_id, 1)
+        self.assertEqual([p["pokemon"] for p in picks], ["Garchomp"])
+        self.assertEqual(rules.current_player(self.conn, self.draft())["display_name"], "Alex")
+        self.assertIsNotNone(self.draft()["turn_deadline"])
+        self.bot.timers.cancel_all()
+
+    async def test_a_timer_expiry_still_skips_when_the_bot_cannot_post(self):
+        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        token = (self.draft()["current_round"], self.draft()["current_turn_index"])
+        await self.bot.on_timer_expired(self.draft_id, token)
+
+        larry = rules.get_player(self.conn, self.draft_id, 11)
+        self.assertEqual(larry["current_timer"], 60)
+        self.assertEqual(rules.current_player(self.conn, self.draft())["display_name"], "Alex")
+        self.bot.timers.cancel_all()

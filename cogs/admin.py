@@ -92,10 +92,7 @@ class AdminCog(commands.Cog):
         # in the template reads them from there.
         ui.resync_sheet(self.bot, draft_id)
 
-        await interaction.followup.send(
-            f"✅ Draft **#{draft_id}** created in {interaction.channel.mention}.", ephemeral=True
-        )
-        await interaction.channel.send(
+        posted = await ui.safe_send(interaction.channel, 
             f"📋 **A new draft has been set up!**\n"
             f"• Budget: **{budget}** points\n"
             f"• Picks: **{min_picks}–{max_picks}** per player ({max_picks} rounds)\n"
@@ -107,6 +104,11 @@ class AdminCog(commands.Cog):
             f"**Draft order**\n{order}\n\n"
             f"Settings can still be changed with `/edit`. "
             f"An admin starts the draft with `/draft`."
+        )
+        note = "" if posted else ui.permission_hint(interaction.channel)
+        await interaction.followup.send(
+            f"✅ Draft **#{draft_id}** created in {interaction.channel.mention}.{note}",
+            ephemeral=True,
         )
 
     # ---- /edit ----------------------------------------------------------
@@ -150,15 +152,21 @@ class AdminCog(commands.Cog):
         self.require_admin(interaction, draft)
 
         events = rules.start_draft(self.bot.conn, draft)
-        await interaction.response.send_message("✅ The draft has started.", ephemeral=True)
 
-        await interaction.channel.send(
+        posted = await ui.safe_send(
+            interaction.channel,
             f"🚨 **THE DRAFT HAS BEGUN!** 🚨\n"
             f"{rules.player_count(self.bot.conn, draft['id'])} players · "
             f"{draft['max_picks']} rounds · **{draft['budget']}** points each.\n"
-            f"`/edit` is now locked. `/pick` and `/queuepick` are open."
+            f"`/edit` is now locked. `/pick` and `/queuepick` are open.",
         )
+        # announce() starts the first timer whether or not it can post, so
+        # the draft is never left active with nobody on the clock.
         await ui.announce(self.bot, draft["id"], events, channel=interaction.channel)
+
+        note = "" if posted else ui.permission_hint(interaction.channel)
+        await interaction.response.send_message(
+            f"✅ The draft has started.{note}", ephemeral=True)
 
     # ---- /canceldraft ---------------------------------------------------
 
@@ -178,8 +186,11 @@ class AdminCog(commands.Cog):
         rules.cancel_draft(self.bot.conn, draft["id"])
         await interaction.response.send_message(
             f"🛑 Draft **#{draft['id']}** has been cancelled. Its picks and rosters are kept "
-            f"in the database, and this channel is free for a new `/setup`."
+            f"in the database, and this channel is free for a new `/setup`.",
+            ephemeral=True,
         )
+        await ui.safe_send(interaction.channel,
+                           f"🛑 Draft **#{draft['id']}** has been cancelled by an admin.")
 
     # ---- /sync ----------------------------------------------------------
 

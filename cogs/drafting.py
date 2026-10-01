@@ -235,10 +235,11 @@ class DraftingCog(commands.Cog):
         # A makeup pick never changes whose turn it is, so it is announced on
         # its own rather than going through the turn machinery.
         player = rules.get_player(self.bot.conn, draft["id"], interaction.user.id)
-        await interaction.channel.send(
+        await ui.safe_send(
+            interaction.channel,
             f"✅ **{player['display_name']}** made their **Round {round} makeup pick**: "
             f"**{pick['pokemon']}** for **{cost}** points. "
-            f"*(The current turn is unaffected.)*"
+            f"*(The current turn is unaffected.)*",
         )
         ui.sync_pick_to_sheet(self.bot, draft["id"], {
             "pick_order": pick["pick_order"], "round": pick["round"],
@@ -284,8 +285,9 @@ class DraftingCog(commands.Cog):
                 f"changed: ~~{result['old_pokemon']} ({result['old_cost']})~~ → "
                 f"**{result['new_pokemon']} ({result['new_cost']})**."
             )
-        await interaction.channel.send(
-            f"{announcement}\nBudget remaining: **{result['player']['budget_remaining']}**."
+        await ui.safe_send(
+            interaction.channel,
+            f"{announcement}\nBudget remaining: **{result['player']['budget_remaining']}**.",
         )
         # An edit can free up the old Pokémon, so push the whole picture.
         ui.resync_sheet(self.bot, draft["id"])

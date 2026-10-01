@@ -99,13 +99,11 @@ class ExtrasCog(commands.Cog):
             )
             return
 
-        try:
-            await admin_channel.send(summary)
-        except discord.DiscordException:
-            log.exception("could not post the trade to the admin channel")
+        if not await ui.safe_send(admin_channel, summary):
             await interaction.followup.send(
                 f"⚠️ Trade #{record['trade_number']} was saved, but it could not be posted to "
-                f"{admin_channel.mention}. Tell an admin directly.",
+                f"{admin_channel.mention} — I may not have permission to post there. "
+                f"Tell an admin directly.",
                 ephemeral=True,
             )
             return
@@ -156,15 +154,15 @@ class ExtrasCog(commands.Cog):
         await interaction.followup.send(report, ephemeral=True)
 
         draft_channel = self.bot.get_channel(draft["channel_id"])
-        if draft_channel is not None:
-            await draft_channel.send(
-                f"🤝 **Trade #{trade_id} approved!**\n"
+        await ui.safe_send(
+            draft_channel,
+            (f"🤝 **Trade #{trade_id} approved!**\n"
                 f"• **{proposer['display_name']}** gives up: {drops}\n"
                 f"• **{proposer['display_name']}** receives: {gets}\n"
-                + (f"• Partner: **{partner['display_name']}**\n" if partner else
-                   "• Traded with the undrafted pool\n")
-                + f"Rosters and budgets have been updated."
-            )
+             + (f"• Partner: **{partner['display_name']}**\n" if partner else
+                "• Traded with the undrafted pool\n")
+             + "Rosters and budgets have been updated."),
+        )
 
         # A trade moves Pokémon between rosters, so push the whole picture.
         ui.resync_sheet(self.bot, draft["id"])
