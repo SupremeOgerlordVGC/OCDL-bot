@@ -16,7 +16,7 @@ requirement.
 5. [Hosting on an Oracle Cloud VM](#hosting-on-an-oracle-cloud-vm)
 6. [Backups](#backups)
 7. [Command reference](#command-reference)
-8. [Google Sheets](#google-sheets)
+8. [Documents](#documents)
 9. [Design decisions](#design-decisions)
 10. [Tests](#tests)
 11. [Troubleshooting](#troubleshooting)
@@ -25,19 +25,28 @@ requirement.
 
 ## How it works
 
-**One draft per channel.** Every command looks up its draft using the channel it
-was typed in. `#vgc` and `#national-dex-singles` can run different drafts at the
-same time, with different players, budgets and rosters, and they can never see
-each other's data. The same person can play in both with separate teams.
+**A league, one or two pools.** You create a league by running `/setup` in the
+channel where you want trades approved — that becomes the league's **admin
+channel**. The draft itself happens in the **pool channel** (or two) you name
+in the command. League names are unique per server, so one admin channel can
+look after several leagues at once.
 
-**SQLite is the source of truth.** Picks, budgets, timers and trades are written
-to `draft.db` before anything is announced. Google Sheets is updated afterwards
-and in the background, so if Google is slow or down the draft simply carries on.
+**Pools draft independently.** Two pools run at the same time, each with its
+own snake order, turn and timers, and the same Pokémon may be taken once in
+each. Only the draft is split: the season schedule can pair coaches across
+pools.
 
-**Snake order is generated from the player list.** Round 1 runs 1→N, round 2 runs
-N→1, and so on, for any number of players from 2 to 16.
+**SQLite is the source of truth.** Picks, budgets, timers and trades are
+written to `draft.db` before anything is announced. The spreadsheet is updated
+afterwards and in the background, so if Google is slow or down the draft simply
+carries on.
 
----
+**Snake order is generated from the player list.** Round 1 runs 1→N, round 2
+runs N→1, and so on, for any number of players from 2 up.
+
+**Documents are optional.** A league can run with no document at all, with a
+simple tiering sheet, or with the full league template — see
+[Documents](#documents).
 
 ## Project layout
 
@@ -47,13 +56,18 @@ N→1, and so on, for any number of players from 2 to 16.
 | `config.py` | Every setting you might want to change, in one place. |
 | `database.py` | The SQLite schema, connection and backup helpers. |
 | `draft.py` | **All the draft rules.** No Discord code, so it is easy to test. |
-| `timers.py` | One countdown per active draft. |
+| `timers.py` | One countdown per active pool. |
 | `sheets.py` | Optional Google Sheets reading and writing. |
 | `ui.py` | Turns draft events into Discord messages. |
-| `cogs/admin.py` | `/setup` `/edit` `/draft` `/canceldraft` `/sync` `/backup` `/inspectsheet` |
+| `cogs/admin.py` | `/setup` `/edit` `/draft` `/canceldraft` `/archive` `/draft-moderator` `/postschedule` `/sync` `/inspectsheet` `/backup` |
 | `cogs/drafting.py` | `/pick` `/queuepick` `/makeuppick` `/editpick` `/status` `/progress` `/roster` |
-| `cogs/extras.py` | `/trade` `/approvetrade` `/rejecttrade` `/trades` `/search` `/available` |
-| `tests/` | Tests for the rules and for the Discord layer. |
+| `cogs/extras.py` | `/trade` `/approvetrade` `/rejecttrade` `/trades` `/subrequest` `/substitute` `/search` `/available` |
+| `tests/` | Tests for the rules, the sheet mapping and the Discord layer. |
+
+The database keeps leagues and pools separate, and a SQL view called
+`pool_view` flattens a pool together with its league's settings — which is why
+the rules can read `ctx["budget"]` or `ctx["max_picks"]` without joining
+anything by hand.
 
 `draft.py` returns lists of plain dictionaries called **events**
 (`{"type": "skipped", ...}`). `ui.py` turns each one into a message. That split
@@ -241,148 +255,190 @@ sudo systemctl start draftbot
 
 | Command | Who | What it does |
 |---|---|---|
-| `/setup` | Manage Server | Creates a draft in this channel. Collects budget, min/max picks, moderator role, base timer, admin channel, players, max trades per player, and an optional sheet link. Does **not** start the draft. |
-| `/edit` | Moderator | Changes budget, min picks, max picks or sheet link. Locked once `/draft` runs. |
-| `/draft` | Moderator | Starts the draft, pings the first player and starts their timer. |
-| `/canceldraft` | Moderator | Cancels this channel's draft. Data is kept, not deleted. |
+| `/setup` | Moderator | Creates a league **in the admin channel you run it from**. Takes a name, mode, pool channel(s) with their own player lists, budgets, pick limits, timer, trade cap and an optional document. Does **not** start the draft. |
+| `/edit` | Moderator | Changes budgets, pick limits, trade cap or the document link. Locked once `/draft` runs. |
+| `/draft` | Moderator | Run in a pool's channel: starts that pool, pings the first player and begins their timer. |
+| `/draft-moderator` | Administrator | Grants or revokes a role's access to every moderator command on the server. Run with no options to list the current roles. |
+| `/canceldraft` | Moderator | Cancels a league by name. Data is kept, not deleted. |
+| `/archive` | Moderator | Closes a finished league and frees its channels. Draft-only leagues do this themselves. |
 
 Players are given as @mentions in draft order:
-`players: @Larry @Alex @Sarah` — between 2 and 16 of them.
+`players: @Larry @Alex @Sarah`. The first mention is coach 1, which is also
+their roster block on the spreadsheet. A second pool needs both
+`draft_channel_b` and `players_b`, and a template.
+
+Nobody can use the moderator commands until an Administrator has run
+`/draft-moderator`. Administrators and the server owner always have access.
 
 ### Drafting
 
 | Command | Who | What it does |
 |---|---|---|
-| `/pick round pokemon cost` | Player on the clock (or a moderator) | Makes a pick, announces it, and moves to the next player. Pokémon names autocomplete when a sheet is linked. |
-| `/queuepick round pokemon [costs]` | Any player | Queues up to 5 Pokémon in priority order for one of your upcoming turns. `pokemon: Garchomp, Heatran, Skarmory` |
-| `/makeuppick round pokemon cost` | Any player | Resolves a round you were skipped in. Does not change whose turn it is. |
-| `/editpick round pokemon cost [player]` | Own picks; moderators for anyone | Replaces a pick, correcting roster, budget, availability and history. A moderator can also use it to *add* a pick for a round the player has nothing recorded in. |
+| `/pick round pokemon cost [tera_captain]` | Player on the clock (or a moderator) | Makes a pick, announces it, and moves to the next player. Names autocomplete when a document is linked. |
+| `/queuepick round pokemon [costs] [tera]` | Any player | Queues up to 5 Pokémon in priority order for one of your upcoming turns. `tera` is a matching yes/no list. |
+| `/makeuppick round pokemon cost [tera_captain]` | Any player | Resolves a round you were skipped in. Does not change whose turn it is. |
+| `/editpick round pokemon cost [tera_captain] [player]` | Own picks; moderators for anyone | Replaces a pick, correcting roster, budgets, availability and history. A moderator can also use it to *add* a pick for a round with nothing recorded. |
 
 ### Looking things up
 
-`/status`, `/progress [round]` and `/roster [player]` all reply **only to you**,
-so nobody spams the channel. `/progress` with no round shows every completed
+`/status`, `/progress [round]` and `/roster [player]` reply **only to you**, so
+nobody spams the channel. `/progress` with no round shows every completed
 round; with a round it shows that round's picks in true chronological order.
 
-### Trades
+### Trades and substitutions
+
+Both are proposed in a pool channel and sent to the league's admin channel.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/trade drops gets [partner]` | Any player | Proposes a trade (up to 5 each way) and sends it to the admin channel with a trade ID. With `partner` it is a player-to-player swap; without, a free-agency move. Nothing changes yet. |
-| `/approvetrade trade_id [channel]` | Moderator | Applies the trade to rosters and budgets. A trade can only be approved once. |
-| `/rejecttrade trade_id [channel]` | Moderator | Rejects it. Nothing changes. |
-| `/trades [channel]` | Anyone | Lists this draft's trades and their status. |
+| `/trade drops gets [partner]` | Any player | Proposes a trade (up to 5 each way). With `partner` it is a player-to-player swap; without, a free-agency move against the undrafted pool. Nothing changes yet. |
+| `/approvetrade trade_id [name]` | Moderator | Applies the trade to rosters and budgets. A trade can only be approved once. |
+| `/rejecttrade trade_id [name]` | Moderator | Rejects it. Nothing changes. |
+| `/trades [name]` | Anyone | Lists a league's trades and their status. |
+| `/subrequest reason` | Anyone | Asks to leave the draft (if you are in it) or to join it (if you are not). Posted for the moderators. |
+| `/substitute out into` | Moderator | Hands a seat over: the roster, budgets and any makeup picks stay, and only the person changes. |
 
-Trade IDs count from 1 **per draft**, so `#league-a` and `#league-b` each have
-their own trade #1. Approve from the admin channel by naming the draft channel:
-`/approvetrade trade_id:1 channel:#league-a`.
+Trades and substitution requests are numbered **per league**, so an admin
+channel shared by several leagues never has two #1s in it. Add `name:` when
+that channel runs more than one league.
 
-### Google Sheets
+Trades are a full-season feature; a draft-only league refuses them.
 
-`/search`, `/available`, `/sync` and `/inspectsheet` need a linked sheet — see
-below.
+### Season
 
----
-
-## Google Sheets
-
-Sheets support is **optional**. A draft with no sheet works completely
-normally, and a sheet that stops responding never blocks a pick.
-
-### What the bot reads
-
-**`Pokédex`** — column **E** is the Pokémon name used in every command, column
-**K** is its cost. Costs are read live at draft time, so a league that copies
-the template and re-prices it works with no code changes.
-
-A Pokémon is **banned** — not draftable — when its cost cell is blank, holds
-text (`B`, `Banned`, `-`, …), or holds a placeholder number listed in
-`config.BANNED_COST_VALUES` (99 and 999 by default).
-
-The **`Tier List`** tab is deliberately *not* read. It is generated from the
-same Pokédex costs, so reading both could only ever produce disagreement.
-(Checked against the template: 848 draftable Pokémon, zero disagreements
-between the two tabs.)
-
-### What the bot writes
-
-Only two things. Everything else in the document is formulas that react.
-
-| Where | What | Why |
+| Command | Who | What it does |
 |---|---|---|
-| `Coaches!B2:B17` | Player usernames, in draft order | Every other tab refers back to these cells, so writing here updates coach names everywhere |
-| `Rosters` — leftmost column of each coach block | The Pokémon name for each round | The columns either side hold image and cost formulas driven by that name |
+| `/postschedule week name` | Moderator | Posts that week's matchups into the channel you run it in, pinging both players. Needs a template and full-season mode. Never automatic. |
+| `/sync` | Moderator | Rewrites the coach list and every roster block from the database. |
+| `/inspectsheet` | Moderator | Reports the document's structure without changing anything. |
+| `/backup` | Moderator | Saves a timestamped copy of the database. |
 
-The 16 roster blocks are listed in `config.SHEET_LAYOUT["roster_blocks"]` in
-coach order: `C4, J4, Q4, X4, C19, …, X49`. Each is 12 rows tall, one row per
-round, and each row is merged across four columns — so the bot writes the
-leftmost cell only, and never touches the image column to its left or the
-cost column to its right.
+## Documents
 
-**How a block is filled.** A Pokémon the coach drafted sits in its own round's
-row, so the block reads like the draft did. A Pokémon dropped in a trade simply
-leaves its row empty, and anything gained drops into the first free row,
-repeating until the block is full. If trades ever leave a roster with more
-Pokémon than a block has rows, `/sync` says whose roster no longer fits and by
-how much — the database still holds everything, and `/roster` still shows it
-all.
+A league can run three ways, and you pick at most one document.
 
-Because each block is 12 rows tall, **a sheet-linked draft can have at most 12
-rounds**. `/setup` refuses a larger `max_picks` rather than silently losing
-picks off the bottom of a block.
+| | No document | Tiering sheet | Template |
+|---|---|---|---|
+| Draft, timers, makeup picks, trades | ✅ | ✅ | ✅ |
+| Prices checked, names autocompleted | — | ✅ | ✅ |
+| `/search`, `/available` | — | ✅ | ✅ |
+| Tera Captains | ✅ (you type the price) | ✅ | ✅ |
+| Rosters written to the sheet | — | — | ✅ |
+| Settings read from the sheet | — | — | ✅ |
+| Two pools, `/postschedule` | — | — | ✅ |
 
-### What it adds in Discord
+A sheet that stops responding never blocks a pick — the draft carries on using
+the local database.
 
-* Pokémon names **autocomplete** in `/pick`, `/makeuppick` and `/editpick`,
-  showing the cost and offering only undrafted, unbanned Pokémon.
-* `/pick` checks the cost against the Pokédex, and rejects banned Pokémon.
-* `/search` reports whether a Pokémon is drafted, banned, or available.
-* `/available` lists undrafted Pokémon at a given point value.
-* `/sync` rewrites the coach names and every roster block from the database.
+### A tiering sheet
 
-### Connecting one
+The simplest useful document, and nothing fancy is required:
+
+| | A | B | C |
+|---|---|---|---|
+| **1** | *(headers, ignored)* | | |
+| **2** | `Great Tusk` | `18` | `17` |
+| **3** | `Garchomp` | `17` | |
+
+Column **A** is the Pokémon name, **B** its price, **C** its Tera price. Reading
+starts at row 2. That is the one shape the bot understands, and it is also how
+it reads prices out of the full template.
+
+A Pokémon is **banned** — not draftable at all — when column B is blank, holds
+text (`B`, `Banned`, `-`, …) or holds a placeholder number listed in
+`config.BANNED_COST_VALUES` (99 and 999 by default). A Pokémon with no Tera
+price is **Tera banned**: draftable, but never a Tera Captain.
+
+### The league template
+
+`/setup` reads the league's own configuration from the template, through its
+**named ranges** rather than fixed cells, so the template can move them:
+
+| Named range | Used for |
+|---|---|
+| `Budget` | Points each coach may spend |
+| `TeraBudget` + `TeraFormat` | Tera points, and whether it is a Tera format at all |
+| `NumPools` | 1 or 2 |
+| `TieringSheet` | **Which tab holds the price list** |
+| `SeasonWeeks` | Season length |
+
+Because the template declares its own budget, `/setup` does not ask for one —
+and refuses an option that contradicts the sheet, so the two can never drift.
+`TieringSheet` means a league can re-price simply by pointing at a different
+tiering tab.
+
+The bot **writes only two things**; everything else in the document is formulas
+that react to them:
+
+| Where | What |
+|---|---|
+| `Coaches!B` and `Coaches!Y` | Usernames and pool letters. Every other tab refers back to these cells, so writing here updates coach names everywhere. |
+| The leftmost column of each roster block | One Pokémon name per round — plus the Tera Captain tick box in a Tera format. |
+
+The 20 roster blocks are listed in `config.SHEET_LAYOUT["roster_blocks"]` in
+coach order. Each is 12 rows tall, one row per round, and the bot writes only
+the name cell and (in a Tera format) the tick box three columns to its right —
+never the image formula to the left or the cost formula to the right.
+
+Because each block is 12 rows tall, **a template-linked draft can have at most
+12 rounds**, and `/setup` refuses more rather than silently losing picks.
+
+### Tera Captains
+
+A Tera format is turned on by a non-zero Tera budget. Each team may have up to
+`config.MAX_TERA_CAPTAINS` captains (3) and needs no minimum.
+
+A captain is charged its **Tera price from both budgets**, and that price
+*replaces* the normal one — it is not a surcharge, and it can be lower. With a
+115 budget and a 28 Tera budget, and Great Tusk at 18 / Tera 17:
+
+| Pick | Budget | Tera budget |
+|---|---|---|
+| Great Tusk, normal | 115 − 18 = **97** | **28** (untouched) |
+| Great Tusk, captain | 115 − 17 = **98** | 28 − 17 = **11** |
+
+That is exactly what the template's own formula does: the Rosters tab subtracts
+every row, and the Tera budget subtracts only the ticked ones. In a Tera format
+the bot writes to the **`Tera Rosters`** tab; otherwise to **`Rosters`**.
+
+### Connecting a document
 
 1. In the [Google Cloud console](https://console.cloud.google.com/), create a
    project and enable the **Google Sheets API** and **Google Drive API**.
 2. Create a **service account**, then **Keys → Add key → JSON**. Save the file
    as `credentials.json` next to `bot.py`.
-3. Open the JSON file and copy the `client_email` value.
-4. Share your copy of the spreadsheet with that email address as **Editor**.
-5. Link the sheet with `/setup` or `/edit`, then restart the bot.
+3. Open that file and copy the `client_email` value.
+4. **Make your own copy** of the template (File → Make a copy), then share the
+   copy with that email address as **Editor**.
+5. Link it in `/setup` with `template_link:` or `tiering_link:` — one or the
+   other, never both.
+6. Run **`/inspectsheet`**. It reads only, and reports the tabs, the settings it
+   found, which tiering tab is in use, how many Pokémon are draftable versus
+   banned, how many may be captains, and which roster tab picks would go to.
 
-### Before the bot writes anything
-
-`config.SHEETS_WRITE_ENABLED` is **`False`** by default. While it is off the
-bot reads the Pokédex (for autocomplete, `/search`, `/available` and cost
-checks) but never writes. Confirm the layout first:
-
-1. Run **`/inspectsheet`**. It reports the tabs, how many Pokémon are
-   draftable versus banned, the point values in use, and the roster block
-   layout — without changing anything.
-2. If anything disagrees, correct `SHEET_LAYOUT` in `config.py`.
-3. Then set `SHEETS_WRITE_ENABLED = True` and restart.
-
-Nothing about the layout is guessed. If a tab named in `SHEET_LAYOUT` is
-missing, the bot says exactly which one and lists what the document actually
-contains, rather than writing to the wrong place.
-
-### Budgets
-
-The template works each coach's remaining budget out from whatever is on
-their roster (`=115-SUM(...)` in the stock template). The bot keeps its own
-budget the same way, so the two agree — including after trades. If your copy
-uses a different starting budget, set the same number in `/setup`.
+If a tab named in `SHEET_LAYOUT` is missing, the bot says exactly which one and
+lists what the document actually contains, rather than writing to the wrong
+place. Set `config.SHEETS_WRITE_ENABLED = False` for a dry run: everything else
+keeps working and the bot simply stops writing.
 
 ## Design decisions
 
 Where the requirements left room for interpretation, this is what was chosen.
 All of it is easy to change in `config.py` or `draft.py`.
 
+**One league, one or two pools.** The league owns the name, budgets, document,
+mode and admin channel; a pool owns the turn pointer, timer and players. Two
+pools require a template, because the pool assignment lives on its Coaches tab.
+Pool A takes roster blocks 1–10 and pool B 11–20, which matches the "Pool A" and
+"Pool B" headings on the Rosters tab and caps a two-pool league at ten coaches
+each. A single pool can use all 20.
+
 **When the draft ends.** After `max_picks` rounds, **or** as soon as no player
 can afford another pick — whichever comes first. A player who has filled their
 roster or cannot afford the cheapest possible Pokémon
 (`config.MINIMUM_PICK_COST`) is passed over: no skip, no makeup pick, no timer
-penalty, and the draft simply moves on.
+penalty. A `draft_only` league archives itself at that point and frees its
+channels; a `full_season` league stays open for trades and the schedule.
 
 **Skips, makeup picks and timers** follow this sequence:
 
@@ -393,67 +449,76 @@ missed pick → turn skipped → timer halved (unless a queue was set)
 ```
 
 Each forfeited turn creates a fresh makeup pick for the round just lost, so a
-player never accumulates more than one outstanding debt — and a player who
-keeps ignoring it keeps being skipped, which is what stops one absent drafter
-stalling everybody else. Making any makeup pick puts them straight back to
-normal. A turn is only ever halved **once**, even when the expiry and the
-forfeit land together, so 120 → 60 → 30 → 15 stays one step per turn.
+player never carries more than one outstanding debt — and a player who keeps
+ignoring it keeps being skipped, which stops one absent drafter stalling
+everybody. Making any makeup pick puts them straight back to normal. A turn
+costs at most **one** halving, so 120 → 60 → 30 → 15 stays one step per turn.
 
 **At a snake round boundary, two lost rounds cost one halving.** The player at
-each round's turn picks twice in a row — seat 16 picks last in round 1 and
-first in round 2. If they are skipped on the first of those, their makeup
-deadline (their next turn) arrives immediately, so both rounds are lost. The
-pair only ever reduces their timer **once**, because they never had a moment
-in which to use the makeup pick. And if the reason they were skipped was a
-queue that got sniped, the pair costs them **nothing** — the timer is left
-alone for both rounds.
+each round's turn picks twice in a row — seat 16 picks last in round 1 and first
+in round 2. Skipped on the first of those, their makeup deadline arrives
+immediately, so both rounds are lost; the pair reduces their timer only once,
+because they never had a moment in which to use the makeup. If the reason they
+were skipped was a queue that got sniped, the pair costs them **nothing**.
 
 **An exhausted queue never costs a player their timer.** If every Pokémon they
 queued has already been drafted, the bot says so publicly and the normal timer
-runs so they can still pick by hand. If that timer then expires they are
-skipped and owe a makeup pick as usual, but their timer is **not** reduced and
-their skip count does not increase.
+runs so they can still pick by hand. If that timer expires they are skipped and
+owe a makeup pick as usual, but their timer is not reduced and their skip count
+does not increase.
 
-**Trades are judged by admins, not by the bot.** `/trade` records what was
+**Tera Captains are priced from the Tera column, against both budgets.** The
+Tera price replaces the normal one rather than adding to it, and may be lower.
+A Pokémon with no Tera price cannot be a captain. Maximum three per team, no
+minimum. This works with no document at all, since `/pick` carries the price —
+a mistake is fixed with `/editpick`.
+
+**Trades are judged by moderators, not by the bot.** `/trade` records what was
 asked for and sends it to the admin channel; the only hard limits are the size
 of each side and the per-player cap from `/setup` (`max_trades`, 0 for
 unlimited). Anything that looks wrong — trading a Pokémon you do not own, or
-claiming one that is already drafted — is attached to the admin's message as a
-warning rather than blocking the proposal. With a `partner` it is a two-player
-swap; without one it is a free-agency move against the undrafted pool, and the
-cost of anything picked up is filled in from the Pokédex.
+claiming one already drafted — is attached to the moderator's message as a
+warning rather than blocking the proposal.
 
 **History and rosters are separate.** The `picks` table is the permanent record
 of who drafted what and when — trades never rewrite it, so `/progress` always
 shows what really happened. The `rosters` table is current ownership, and it is
-what decides availability, so a Pokémon dropped in a trade correctly becomes
-draftable again. It is also what gets written to the spreadsheet, which is why
-the sheet's budget column stays right after a trade.
+what decides availability, so a Pokémon dropped in a trade becomes draftable
+again. It is also what gets written to the spreadsheet, which is why the sheet's
+budget column stays right after a trade. A Pokémon gained in a trade has no
+round of its own, so it fills the first free row in the block.
 
-**Names are stored exactly as the Pokédex spells them.** Whatever a player
-types, the bot resolves it against the sheet and records the sheet's own
-spelling. The roster block feeds VLOOKUPs for the Pokémon image and its cost,
-and the coach's budget is worked out from those — so a name that did not match
-the Pokédex would leave the sheet unable to price the pick. Without a linked
-sheet the player's own spelling is kept.
+**Names are stored exactly as the tiering list spells them.** Whatever a player
+types, the bot resolves it against the list and records the list's own spelling.
+The roster block feeds VLOOKUPs for the image and the price, and the coach's
+budget is worked out from those — so a name that did not match would leave the
+sheet unable to price the pick. Without a document the player's spelling is kept.
 
-**Admins can create picks, not just edit them.** `/editpick` on a round where
-the player has nothing recorded will add the pick, and settle any makeup pick
-they owed for that round. Players themselves get pointed at `/makeuppick`
-instead.
+**A substitution hands over the seat, not the team.** The roster, budgets, draft
+position and any makeup picks all stay exactly as they were; only the person
+changes. Their timer and skip count reset to the base, because a replacement
+should not inherit somebody else's penalties — and a moderator has to approve
+the swap, so that cannot be used to dodge a shrinking clock.
 
-**A restart never skips anybody.** Turn deadlines are stored in the database.
-If the bot was offline when a deadline passed, the current player's timer is
+**Moderator roles are per server, not per league.** One set of people can look
+after every league running on it. Administrators and the server owner always
+have access.
+
+**Moderators can create picks, not just edit them.** `/editpick` on a round
+where the player has nothing recorded will add the pick and settle any makeup
+pick they owed for it. Players themselves get pointed at `/makeuppick`.
+
+**A restart never skips anybody.** Turn deadlines are stored in the database. If
+the bot was offline when a deadline passed, the current player's timer is
 restarted from scratch and the channel is told, because downtime is the host's
 fault and not the drafter's.
 
-**The bot will not run a clock nobody can see.** If it cannot post in the draft
+**The bot will not run a clock nobody can see.** If it cannot post in a pool's
 channel — usually a missing **View Channel** or **Send Messages** permission —
 the turn is paused rather than timed, because skipping players for a permission
-problem and halving their timers on the way would be unfair. Picks, rosters and
-budgets are all still recorded normally. Grant the permission and restart the
-bot: the paused turn opens again and the player is pinged. The log says exactly
-which channel is the problem.
+problem and halving their timers would be unfair. Picks, rosters and budgets are
+still recorded normally. Grant the permission and restart the bot: the paused
+turn opens again and the player is pinged.
 
 ## Tests
 
@@ -461,18 +526,25 @@ which channel is the problem.
 python3 -m unittest discover -s tests -v
 ```
 
-107 tests, no Discord connection and no network needed. They cover snake order
-for every player count from 2 to 16, round transitions, channel isolation,
-timer halving and the makeup cascade, the snake-boundary case (one halving for
-two lost rounds, none at all if the queue was sniped), queued picks and the
+146 tests, no Discord connection and no network needed. They cover snake order
+for every player count, round transitions, channel and pool isolation, timer
+halving and the makeup cascade, the snake-boundary case (one halving for two
+lost rounds, none if the queue was sniped), queued picks and the
 exhausted-queue exception, duplicates, wrong rounds, budgets, pick limits,
-ending early when everyone is broke, trade caps, admin-created picks, roster
-blocks after trades, Pokédex name resolution and banned Pokémon, behaviour
-during a Google outage, restart recovery, the spreadsheet cell mapping, and a
-behaviour when the bot is refused permission to post, and a randomised
-full-draft simulation that checks the invariants that matter
-(nobody owns the same Pokémon twice, budgets never go negative, spent +
-remaining always equals the starting budget, pick order has no gaps).
+ending early when everyone is broke, Tera Captain budgets and the three-captain
+cap, Tera-banned Pokémon, two-pool independence, league name uniqueness, trade
+caps, substitutions, draft-only archiving, moderator-created picks, roster
+blocks after trades, price-list name resolution, behaviour during a Google
+outage, behaviour when the bot is refused permission to post, restart recovery,
+the spreadsheet cell mapping, the arguments actually sent to the sheet, and a
+randomised full-draft simulation that checks the invariants that matter —
+nobody owns the same Pokémon twice, budgets never go negative, spent +
+remaining always equals the starting budget, and pick order has no gaps.
+
+The roster and Tera cell mapping has also been verified against the real
+template: all 480 cells land in the right coach's block, every tick box is a
+genuine check box, and the image and cost formulas either side are never
+touched.
 
 ## Troubleshooting
 
@@ -480,14 +552,19 @@ remaining always equals the starting budget, pick order has no gaps).
 `DEV_GUILD_ID` in `.env` to your server ID and restart for instant registration.
 Also check the bot was invited with the `applications.commands` scope.
 
-**"There is no draft in this channel."** Commands only ever see the draft in the
-channel they were typed in. Run them in the draft's own channel, or use the
-`channel:` option where one is offered.
+**"There is no draft in this channel."** Most commands see only the pool in the
+channel they were typed in. Run them in that pool's channel, or use the `name:`
+option where one is offered. Remember that `/setup` is run in the **admin**
+channel and names the draft channels, not the other way round.
+
+**"This command is for draft moderators."** Nobody can run the moderator
+commands until somebody with the **Administrator** permission has run
+`/draft-moderator role:@Your Role`.
 
 **The bot cannot post** (`403 Forbidden`, `Missing Access`). Right-click the
 channel → **Edit Channel** → **Permissions**, add the bot or its role, and allow
 **View Channel** and **Send Messages**. Do the same for the admin channel, since
-trades are posted there. Error code 50001 means the bot cannot even see the
+trades and substitution requests are posted there. Error code 50001 means the bot cannot even see the
 channel; 50013 means it can see it but not post. While this is unresolved the
 turn clock stays paused, so nobody is skipped — fix it and restart the bot.
 
