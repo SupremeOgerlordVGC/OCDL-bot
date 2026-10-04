@@ -25,13 +25,30 @@ import ui
 log = logging.getLogger("draftbot.drafting")
 
 
-async def pokemon_autocomplete(interaction: discord.Interaction, current: str):
-    """Suggest Pokémon from the linked Pokédex as the user types.
+async def tiering_tab_for(bot, draft):
+    """Which tab of the document holds the price list, if any.
 
-    Only offers Pokémon that are still undrafted and not banned. Falls back
-    to an empty list whenever there is no sheet, so drafts without one just
-    get a plain text box. Must never raise: Discord shows nothing at all if
-    an autocomplete callback fails.
+    A template names its tiering tab on its Settings page; a standalone
+    tiering document is just its first sheet. The answer is cached per
+    league, because it never changes mid-draft.
+    """
+    if draft["doc_kind"] != "template":
+        return None
+
+    cached = bot.tiering_tabs.get(draft["league_id"])
+    if cached is None:
+        cached = await asyncio.to_thread(bot.sheets.tiering_tab, draft["doc_url"])
+        bot.tiering_tabs[draft["league_id"]] = cached
+    return cached
+
+
+async def pokemon_autocomplete(interaction: discord.Interaction, current: str):
+    """Suggest Pokémon from the linked price list as the user types.
+
+    Only offers Pokémon that are still undrafted and draftable. Falls back
+    to an empty list whenever there is no document, so drafts without one
+    just get a plain text box. Must never raise: Discord shows nothing at
+    all if an autocomplete callback fails.
     """
     try:
         bot = interaction.client
@@ -39,13 +56,15 @@ async def pokemon_autocomplete(interaction: discord.Interaction, current: str):
         if draft is None or not bot.sheets.enabled or not draft["doc_url"]:
             return []
 
+        tab = await tiering_tab_for(bot, draft)
         taken = rules.drafted_keys(bot.conn, draft["id"])
         matches = await asyncio.to_thread(
-            bot.sheets.suggest, draft["doc_url"], current, taken
+            bot.sheets.suggest, draft["doc_url"], current, taken, 25, tab
         )
-        return [app_commands.Choice(name=f"{entry['name']} — {entry['cost']} pts",
-                                    value=entry["name"])
-                for entry in matches]
+        return [app_commands.Choice(
+            name=f"{entry['name']} — {entry['cost']} pts"
+                 + (f" / Tera {entry['tera_cost']}" if entry["tera_cost"] is not None else ""),
+            value=entry["name"]) for entry in matches]
     except Exception:
         log.exception("Pokémon autocomplete failed")
         return []
@@ -58,50 +77,71 @@ class DraftingCog(commands.Cog):
     # ---- Google Sheets helpers -----------------------------------------
 
     async def sheet_entry(self, draft, pokemon):
-        """Look a Pokémon up in the sheet.
+        """Look a Pokémon up in the league's price list.
 
         Returns one of:
-          ("unavailable", None) - no sheet, or Google is not responding.
+          ("unavailable", None) - no document, or Google is not responding.
                                   The draft carries on with no cost check.
-          ("missing", None)     - the sheet works but has no such Pokémon.
+          ("missing", None)     - the list works but has no such Pokémon.
           ("ok", entry)         - found.
         """
         if not self.bot.sheets.enabled or not draft["doc_url"]:
             return "unavailable", None
         try:
-            entry = await asyncio.to_thread(self.bot.sheets.lookup, draft["doc_url"], pokemon)
+            tab = await tiering_tab_for(self.bot, draft)
+            entry = await asyncio.to_thread(
+                self.bot.sheets.lookup, draft["doc_url"], pokemon, tab)
         except Exception:
-            log.exception("sheet lookup failed; continuing without a cost check")
+            log.exception("price lookup failed; continuing without a cost check")
             return "unavailable", None
         return ("ok", entry) if entry else ("missing", None)
 
-    async def resolve_pokemon(self, draft, pokemon, cost):
-        """Check a Pokémon against the Pokédex and return its proper name.
+    async def resolve_pokemon(self, draft, pokemon, cost, tera_captain=False):
+        """Check a Pokémon against the price list and return its proper name.
 
-        Returning the sheet's own spelling matters: the roster block feeds
+        Returning the list's own spelling matters: the roster block feeds
         VLOOKUPs for the image and the cost, and the coach's budget is worked
-        out from those. A name that does not match the Pokédex exactly would
-        leave the sheet unable to price the pick.
+        out from those. A name that does not match exactly would leave the
+        sheet unable to price the pick.
 
-        When there is no sheet, or Google is not answering, the player's own
-        spelling is used and no cost check happens - the draft carries on.
+        A Tera Captain is checked against the Tera price, since that is what
+        it costs from both budgets.
+
+        When there is no document, or Google is not answering, the player's
+        own spelling is used and no cost check happens - the draft carries on.
         """
+        if tera_captain and not draft["tera_budget"]:
+            raise rules.DraftError(
+                "❌ This draft is not a Tera format, so there are no Tera Captains."
+            )
+
         status, entry = await self.sheet_entry(draft, pokemon)
 
         if status == "missing":
             raise rules.DraftError(
-                f"❌ **{pokemon}** is not in the Pokédex on the Google Sheet. "
+                f"❌ **{pokemon}** is not in this league's tiering list. "
                 f"Check the spelling, or use `/search`."
             )
         if status == "ok":
             if entry["banned"]:
                 raise rules.DraftError(
-                    f"❌ **{entry['name']}** is banned in this league — it has no point "
-                    f"value in the Pokédex."
+                    f"❌ **{entry['name']}** is banned in this league — it has no price "
+                    f"in the tiering list."
                 )
-            if entry["cost"] != cost:
+            if tera_captain:
+                if entry["tera_banned"]:
+                    raise rules.DraftError(
+                        f"❌ **{entry['name']}** is Tera banned — it has no Tera price, so "
+                        f"it cannot be a Tera Captain."
+                    )
+                if entry["tera_cost"] != cost:
+                    raise rules.DraftError(
+                        f"❌ Incorrect cost. As a Tera Captain **{entry['name']}** costs "
+                        f"**{entry['tera_cost']}** points, not {cost}."
+                    )
+            elif entry["cost"] != cost:
                 raise rules.DraftError(
-                    f"❌ Incorrect cost. The Pokédex lists **{entry['name']}** at "
+                    f"❌ Incorrect cost. The tiering list prices **{entry['name']}** at "
                     f"**{entry['cost']}** points, not {cost}."
                 )
             return entry["name"]
@@ -141,16 +181,17 @@ class DraftingCog(commands.Cog):
     @app_commands.describe(
         round="The round the queue is for",
         pokemon="Up to 5 Pokémon separated by commas, best first",
-        costs="Their costs, separated by commas. Optional if a Google Sheet is linked.",
+        costs="Their costs, separated by commas. Optional if a document is linked.",
+        tera="Tera formats only: yes/no for each Pokémon, e.g. `no, yes, no`",
     )
     async def queuepick(self, interaction: discord.Interaction, round: int,
-                        pokemon: str, costs: str = None):
+                        pokemon: str, costs: str = None, tera: str = None):
         draft = rules.require_active_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         names = rules.parse_pokemon_list(pokemon, config.MAX_QUEUE_LENGTH)
 
-        # Costs come from the command if given, otherwise from the Pokédex.
+        # Costs come from the command if given, otherwise from the price list.
         given = []
         if costs:
             for part in costs.split(","):
@@ -163,23 +204,42 @@ class DraftingCog(commands.Cog):
                     f"❌ You listed {len(names)} Pokémon but {len(given)} costs."
                 )
 
+        captains = [False] * len(names)
+        if tera:
+            if not draft["tera_budget"]:
+                raise rules.DraftError("❌ This draft is not a Tera format.")
+            flags = [part.strip().lower() for part in tera.split(",")]
+            if len(flags) != len(names):
+                raise rules.DraftError(
+                    f"❌ You listed {len(names)} Pokémon but {len(flags)} Tera answers."
+                )
+            for index, flag in enumerate(flags):
+                if flag in ("yes", "y", "true", "1"):
+                    captains[index] = True
+                elif flag not in ("no", "n", "false", "0", ""):
+                    raise rules.DraftError(f"❌ `{flag}` is not yes or no.")
+
         resolved = []
         unknown = []
         banned = []
         for index, name in enumerate(names):
             status, entry = await self.sheet_entry(draft, name)
+            if status == "missing":
+                raise rules.DraftError(
+                    f"❌ **{name}** is not in this league's tiering list."
+                )
             if status == "ok":
                 if entry["banned"]:
-                    banned.append(entry["name"])
+                    banned.append(f"{entry['name']} (banned)")
                     continue
-                # Store the Pokédex spelling so an automatic pick writes a
+                if captains[index] and entry["tera_banned"]:
+                    banned.append(f"{entry['name']} (Tera banned)")
+                    continue
+                # Store the list's spelling so an automatic pick writes a
                 # name the spreadsheet can actually look up.
                 names[index] = entry["name"]
-                resolved.append(given[index] if given else entry["cost"])
-            elif status == "missing":
-                raise rules.DraftError(
-                    f"❌ **{name}** is not in the Pokédex on the Google Sheet."
-                )
+                official = entry["tera_cost"] if captains[index] else entry["cost"]
+                resolved.append(given[index] if given else official)
             elif given:
                 resolved.append(given[index])
             else:
@@ -187,19 +247,19 @@ class DraftingCog(commands.Cog):
                 unknown.append(name)
 
         if banned:
-            raise rules.DraftError(
-                f"❌ Banned in this league: {', '.join(banned)}."
-            )
+            raise rules.DraftError(f"❌ Not draftable: {', '.join(banned)}.")
         if unknown:
             raise rules.DraftError(
                 f"❌ No cost known for: {', '.join(unknown)}. "
                 f"Add them with `costs: 12, 10, 8`."
             )
 
-        rules.queue_picks(self.bot.conn, draft, interaction.user.id, round, names, resolved)
+        rules.queue_picks(self.bot.conn, draft, interaction.user.id, round, names,
+                          resolved, captains)
 
-        listing = "\n".join(f"{i}. **{n}** — {c} points"
-                            for i, (n, c) in enumerate(zip(names, resolved), 1))
+        listing = "\n".join(
+            f"{i}. **{n}** — {c} points" + (" ⭐ Tera Captain" if t else "")
+            for i, (n, c, t) in enumerate(zip(names, resolved, captains), 1))
         await interaction.followup.send(
             f"📝 Queue saved for **Round {round}**:\n{listing}\n\n"
             f"When your turn arrives the bot drafts the first one that is still "
@@ -216,17 +276,18 @@ class DraftingCog(commands.Cog):
     @app_commands.describe(
         round="The round you were skipped in",
         pokemon="The Pokémon you want",
-        cost="Its draft cost in points",
+        cost="Its draft cost in points (the Tera price if it is a Tera Captain)",
+        tera_captain="Tera formats only: make this one of your Tera Captains",
     )
     @app_commands.autocomplete(pokemon=pokemon_autocomplete)
     async def makeuppick(self, interaction: discord.Interaction, round: int,
-                         pokemon: str, cost: int):
+                         pokemon: str, cost: int, tera_captain: bool = False):
         draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
-        pokemon = await self.resolve_pokemon(draft, pokemon, cost)
+        pokemon = await self.resolve_pokemon(draft, pokemon, cost, tera_captain)
         pick = rules.make_makeup_pick(self.bot.conn, draft, interaction.user.id,
-                                      round, pokemon, cost)
+                                      round, pokemon, cost, tera_captain=tera_captain)
 
         await interaction.followup.send(
             f"✅ Round {round} makeup pick recorded: **{pick['pokemon']}** for {cost} points.",
@@ -244,7 +305,8 @@ class DraftingCog(commands.Cog):
         ui.sync_pick_to_sheet(self.bot, draft["id"], {
             "pick_order": pick["pick_order"], "round": pick["round"],
             "display_name": player["display_name"], "pokemon": pick["pokemon"],
-            "cost": pick["cost"],
+            "cost": pick["cost"], "coach_number": player["coach_number"],
+            "tera_captain": bool(pick["tera_captain"]),
         })
 
     # ---- /editpick ------------------------------------------------------
@@ -273,17 +335,18 @@ class DraftingCog(commands.Cog):
         await interaction.followup.send(
             "✅ Pick added." if result["created"] else "✅ Pick updated.", ephemeral=True
         )
+        captain = " ⭐ Tera Captain" if result["tera_captain"] else ""
         if result["created"]:
             announcement = (
-                f"✏️ An admin recorded a Round {result['round']} pick for "
+                f"✏️ A moderator recorded a Round {result['round']} pick for "
                 f"**{result['player']['display_name']}**: "
-                f"**{result['new_pokemon']} ({result['new_cost']})**."
+                f"**{result['new_pokemon']} ({result['new_cost']})**{captain}."
             )
         else:
             announcement = (
                 f"✏️ **{result['player']['display_name']}**'s Round {result['round']} pick was "
                 f"changed: ~~{result['old_pokemon']} ({result['old_cost']})~~ → "
-                f"**{result['new_pokemon']} ({result['new_cost']})**."
+                f"**{result['new_pokemon']} ({result['new_cost']})**{captain}."
             )
         await ui.safe_send(
             interaction.channel,
@@ -299,7 +362,7 @@ class DraftingCog(commands.Cog):
         draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         view = rules.status_view(self.bot.conn, draft)
 
-        lines = [f"**Draft #{draft['id']} — {draft['status']}**"]
+        lines = [f"**{draft['league_name']} — Pool {draft['label']}** ({draft['status']})"]
 
         if draft["status"] == "setup":
             lines.append("The draft has not started yet. An admin starts it with `/draft`.")
@@ -319,6 +382,12 @@ class DraftingCog(commands.Cog):
                 f"reduced {player['skip_count']}×)",
                 f"• Their budget: **{player['budget_remaining']}** of {draft['budget']}",
             ]
+            if draft["tera_budget"]:
+                lines.append(
+                    f"• Their Tera budget: **{player['tera_budget_remaining']}** of "
+                    f"{draft['tera_budget']} "
+                    f"({rules.tera_captains(self.bot.conn, draft['id'], player['id'])}"
+                    f"/{config.MAX_TERA_CAPTAINS} captains)")
 
         lines.append(f"• Picks completed: **{view['total_picks']}** of {view['expected_picks']}")
         if draft["max_trades"]:
@@ -377,22 +446,33 @@ class DraftingCog(commands.Cog):
             raise rules.DraftError(f"❌ {who} not a player in this channel's draft.")
 
         view = rules.roster_view(self.bot.conn, draft, target)
-        if view["pokemon"]:
-            body = "\n".join(f"{index}. **{name}** — {cost} points"
-                             for index, (name, cost) in enumerate(view["pokemon"], 1))
+        if view["entries"]:
+            body = "\n".join(
+                f"{index}. **{name}** — {cost} points" + (" ⭐ **Tera Captain**" if tera else "")
+                for index, (name, cost, tera) in enumerate(view["entries"], 1))
         else:
             body = "*No Pokémon drafted yet.*"
 
-        await interaction.response.send_message(
-            f"**{target['display_name']}'s roster**\n{body}\n\n"
-            f"• Spent: **{view['spent']}** points\n"
-            f"• Remaining: **{view['remaining']}** of {draft['budget']}\n"
+        lines = [
+            f"**{target['display_name']}'s roster** — {draft['league_name']} "
+            f"Pool {draft['label']}",
+            body,
+            "",
+            f"• Spent: **{view['spent']}** points",
+            f"• Remaining: **{view['remaining']}** of {draft['budget']}",
             f"• Picks: **{view['count']}** / {view['max_picks']} "
-            f"(minimum {view['min_picks']})\n"
-            + (f"• Trades used: **{rules.trades_used(self.bot.conn, draft['id'], target['id'])}**"
-               f" / {draft['max_trades']}" if draft["max_trades"] else ""),
-            ephemeral=True,
-        )
+            f"(minimum {view['min_picks']})",
+        ]
+        if view["tera_format"]:
+            lines.append(
+                f"• Tera budget: **{view['tera_remaining']}** of {view['tera_budget']} "
+                f"({len(view['tera_captains'])}/{view['max_tera']} captains)")
+        if draft["max_trades"]:
+            lines.append(
+                f"• Trades used: **{rules.trades_used(self.bot.conn, draft['id'], target['id'])}**"
+                f" / {draft['max_trades']}")
+
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
 async def setup(bot):

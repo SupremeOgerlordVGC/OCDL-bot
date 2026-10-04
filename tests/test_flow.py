@@ -75,30 +75,38 @@ class FakeSheets:
     reason = "disabled for tests"
 
 
-class StubPokedex:
-    """A tiny stand-in Pokédex, so sheet-backed rules can be tested offline."""
+class StubPriceList:
+    """A tiny stand-in tiering list, so sheet-backed rules test offline."""
 
     enabled = True
     can_write = False
     reason = None
 
     ENTRIES = [
-        {"key": "garchomp", "name": "Garchomp", "cost": 12, "banned": False, "row": 2},
-        {"key": "rotom-wash", "name": "Rotom-Wash", "cost": 8, "banned": False, "row": 3},
-        {"key": "bulbasaur", "name": "Bulbasaur", "cost": None, "banned": True, "row": 4},
+        {"key": "garchomp", "name": "Garchomp", "cost": 12, "tera_cost": 11,
+         "banned": False, "tera_banned": False, "row": 2},
+        {"key": "rotom-wash", "name": "Rotom-Wash", "cost": 8, "tera_cost": None,
+         "banned": False, "tera_banned": True, "row": 3},
+        {"key": "bulbasaur", "name": "Bulbasaur", "cost": None, "tera_cost": None,
+         "banned": True, "tera_banned": True, "row": 4},
     ]
 
-    def lookup(self, doc_url, pokemon):
+    def tiering_tab(self, doc_url):
+        return "PriceList"
+
+    def lookup(self, doc_url, pokemon, tab=None):
         wanted = " ".join(str(pokemon).strip().lower().split())
         for entry in self.ENTRIES:
             if entry["key"] == wanted:
                 return entry
         return None
 
-    def suggest(self, doc_url, text, taken, limit=25):
+    def suggest(self, doc_url, text, taken, limit=25, tab=None, tera=False):
         wanted = str(text).strip().lower()
         return [e for e in self.ENTRIES
-                if not e["banned"] and e["key"] not in taken and wanted in e["key"]][:limit]
+                if not e["banned"] and e["key"] not in taken
+                and not (tera and e["tera_banned"])
+                and wanted in e["key"]][:limit]
 
 
 class FakeBot:
@@ -109,20 +117,21 @@ class FakeBot:
         self.sheets = FakeSheets()
         self.channel = channel
         self.expired = []
+        self.tiering_tabs = {}
         self.timers = timers.TurnTimers(self.on_timer_expired)
 
     def get_channel(self, channel_id):
         return self.channel if channel_id == self.channel.id else None
 
-    async def on_timer_expired(self, draft_id, token):
-        self.expired.append((draft_id, token))
-        draft = rules.get_pool(self.conn, draft_id)
+    async def on_timer_expired(self, pool_id, token):
+        self.expired.append((pool_id, token))
+        draft = rules.get_pool(self.conn, pool_id)
         if draft["status"] != "active":
             return
         if (draft["current_round"], draft["current_turn_index"]) != tuple(token):
             return      # stale timer, the turn already moved on
-        events = rules.skip_current_player(self.conn, draft_id)
-        await ui.announce(self, draft_id, events)
+        events = rules.skip_current_player(self.conn, pool_id)
+        await ui.announce(self, pool_id, events)
 
 
 class AnnouncementTests(unittest.IsolatedAsyncioTestCase):
@@ -306,14 +315,14 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class PokedexRuleTests(unittest.IsolatedAsyncioTestCase):
-    """Cost checks, banned Pokémon, and matching the sheet's own spelling."""
+class PriceListRuleTests(unittest.IsolatedAsyncioTestCase):
+    """Cost checks, banned Pokémon, Tera prices, and the sheet's spelling."""
 
     def setUp(self):
         self.conn = database.connect(":memory:")
         self.channel = FakeChannel(4242)
         self.bot = FakeBot(self.conn, self.channel)
-        self.bot.sheets = StubPokedex()
+        self.bot.sheets = StubPriceList()
         self.draft_id = make_pool(
             self.conn, 4242, [(11, "Larry"), (22, "Alex")],
             budget=100, min_picks=1, max_picks=3, base_timer=120,
@@ -342,10 +351,10 @@ class PokedexRuleTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_pokemon_is_refused(self):
         with self.assertRaises(rules.DraftError) as caught:
             await self.cog.resolve_pokemon(self.draft, "Missingno", 3)
-        self.assertIn("not in the Pokédex", str(caught.exception))
+        self.assertIn("not in this league's tiering list", str(caught.exception))
 
     async def test_a_sheet_outage_never_blocks_a_pick(self):
-        class BrokenSheets(StubPokedex):
+        class BrokenSheets(StubPriceList):
             def lookup(self, doc_url, pokemon):
                 raise RuntimeError("Google is down")
 
@@ -357,6 +366,39 @@ class PokedexRuleTests(unittest.IsolatedAsyncioTestCase):
         self.bot.sheets = FakeSheets()
         name = await self.cog.resolve_pokemon(self.draft, "Homebrew Mon", 3)
         self.assertEqual(name, "Homebrew Mon")
+
+    async def test_a_captain_is_priced_at_its_tera_cost(self):
+        tera_pool = make_pool(self.conn, 4343, [(31, "Kim"), (42, "Sam")],
+                              tera_budget=28, doc_url="https://example/sheet")
+        draft_row = rules.get_pool(self.conn, tera_pool)
+
+        # Garchomp is 12 normally but 11 as a captain.
+        self.assertEqual(await self.cog.resolve_pokemon(draft_row, "Garchomp", 12), "Garchomp")
+        self.assertEqual(
+            await self.cog.resolve_pokemon(draft_row, "Garchomp", 11, tera_captain=True),
+            "Garchomp")
+
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.cog.resolve_pokemon(draft_row, "Garchomp", 12, tera_captain=True)
+        self.assertIn("11", str(caught.exception))
+
+    async def test_tera_banned_pokemon_cannot_be_captains(self):
+        tera_pool = make_pool(self.conn, 4344, [(31, "Kim"), (42, "Sam")],
+                              tera_budget=28, doc_url="https://example/sheet")
+        draft_row = rules.get_pool(self.conn, tera_pool)
+
+        # Fine as a normal pick...
+        self.assertEqual(await self.cog.resolve_pokemon(draft_row, "Rotom-Wash", 8),
+                         "Rotom-Wash")
+        # ...but it has no Tera price.
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.cog.resolve_pokemon(draft_row, "Rotom-Wash", 8, tera_captain=True)
+        self.assertIn("Tera banned", str(caught.exception))
+
+    async def test_captains_are_refused_outside_a_tera_format(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.cog.resolve_pokemon(self.draft, "Garchomp", 11, tera_captain=True)
+        self.assertIn("not a Tera format", str(caught.exception))
 
 
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):

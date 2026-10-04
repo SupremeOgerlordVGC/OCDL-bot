@@ -30,19 +30,41 @@ def format_seconds(total):
     return f"{seconds}s"
 
 
-def has_admin_rights(interaction, draft):
-    """True if this user may run moderator commands on this draft.
+def is_moderator(bot, interaction):
+    """True if this user may run moderator commands on this server.
 
-    Three ways to qualify: the configured moderator role, the Discord
-    "Manage Server" permission, or being the server owner.
+    Three ways to qualify: the Discord **Administrator** permission, being
+    the server owner, or holding a role added with `/draft-moderator`.
+    Moderator roles are per server rather than per draft, so one set of
+    people can look after every league running on it.
     """
     user = interaction.user
-    if getattr(user, "guild_permissions", None) and user.guild_permissions.manage_guild:
+    permissions = getattr(user, "guild_permissions", None)
+    if permissions is not None and permissions.administrator:
         return True
     if interaction.guild and interaction.guild.owner_id == user.id:
         return True
-    role_ids = {role.id for role in getattr(user, "roles", [])}
-    return draft["admin_role_id"] in role_ids
+
+    allowed = rules.moderator_role_ids(bot.conn, interaction.guild_id)
+    if not allowed:
+        return False
+    return bool(allowed & {role.id for role in getattr(user, "roles", [])})
+
+
+def require_moderator(bot, interaction):
+    if not is_moderator(bot, interaction):
+        raise rules.DraftError(
+            "❌ This command is for draft moderators. Somebody with the "
+            "**Administrator** permission can grant access with `/draft-moderator`."
+        )
+
+
+def is_administrator(interaction):
+    """Only a true server Administrator may change who the moderators are."""
+    permissions = getattr(interaction.user, "guild_permissions", None)
+    if permissions is not None and permissions.administrator:
+        return True
+    return bool(interaction.guild and interaction.guild.owner_id == interaction.user.id)
 
 
 async def parse_players(guild, text):
@@ -96,8 +118,9 @@ def render_event(event, draft):
         return "\n".join(lines)
 
     if kind == "pick_made":
+        captain = " ⭐ **Tera Captain**" if event.get("tera_captain") else ""
         return (f"✅ **{event['display_name']}** drafted **{event['pokemon']}** "
-                f"for **{event['cost']}** points. *(Round {event['round']}, "
+                f"for **{event['cost']}** points.{captain} *(Round {event['round']}, "
                 f"pick #{event['pick_order']})*")
 
     if kind == "auto_pick":
@@ -135,14 +158,22 @@ def render_event(event, draft):
         return text
 
     if kind == "draft_complete":
+        where = f" for **Pool {event['pool']}**" if event.get("pool") else ""
         if event.get("round_reached", 0) and event["round_reached"] < event["total_rounds"]:
-            headline = (f"🏁 **The draft is complete!** It finished early in Round "
+            headline = (f"🏁 **The draft is complete{where}!** It finished early in Round "
                         f"{event['round_reached']} because no player could afford "
                         f"another pick.")
         else:
-            headline = (f"🏁 **The draft is complete!** All {event['total_rounds']} "
-                        f"rounds have finished.")
-        return f"{headline} Use `/roster` to review teams and `/progress` for the full history."
+            headline = (f"🏁 **The draft is complete{where}!** All "
+                        f"{event['total_rounds']} rounds have finished.")
+
+        tail = " Use `/roster` to review teams and `/progress` for the full history."
+        if event.get("archived"):
+            tail += (" This was a draft-only league, so it is now archived and the "
+                     "channels are free for a new `/setup`.")
+        elif not event.get("league_finished"):
+            tail += " The other pool is still drafting."
+        return headline + tail
 
     return None
 

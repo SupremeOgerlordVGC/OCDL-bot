@@ -62,6 +62,9 @@ class DraftBot(commands.Bot):
         self.conn = database.connect()
         self.sheets = sheets.SheetSync()
         self.timers = timers.TurnTimers(self.on_timer_expired)
+        # Which tab of each league's template holds its price list. Looked up
+        # once per league, since it cannot change mid-draft.
+        self.tiering_tabs = {}
         self._resumed = False
 
     # ---- startup --------------------------------------------------------
@@ -101,7 +104,7 @@ class DraftBot(commands.Bot):
         drafter's.
         """
         active = self.conn.execute(
-            "SELECT * FROM drafts WHERE status = 'active'"
+            "SELECT * FROM pool_view WHERE status = 'active'"
         ).fetchall()
 
         for draft in active:

@@ -191,81 +191,178 @@ class SheetSync:
             ) from error
 
     def forget_cache(self, doc_url):
-        self._pool_cache.pop(extract_key(doc_url), None)
-
-    # ---- reading the Pokédex -------------------------------------------
-
-    def pool(self, doc_url, force=False):
-        """Every Pokémon in the Pokédex.
-
-        Returns a list of {key, name, cost, banned, row}. `cost` is None for
-        a banned Pokémon.
-        """
         key = extract_key(doc_url)
-        cached = self._pool_cache.get(key)
+        for cached in [k for k in self._pool_cache if k[0] == key]:
+            self._pool_cache.pop(cached, None)
+
+    # ---- reading the Settings tab --------------------------------------
+
+    def _named_ranges(self, doc_url):
+        """{named range: 'Tab'!A1} for the document.
+
+        Reading settings through the document's own named ranges rather than
+        fixed cells means the template can move them around without
+        breaking the bot.
+        """
+        book = self._book(doc_url)
+        meta = book.fetch_sheet_metadata()
+        titles = {sheet["properties"]["sheetId"]: sheet["properties"]["title"]
+                  for sheet in meta.get("sheets", [])}
+
+        found = {}
+        for entry in meta.get("namedRanges", []):
+            name = entry.get("name")
+            spec = entry.get("range", {})
+            title = titles.get(spec.get("sheetId", 0))
+            if not name or title is None:
+                continue
+            column = column_letters(spec.get("startColumnIndex", 0) + 1)
+            row = spec.get("startRowIndex", 0) + 1
+            found[name] = f"'{title}'!{column}{row}"
+        return found
+
+    def read_settings(self, doc_url):
+        """The league settings the template declares, as plain Python values.
+
+        Returns whatever it can find, keyed by the short names in
+        config.SHEET_LAYOUT["named_ranges"]. A missing range is simply
+        absent rather than an error, so an older template still works.
+        """
+        wanted = config.SHEET_LAYOUT["named_ranges"]
+        ranges = self._named_ranges(doc_url)
+
+        lookup = {key: ranges[name] for key, name in wanted.items() if name in ranges}
+        if not lookup:
+            raise SheetError(
+                "This document has no named ranges, so its Settings tab cannot be read. "
+                f"Expected: {', '.join(wanted.values())}."
+            )
+
+        book = self._book(doc_url)
+        keys = list(lookup)
+        try:
+            response = book.values_batch_get(
+                [lookup[key] for key in keys],
+                params={"valueRenderOption": "UNFORMATTED_VALUE"},
+            )
+        except Exception as error:
+            raise SheetError(f"Could not read the Settings tab: {error}") from error
+
+        settings = {}
+        for key, block in zip(keys, response.get("valueRanges", [])):
+            values = block.get("values") or [[]]
+            settings[key] = values[0][0] if values[0] else None
+        return settings
+
+    def tiering_tab(self, doc_url):
+        """Which tab of a template holds the price list, per its Settings."""
+        name = self.read_settings(doc_url).get("tiering_sheet")
+        if not name:
+            raise SheetError(
+                "The template does not say which tiering tab to use. Set the "
+                "`TieringSheet` cell on its Settings tab."
+            )
+        return str(name).strip()
+
+    # ---- reading the price list ----------------------------------------
+
+    def pool(self, doc_url, tab=None, force=False):
+        """Every Pokemon in the price list.
+
+        Reads the one shape the bot understands - column A name, B price,
+        C Tera price, from row 2 - which is the same whether it comes from a
+        template's tiering tab or a standalone tiering document.
+
+        Returns a list of {key, name, cost, tera_cost, banned, tera_banned,
+        row}. `cost` is None for a Pokemon that cannot be drafted at all;
+        `tera_cost` is None for one that cannot be a Tera Captain.
+        """
+        layout = config.SHEET_LAYOUT
+        cache_key = (extract_key(doc_url), tab)
+        cached = self._pool_cache.get(cache_key)
         if cached and not force and time.time() - cached[0] < self.CACHE_SECONDS:
             return cached[1]
 
-        layout = config.SHEET_LAYOUT
-        tab = self._tab(doc_url, layout["pokedex_tab"])
-        first = layout["pokedex_first_row"]
-        name_col = layout["pokedex_name_column"]
-        cost_col = layout["pokedex_cost_column"]
+        first = layout["tiering_first_row"]
+        name_col = layout["tiering_name_column"]
+        cost_col = layout["tiering_cost_column"]
+        tera_col = layout["tiering_tera_column"]
 
+        worksheet = self._tab(doc_url, tab) if tab else self._first_tab(doc_url)
         try:
-            # One request for both columns. UNFORMATTED_VALUE matters: the
-            # cost column is formatted as currency, so the default would
-            # hand back "$12" instead of 12.
-            names, costs = tab.batch_get(
-                [f"{name_col}{first}:{name_col}", f"{cost_col}{first}:{cost_col}"],
+            # UNFORMATTED_VALUE matters: a price column formatted as currency
+            # would otherwise come back as "$12" instead of 12.
+            names, costs, teras = worksheet.batch_get(
+                [f"{name_col}{first}:{name_col}",
+                 f"{cost_col}{first}:{cost_col}",
+                 f"{tera_col}{first}:{tera_col}"],
                 value_render_option="UNFORMATTED_VALUE",
             )
         except Exception as error:
-            raise SheetError(f"Could not read the {layout['pokedex_tab']} tab: {error}") from error
+            raise SheetError(f"Could not read the price list: {error}") from error
+
+        def cell(block, index):
+            return block[index][0] if index < len(block) and block[index] else ""
 
         entries = []
         for offset in range(len(names)):
-            name = (names[offset][0] if names[offset] else "").strip()
+            name = str(cell(names, offset)).strip()
             if not name:
                 continue
-            raw = costs[offset][0] if offset < len(costs) and costs[offset] else ""
-            cost = parse_cost(raw)
+            cost = parse_cost(cell(costs, offset))
+            tera_cost = parse_cost(cell(teras, offset))
             entries.append({
                 "key": normalize(name),
                 "name": name,
                 "cost": cost,
+                "tera_cost": tera_cost,
                 "banned": cost is None,
+                "tera_banned": tera_cost is None,
                 "row": first + offset,
             })
 
         if not entries:
             raise SheetError(
-                f"No Pokémon names found in {layout['pokedex_tab']}!"
-                f"{name_col}{first}:{name_col}. Check `config.SHEET_LAYOUT`."
+                f"No Pokemon names found in column {name_col} from row {first}. "
+                f"A tiering list needs names in A, prices in B and Tera prices in C."
             )
 
-        self._pool_cache[key] = (time.time(), entries)
+        self._pool_cache[cache_key] = (time.time(), entries)
         return entries
 
-    def lookup(self, doc_url, pokemon):
-        """Find one Pokémon in the Pokédex, or None."""
+    def _first_tab(self, doc_url):
+        """The only sheet of a standalone tiering document."""
+        return self._book(doc_url).get_worksheet(0)
+
+    def lookup(self, doc_url, pokemon, tab=None):
+        """Find one Pokémon in the price list, or None."""
         wanted = normalize(pokemon)
-        for entry in self.pool(doc_url):
+        for entry in self.pool(doc_url, tab=tab):
             if entry["key"] == wanted:
                 return entry
         return None
 
-    def at_cost(self, doc_url, cost, taken_keys):
-        """Undrafted, non-banned Pokémon that cost exactly `cost`."""
-        return [entry for entry in self.pool(doc_url)
-                if entry["cost"] == cost and entry["key"] not in taken_keys]
+    def at_cost(self, doc_url, cost, taken_keys, tab=None, tera=False):
+        """Undrafted, draftable Pokémon at exactly this price.
 
-    def suggest(self, doc_url, text, taken_keys, limit=25):
-        """Autocomplete matches: undrafted, not banned, name contains `text`."""
+        With `tera` the Tera price is used instead, and anything that cannot
+        be a Tera Captain is left out.
+        """
+        field = "tera_cost" if tera else "cost"
+        return [entry for entry in self.pool(doc_url, tab=tab)
+                if entry[field] == cost and entry["key"] not in taken_keys]
+
+    def suggest(self, doc_url, text, taken_keys, limit=25, tab=None, tera=False):
+        """Autocomplete matches: undrafted, draftable, name contains `text`.
+
+        With `tera` only Pokémon that may be Tera Captains are offered.
+        """
         wanted = normalize(text)
         starts, contains = [], []
-        for entry in self.pool(doc_url):
+        for entry in self.pool(doc_url, tab=tab):
             if entry["banned"] or entry["key"] in taken_keys:
+                continue
+            if tera and entry["tera_banned"]:
                 continue
             if not wanted:
                 starts.append(entry)
@@ -279,8 +376,14 @@ class SheetSync:
 
     # ---- writing --------------------------------------------------------
 
-    def write_pick(self, doc_url, draft_position, round_number, pokemon):
-        """Write one Pokémon into one coach's roster block.
+    def roster_tab_name(self, tera_format):
+        """Which tab holds the rosters: a Tera format uses its own."""
+        layout = config.SHEET_LAYOUT
+        return layout["tera_rosters_tab"] if tera_format else layout["rosters_tab"]
+
+    def write_pick(self, doc_url, tera_format, coach_number, round_number,
+                   pokemon, tera_captain=False):
+        """Write one Pokemon into one coach's roster block.
 
         Called from a background thread with plain values only - never a
         database handle. The pick is already saved locally, so a failure
@@ -289,10 +392,15 @@ class SheetSync:
         if not self.can_write:
             return False
 
-        layout = config.SHEET_LAYOUT
-        cell = self._roster_cell(draft_position, round_number)
-        tab = self._tab(doc_url, layout["rosters_tab"])
-        tab.update_acell(cell, pokemon)
+        tab = self._tab(doc_url, self.roster_tab_name(tera_format))
+        updates = [{"range": self._roster_cell(coach_number, round_number),
+                    "values": [[pokemon]]}]
+        if tera_format:
+            # The tick box has to be set either way round, so that demoting a
+            # captain with /editpick clears it again.
+            updates.append({"range": self._tera_cell(coach_number, round_number),
+                            "values": [[bool(tera_captain)]]})
+        tab.batch_update(updates, value_input_option="USER_ENTERED")
         return True
 
     @staticmethod
@@ -304,7 +412,7 @@ class SheetSync:
 
         if not 1 <= draft_position <= len(blocks):
             raise SheetError(
-                f"Draft position {draft_position} has no roster block. The template "
+                f"Coach number {draft_position} has no roster block. The template "
                 f"has {len(blocks)} of them."
             )
         if not 1 <= round_number <= rows:
@@ -326,12 +434,41 @@ class SheetSync:
         return shift_column(SheetSync._roster_cell(draft_position, round_number),
                             config.SHEET_LAYOUT["tera_flag_offset"])
 
-    def full_sync(self, doc_url, coach_names, roster_blocks):
-        """Rewrite the coach names and every roster block from local data.
+    def write_coaches(self, doc_url, coaches):
+        """Write usernames and pool letters to the Coaches tab.
 
-        `coach_names` is a list in draft order; `roster_blocks` maps draft
-        position to a list of names, one per round. Both are prepared by
-        draft.export_for_sheet, on the bot's main thread.
+        `coaches` is {coach_number: (display_name, pool_label)}. Every row is
+        written, blank where there is no coach, so removing somebody clears
+        their old name rather than leaving it behind.
+        """
+        layout = config.SHEET_LAYOUT
+        first, last = layout["coaches_first_row"], layout["coaches_last_row"]
+
+        names, pools = [], []
+        for row in range(first, last + 1):
+            name, pool_label = coaches.get(row - first + 1, ("", ""))
+            names.append([name])
+            pools.append([pool_label])
+
+        tab = self._tab(doc_url, layout["coaches_tab"])
+        name_col = layout["coaches_name_column"]
+        pool_col = layout["coaches_pool_column"]
+        tab.batch_update(
+            [{"range": f"{name_col}{first}:{name_col}{last}", "values": names},
+             {"range": f"{pool_col}{first}:{pool_col}{last}", "values": pools}],
+            value_input_option="USER_ENTERED",
+        )
+        return len([1 for row in names if row[0]])
+
+    def full_sync(self, doc_url, tera_format, coaches, blocks):
+        """Rewrite the coach list and every roster block from local data.
+
+        `coaches` is {coach_number: (name, pool)} and `blocks` is
+        {coach_number: [(pokemon, is_tera_captain), ...]}, both prepared by
+        draft.export_for_sheet on the bot's main thread.
+
+        The local database always wins: this only ever pushes outward, so a
+        bad sheet can never corrupt a live draft.
         """
         if not self.can_write:
             raise SheetError(
@@ -339,93 +476,151 @@ class SheetSync:
                 "config.py once the template layout has been confirmed."
             )
         if not doc_url:
-            raise SheetError("This draft has no Google Sheet configured.")
+            raise SheetError("This draft has no document configured.")
 
         layout = config.SHEET_LAYOUT
         rows = layout["roster_rows"]
-        blocks = layout["roster_blocks"]
+        block_count = len(layout["roster_blocks"])
 
-        # ---- coach usernames ----
-        first = layout["coaches_first_row"]
-        last = layout["coaches_last_row"]
-        seats = last - first + 1
-        if len(coach_names) > seats:
-            raise SheetError(
-                f"This draft has {len(coach_names)} players but the template only has "
-                f"{seats} coach rows."
-            )
-        # Pad so removing a player also clears their old name.
-        padded = list(coach_names) + [""] * (seats - len(coach_names))
-        column = layout["coaches_name_column"]
+        written_coaches = self.write_coaches(doc_url, coaches)
 
-        coaches_tab = self._tab(doc_url, layout["coaches_tab"])
-        coaches_tab.update(values=[[name] for name in padded],
-                           range_name=f"{column}{first}:{column}{last}",
-                           value_input_option="USER_ENTERED")
-
-        # ---- roster blocks, all in one request ----
         updates = []
-        for position, names in sorted(roster_blocks.items()):
-            if position > len(blocks):
-                raise SheetError(
-                    f"Draft position {position} has no roster block on the sheet."
-                )
-            col, first_row = split_cell(blocks[position - 1])
-            padded_names = (list(names) + [""] * rows)[:rows]
-            updates.append({
-                "range": f"{col}{first_row}:{col}{first_row + rows - 1}",
-                "values": [[name] for name in padded_names],
-            })
+        for coach_number in range(1, block_count + 1):
+            entries = blocks.get(coach_number) or []
+            padded = (list(entries) + [("", False)] * rows)[:rows]
 
-        rosters_tab = self._tab(doc_url, layout["rosters_tab"])
-        if updates:
-            rosters_tab.batch_update(updates, value_input_option="USER_ENTERED")
+            column, first_row = split_cell(layout["roster_blocks"][coach_number - 1])
+            updates.append({
+                "range": f"{column}{first_row}:{column}{first_row + rows - 1}",
+                "values": [[name] for name, _ in padded],
+            })
+            if tera_format:
+                tera_column, _ = split_cell(
+                    shift_column(layout["roster_blocks"][coach_number - 1],
+                                 layout["tera_flag_offset"]))
+                updates.append({
+                    "range": f"{tera_column}{first_row}:{tera_column}{first_row + rows - 1}",
+                    "values": [[bool(flag)] for _, flag in padded],
+                })
+
+        tab = self._tab(doc_url, self.roster_tab_name(tera_format))
+        tab.batch_update(updates, value_input_option="USER_ENTERED")
 
         self.forget_cache(doc_url)
-        return {"coaches": len(coach_names), "rosters": len(updates)}
+        return {"coaches": written_coaches, "rosters": len(blocks),
+                "tab": self.roster_tab_name(tera_format)}
+
+    # ---- the schedule ---------------------------------------------------
+
+    def read_schedule(self, doc_url, week):
+        """Matchups for one week as [(side A, side B), ...]. Read only."""
+        layout = config.SHEET_LAYOUT
+        tab = self._tab(doc_url, layout["schedule_tab"])
+        first = layout["schedule_first_row"]
+
+        try:
+            weeks, side_a, side_b = tab.batch_get(
+                [f"{layout['schedule_week_column']}{first}:{layout['schedule_week_column']}",
+                 f"{layout['schedule_side_a_column']}{first}:{layout['schedule_side_a_column']}",
+                 f"{layout['schedule_side_b_column']}{first}:{layout['schedule_side_b_column']}"],
+                value_render_option="UNFORMATTED_VALUE",
+            )
+        except Exception as error:
+            raise SheetError(f"Could not read the {layout['schedule_tab']} tab: {error}") from error
+
+        def cell(block, index):
+            return str(block[index][0]).strip() if index < len(block) and block[index] else ""
+
+        matches = []
+        for offset in range(len(weeks)):
+            raw_week = cell(weeks, offset)
+            if not raw_week:
+                continue
+            try:
+                if int(float(raw_week)) != int(week):
+                    continue
+            except ValueError:
+                continue
+            home, away = cell(side_a, offset), cell(side_b, offset)
+            if home and away:
+                matches.append((home, away))
+        return matches
 
     # ---- inspection -----------------------------------------------------
 
-    def describe(self, doc_url):
-        """Check the document against config.SHEET_LAYOUT. Changes nothing."""
+    def describe(self, doc_url, doc_kind="template"):
+        """Check a document against config.SHEET_LAYOUT. Changes nothing."""
         layout = config.SHEET_LAYOUT
         book = self._book(doc_url)
         titles = [w.title for w in book.worksheets()]
-
         report = {"title": book.title, "tabs": titles, "problems": [], "notes": []}
 
-        for role, tab_name in [("Pokédex", layout["pokedex_tab"]),
+        if doc_kind == "tiering":
+            entries = self.pool(doc_url, force=True)
+            report["notes"] += self._price_notes(entries)
+            report["notes"].append("Read as a tiering document: column A names, "
+                                   "B prices, C Tera prices.")
+            return report
+
+        for role, tab_name in [("Settings", layout["settings_tab"]),
                                ("Coaches", layout["coaches_tab"]),
                                ("Rosters", layout["rosters_tab"])]:
             if tab_name not in titles:
                 report["problems"].append(f"{role} tab `{tab_name}` is missing.")
-
         if report["problems"]:
             return report
 
-        entries = self.pool(doc_url, force=True)
-        draftable = [e for e in entries if not e["banned"]]
-        costs = sorted({e["cost"] for e in draftable})
+        try:
+            settings = self.read_settings(doc_url)
+        except SheetError as error:
+            report["problems"].append(str(error))
+            return report
+
+        tera_on = bool(settings.get("tera_format"))
         report["notes"].append(
-            f"Pokédex: {len(entries)} names, {len(draftable)} draftable, "
-            f"{len(entries) - len(draftable)} banned or unpriced."
-        )
-        report["notes"].append(
-            f"Point values in use: {costs[0]}–{costs[-1]}." if costs else "No costs found."
+            f"Settings: budget {settings.get('budget')}, Tera budget "
+            f"{settings.get('tera_budget')}, pools {settings.get('pool_count')}, "
+            f"Tera format {'on' if tera_on else 'off'}, "
+            f"season {settings.get('season_weeks')} weeks."
         )
 
-        coaches_tab = self._tab(doc_url, layout["coaches_tab"])
-        column = layout["coaches_name_column"]
-        current = coaches_tab.get(
-            f"{column}{layout['coaches_first_row']}:{column}{layout['coaches_last_row']}")
-        names = [row[0] for row in current if row and row[0].strip()]
-        report["notes"].append(f"Coaches!{column}: {len(names)} names, e.g. {', '.join(names[:3])}")
+        tab_name = settings.get("tiering_sheet")
+        if not tab_name:
+            report["problems"].append("Settings does not name a tiering tab (`TieringSheet`).")
+            return report
+        if str(tab_name).strip() not in titles:
+            report["problems"].append(
+                f"Settings points at tiering tab `{tab_name}`, which does not exist.")
+            return report
 
+        report["notes"].append(f"Prices come from the `{tab_name}` tab.")
+        report["notes"] += self._price_notes(self.pool(doc_url, tab=str(tab_name).strip(),
+                                                       force=True))
+
+        if tera_on and layout["tera_rosters_tab"] not in titles:
+            report["problems"].append(
+                f"Tera format is on but the `{layout['tera_rosters_tab']}` tab is missing.")
         report["notes"].append(
-            f"Rosters: {len(layout['roster_blocks'])} blocks of {layout['roster_rows']} rounds, "
-            f"starting at {', '.join(layout['roster_blocks'][:4])}, ..."
+            f"Rosters: {len(layout['roster_blocks'])} blocks of {layout['roster_rows']} "
+            f"rounds. Pool A uses blocks 1-{config.POOL_B_FIRST_COACH - 1}, pool B "
+            f"{config.POOL_B_FIRST_COACH} upwards."
         )
+        report["notes"].append(
+            f"Picks would be written to `{self.roster_tab_name(tera_on)}`.")
         return report
+
+    @staticmethod
+    def _price_notes(entries):
+        draftable = [e for e in entries if not e["banned"]]
+        captains = [e for e in entries if not e["tera_banned"]]
+        costs = sorted({e["cost"] for e in draftable})
+        notes = [f"{len(entries)} names, {len(draftable)} draftable, "
+                 f"{len(entries) - len(draftable)} banned or unpriced."]
+        if costs:
+            notes.append(f"Point values {costs[0]}–{costs[-1]}.")
+        notes.append(f"{len(captains)} may be Tera Captains "
+                     f"({len(entries) - len(captains)} Tera banned).")
+        return notes
 
 
 class DisabledSheets:

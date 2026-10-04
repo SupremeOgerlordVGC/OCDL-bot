@@ -649,8 +649,9 @@ def _event(kind, player=None, **fields):
         event["player_id"] = player["id"]
         event["user_id"] = player["user_id"]
         event["display_name"] = player["display_name"]
-        # The seat number doubles as the coach number on the spreadsheet.
         event["position"] = player["draft_position"]
+        # Which Coaches row / roster block this player owns on the sheet.
+        event["coach_number"] = player["coach_number"]
     event.update(fields)
     return event
 
