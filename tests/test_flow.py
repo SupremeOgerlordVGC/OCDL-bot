@@ -25,6 +25,21 @@ import ui           # noqa: E402
 from cogs.drafting import DraftingCog   # noqa: E402
 
 
+def make_pool(conn, channel_id, players, **settings):
+    """Create a one-pool league for the Discord-layer tests."""
+    options = dict(budget=100, min_picks=1, max_picks=3, base_timer=120)
+    options.update(settings)
+    doc_url = options.pop("doc_url", None)
+    rules.create_league(
+        conn, guild_id=1, admin_channel_id=1,
+        name=options.pop("name", f"League {channel_id}"),
+        pools=[("A", channel_id, players)],
+        doc_kind="template" if doc_url else "none", doc_url=doc_url,
+        **options,
+    )
+    return rules.get_live_pool(conn, channel_id)["id"]
+
+
 class FakeChannel:
     """Collects everything the bot tries to post."""
 
@@ -73,14 +88,14 @@ class StubPokedex:
         {"key": "bulbasaur", "name": "Bulbasaur", "cost": None, "banned": True, "row": 4},
     ]
 
-    def lookup(self, sheet_url, pokemon):
+    def lookup(self, doc_url, pokemon):
         wanted = " ".join(str(pokemon).strip().lower().split())
         for entry in self.ENTRIES:
             if entry["key"] == wanted:
                 return entry
         return None
 
-    def suggest(self, sheet_url, text, taken, limit=25):
+    def suggest(self, doc_url, text, taken, limit=25):
         wanted = str(text).strip().lower()
         return [e for e in self.ENTRIES
                 if not e["banned"] and e["key"] not in taken and wanted in e["key"]][:limit]
@@ -101,7 +116,7 @@ class FakeBot:
 
     async def on_timer_expired(self, draft_id, token):
         self.expired.append((draft_id, token))
-        draft = rules.get_draft(self.conn, draft_id)
+        draft = rules.get_pool(self.conn, draft_id)
         if draft["status"] != "active":
             return
         if (draft["current_round"], draft["current_turn_index"]) != tuple(token):
@@ -115,17 +130,15 @@ class AnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.conn = database.connect(":memory:")
         self.channel = FakeChannel(4242)
         self.bot = FakeBot(self.conn, self.channel)
-        self.draft_id = rules.create_draft(
-            self.conn, guild_id=1, channel_id=4242, admin_channel_id=1,
-            admin_role_id=7, budget=100, min_picks=2, max_picks=3, base_timer=120,
-            players=[(11, "Larry"), (22, "Alex"), (33, "Sarah")],
-        )
+        self.draft_id = make_pool(
+            self.conn, 4242, [(11, "Larry"), (22, "Alex"), (33, "Sarah")],
+            budget=100, min_picks=2, max_picks=3, base_timer=120)
 
     def draft(self):
-        return rules.get_draft(self.conn, self.draft_id)
+        return rules.get_pool(self.conn, self.draft_id)
 
     async def test_starting_a_draft_pings_the_first_player(self):
-        events = rules.start_draft(self.conn, self.draft())
+        events = rules.start_pool(self.conn, self.draft())
         await ui.announce(self.bot, self.draft_id, events)
 
         self.assertIn("<@11>", self.channel.text)
@@ -137,7 +150,7 @@ class AnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.bot.timers.cancel_all()
 
     async def test_pick_is_announced_and_next_player_pinged(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        await ui.announce(self.bot, self.draft_id, rules.start_pool(self.conn, self.draft()))
         self.channel.messages.clear()
 
         _, events = rules.make_pick(self.conn, self.draft(), 11, 1, "Garchomp", 12)
@@ -151,7 +164,7 @@ class AnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.bot.timers.cancel_all()
 
     async def test_timer_expiry_skips_and_announces(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        await ui.announce(self.bot, self.draft_id, rules.start_pool(self.conn, self.draft()))
         self.channel.messages.clear()
 
         token = (self.draft()["current_round"], self.draft()["current_turn_index"])
@@ -168,7 +181,7 @@ class AnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.bot.timers.cancel_all()
 
     async def test_stale_timer_does_nothing(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        await ui.announce(self.bot, self.draft_id, rules.start_pool(self.conn, self.draft()))
         stale_token = (self.draft()["current_round"], self.draft()["current_turn_index"])
 
         # Larry picks in the split second before his timer fires.
@@ -184,7 +197,7 @@ class AnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.bot.timers.cancel_all()
 
     async def test_queue_auto_pick_is_announced(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        await ui.announce(self.bot, self.draft_id, rules.start_pool(self.conn, self.draft()))
         rules.queue_picks(self.conn, self.draft(), 22, 1, ["Garchomp", "Heatran"], [12, 10])
         self.channel.messages.clear()
 
@@ -198,7 +211,7 @@ class AnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.bot.timers.cancel_all()
 
     async def test_exhausted_queue_message_explains_the_timer_is_safe(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        await ui.announce(self.bot, self.draft_id, rules.start_pool(self.conn, self.draft()))
         rules.queue_picks(self.conn, self.draft(), 22, 1, ["Garchomp"], [12])
         self.channel.messages.clear()
 
@@ -212,7 +225,7 @@ class AnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.bot.timers.cancel_all()
 
     async def test_draft_completion_is_announced(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        await ui.announce(self.bot, self.draft_id, rules.start_pool(self.conn, self.draft()))
         for _ in range(9):                      # 3 players x 3 rounds
             live = self.draft()
             if live["status"] != "active":
@@ -267,18 +280,14 @@ class RestartRecoveryTests(unittest.IsolatedAsyncioTestCase):
             conn = database.connect(path)
             channel = FakeChannel(555)
             bot = FakeBot(conn, channel)
-            draft_id = rules.create_draft(
-                conn, guild_id=1, channel_id=555, admin_channel_id=1, admin_role_id=7,
-                budget=100, min_picks=1, max_picks=2, base_timer=120,
-                players=[(11, "Larry"), (22, "Alex")],
-            )
-            await ui.announce(bot, draft_id, rules.start_draft(conn, rules.get_draft(conn, draft_id)))
+            draft_id = make_pool(conn, 555, [(11, "Larry"), (22, "Alex")], max_picks=2)
+            await ui.announce(bot, draft_id, rules.start_pool(conn, rules.get_pool(conn, draft_id)))
             bot.timers.cancel_all()
             conn.close()
 
             # ---- the VM reboots here ----
             conn = database.connect(path)
-            draft = rules.get_live_draft(conn, 555)
+            draft = rules.get_live_pool(conn, 555)
             self.assertEqual(draft["status"], "active")
             self.assertIsNotNone(draft["turn_deadline"])
             self.assertEqual(rules.current_player(conn, draft)["display_name"], "Larry")
@@ -305,13 +314,11 @@ class PokedexRuleTests(unittest.IsolatedAsyncioTestCase):
         self.channel = FakeChannel(4242)
         self.bot = FakeBot(self.conn, self.channel)
         self.bot.sheets = StubPokedex()
-        self.draft_id = rules.create_draft(
-            self.conn, guild_id=1, channel_id=4242, admin_channel_id=1,
-            admin_role_id=7, budget=100, min_picks=1, max_picks=3, base_timer=120,
-            players=[(11, "Larry"), (22, "Alex")],
-            sheet_url="https://docs.google.com/spreadsheets/d/TEST/edit",
-        )
-        self.draft = rules.get_draft(self.conn, self.draft_id)
+        self.draft_id = make_pool(
+            self.conn, 4242, [(11, "Larry"), (22, "Alex")],
+            budget=100, min_picks=1, max_picks=3, base_timer=120,
+            doc_url="https://docs.google.com/spreadsheets/d/TEST/edit")
+        self.draft = rules.get_pool(self.conn, self.draft_id)
         self.cog = DraftingCog(self.bot)
 
     async def test_the_sheets_spelling_is_what_gets_stored(self):
@@ -339,7 +346,7 @@ class PokedexRuleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_sheet_outage_never_blocks_a_pick(self):
         class BrokenSheets(StubPokedex):
-            def lookup(self, sheet_url, pokemon):
+            def lookup(self, doc_url, pokemon):
                 raise RuntimeError("Google is down")
 
         self.bot.sheets = BrokenSheets()
@@ -364,14 +371,12 @@ class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
         self.conn = database.connect(":memory:")
         self.channel = ForbiddenChannel(4242)
         self.bot = FakeBot(self.conn, self.channel)
-        self.draft_id = rules.create_draft(
-            self.conn, guild_id=1, channel_id=4242, admin_channel_id=1,
-            admin_role_id=7, budget=100, min_picks=1, max_picks=3, base_timer=120,
-            players=[(11, "Larry"), (22, "Alex")],
-        )
+        self.draft_id = make_pool(
+            self.conn, 4242, [(11, "Larry"), (22, "Alex")],
+            budget=100, min_picks=1, max_picks=3, base_timer=120)
 
     def draft(self):
-        return rules.get_draft(self.conn, self.draft_id)
+        return rules.get_pool(self.conn, self.draft_id)
 
     async def test_safe_send_reports_refusal_instead_of_raising(self):
         self.assertFalse(await ui.safe_send(self.channel, "hello"))
@@ -379,7 +384,7 @@ class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await ui.safe_send(None, "hello"))
 
     async def test_a_pick_survives_a_failed_announcement(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        await ui.announce(self.bot, self.draft_id, rules.start_pool(self.conn, self.draft()))
         _, events = rules.make_pick(self.conn, self.draft(), 11, 1, "Garchomp", 12)
         await ui.announce(self.bot, self.draft_id, events)      # must not raise
 
@@ -395,7 +400,7 @@ class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_clock_is_paused_rather_than_skipping_players_silently(self):
         # Running a timer nobody can see would skip players for a permission
         # problem that is not theirs. The turn waits instead.
-        events = rules.start_draft(self.conn, self.draft())
+        events = rules.start_pool(self.conn, self.draft())
         await ui.announce(self.bot, self.draft_id, events)
 
         live = self.draft()
@@ -410,7 +415,7 @@ class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rules.current_player(self.conn, live)["display_name"], "Larry")
 
     async def test_the_paused_turn_resumes_once_posting_works(self):
-        await ui.announce(self.bot, self.draft_id, rules.start_draft(self.conn, self.draft()))
+        await ui.announce(self.bot, self.draft_id, rules.start_pool(self.conn, self.draft()))
         self.assertIsNone(self.draft()["turn_deadline"])
 
         # Permission granted, bot restarted: the turn opens properly.
@@ -426,7 +431,7 @@ class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_timer_expiry_still_skips_when_the_bot_cannot_post(self):
         # If a clock was already running when posting broke, the expiry still
         # has to resolve cleanly rather than raising.
-        rules.start_draft(self.conn, self.draft())
+        rules.start_pool(self.conn, self.draft())
         token = (self.draft()["current_round"], self.draft()["current_turn_index"])
         await self.bot.on_timer_expired(self.draft_id, token)
 

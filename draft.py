@@ -68,70 +68,70 @@ def parse_pokemon_list(raw, limit):
 # --------------------------------------------------------------------------
 
 
-def get_live_draft(conn, channel_id):
+def get_live_pool(conn, channel_id):
     """The unfinished draft in this channel, or None.
 
     Every command starts here. Because the lookup is by channel id, a
     command in #vgc can never touch the draft in #national-dex-singles.
     """
     return conn.execute(
-        "SELECT * FROM drafts WHERE channel_id = ? AND status IN ('setup', 'active')",
+        "SELECT * FROM pool_view WHERE channel_id = ? AND status IN ('setup', 'active')",
         (channel_id,),
     ).fetchone()
 
 
-def get_draft(conn, draft_id):
-    return conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+def get_pool(conn, pool_id):
+    return conn.execute("SELECT * FROM pool_view WHERE id = ?", (pool_id,)).fetchone()
 
 
-def get_channel_draft(conn, channel_id):
+def get_channel_pool(conn, channel_id):
     """The channel's live draft, or its most recent finished one.
 
     Used by commands that still make sense after the final round - reading
     rosters and history, correcting a pick, and trading during the season.
     """
-    live = get_live_draft(conn, channel_id)
+    live = get_live_pool(conn, channel_id)
     if live is not None:
         return live
     return conn.execute(
-        "SELECT * FROM drafts WHERE channel_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM pool_view WHERE channel_id = ? ORDER BY id DESC LIMIT 1",
         (channel_id,),
     ).fetchone()
 
 
-def require_channel_draft(conn, channel_id):
-    draft = get_channel_draft(conn, channel_id)
+def require_channel_pool(conn, channel_id):
+    draft = get_channel_pool(conn, channel_id)
     if draft is None:
         raise DraftError("❌ This channel has never had a draft. An admin can create one with `/setup`.")
     return draft
 
 
-def require_live_draft(conn, channel_id):
-    draft = get_live_draft(conn, channel_id)
+def require_live_pool(conn, channel_id):
+    draft = get_live_pool(conn, channel_id)
     if draft is None:
         raise DraftError("❌ There is no draft in this channel. An admin can create one with `/setup`.")
     return draft
 
 
-def require_active_draft(conn, channel_id):
-    draft = require_live_draft(conn, channel_id)
+def require_active_pool(conn, channel_id):
+    draft = require_live_pool(conn, channel_id)
     if draft["status"] != "active":
         raise DraftError("❌ This draft has not started yet. An admin must run `/draft` first.")
     return draft
 
 
-def get_players(conn, draft_id):
+def get_players(conn, pool_id):
     """Every player in seat order."""
     return conn.execute(
-        "SELECT * FROM players WHERE draft_id = ? ORDER BY draft_position",
-        (draft_id,),
+        "SELECT * FROM players WHERE pool_id = ? ORDER BY draft_position",
+        (pool_id,),
     ).fetchall()
 
 
-def get_player(conn, draft_id, user_id):
+def get_player(conn, pool_id, user_id):
     return conn.execute(
-        "SELECT * FROM players WHERE draft_id = ? AND user_id = ?",
-        (draft_id, user_id),
+        "SELECT * FROM players WHERE pool_id = ? AND user_id = ?",
+        (pool_id, user_id),
     ).fetchone()
 
 
@@ -139,16 +139,16 @@ def get_player_by_id(conn, player_id):
     return conn.execute("SELECT * FROM players WHERE id = ?", (player_id,)).fetchone()
 
 
-def require_player(conn, draft_id, user_id):
-    player = get_player(conn, draft_id, user_id)
+def require_player(conn, pool_id, user_id):
+    player = get_player(conn, pool_id, user_id)
     if player is None:
         raise DraftError("❌ You are not a player in this channel's draft.")
     return player
 
 
-def player_count(conn, draft_id):
+def player_count(conn, pool_id):
     return conn.execute(
-        "SELECT COUNT(*) AS n FROM players WHERE draft_id = ?", (draft_id,)
+        "SELECT COUNT(*) AS n FROM players WHERE pool_id = ?", (pool_id,)
     ).fetchone()["n"]
 
 
@@ -164,7 +164,7 @@ def current_player(conn, draft):
         return None
     seat = current_seat(conn, draft)
     return conn.execute(
-        "SELECT * FROM players WHERE draft_id = ? AND draft_position = ?",
+        "SELECT * FROM players WHERE pool_id = ? AND draft_position = ?",
         (draft["id"], seat),
     ).fetchone()
 
@@ -184,44 +184,53 @@ def turn_is_upcoming(conn, draft, player, round_number):
 # --------------------------------------------------------------------------
 
 
-def find_owner(conn, draft_id, pokemon_key):
+def find_owner(conn, pool_id, pokemon_key):
     """Roster row for a Pokemon, or None when it is still available.
 
     Availability is based on the roster rather than the pick history so
     that a Pokemon dropped in a trade correctly returns to the pool.
     """
     return conn.execute(
-        "SELECT * FROM rosters WHERE draft_id = ? AND pokemon_key = ?",
-        (draft_id, pokemon_key),
+        "SELECT * FROM rosters WHERE pool_id = ? AND pokemon_key = ?",
+        (pool_id, pokemon_key),
     ).fetchone()
 
 
-def drafted_keys(conn, draft_id):
+def drafted_keys(conn, pool_id):
     """Normalised names of every Pokemon currently on somebody's roster."""
     rows = conn.execute(
-        "SELECT pokemon_key FROM rosters WHERE draft_id = ?", (draft_id,)
+        "SELECT pokemon_key FROM rosters WHERE pool_id = ?", (pool_id,)
     ).fetchall()
     return {row["pokemon_key"] for row in rows}
 
 
-def picks_made(conn, draft_id, player_id):
+def tera_captains(conn, pool_id, player_id):
+    """How many Tera Captains this team currently has."""
     return conn.execute(
-        "SELECT COUNT(*) AS n FROM picks WHERE draft_id = ? AND player_id = ?",
-        (draft_id, player_id),
+        "SELECT COUNT(*) AS n FROM rosters WHERE pool_id = ? AND player_id = ? "
+        "AND tera_captain = 1",
+        (pool_id, player_id),
     ).fetchone()["n"]
 
 
-def roster_size(conn, draft_id, player_id):
+def picks_made(conn, pool_id, player_id):
     return conn.execute(
-        "SELECT COUNT(*) AS n FROM rosters WHERE draft_id = ? AND player_id = ?",
-        (draft_id, player_id),
+        "SELECT COUNT(*) AS n FROM picks WHERE pool_id = ? AND player_id = ?",
+        (pool_id, player_id),
     ).fetchone()["n"]
 
 
-def next_pick_order(conn, draft_id):
+def roster_size(conn, pool_id, player_id):
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM rosters WHERE pool_id = ? AND player_id = ?",
+        (pool_id, player_id),
+    ).fetchone()["n"]
+
+
+def next_pick_order(conn, pool_id):
     row = conn.execute(
-        "SELECT COALESCE(MAX(pick_order), 0) + 1 AS n FROM picks WHERE draft_id = ?",
-        (draft_id,),
+        "SELECT COALESCE(MAX(pick_order), 0) + 1 AS n FROM picks WHERE pool_id = ?",
+        (pool_id,),
     ).fetchone()
     return row["n"]
 
@@ -253,11 +262,15 @@ def turn_number(conn, draft):
     return (draft["current_round"] - 1) * total + draft["current_turn_index"] + 1
 
 
-def validate_pick(conn, draft, player, round_number, pokemon, cost, replacing_key=None):
+def validate_pick(conn, draft, player, round_number, pokemon, cost,
+                  tera_captain=False, replacing_key=None):
     """Check every rule for a pick. Raises DraftError on the first problem.
 
     `replacing_key` is the Pokemon being swapped out by /editpick, which is
     allowed to "occupy" its own slot without counting as a duplicate.
+
+    A Tera Captain is charged `cost` - its Tera Tax - against the normal
+    budget AND the Tera budget, so both have to cover it.
     """
     name = str(pokemon).strip()
     if not name:
@@ -289,6 +302,31 @@ def validate_pick(conn, draft, player, round_number, pokemon, cost, replacing_ke
             f"**{name}** costs {cost} but you only have {player['budget_remaining']} left."
         )
 
+    if tera_captain:
+        if not draft["tera_budget"]:
+            raise DraftError("❌ This draft is not a Tera format, so there are no Tera Captains.")
+
+        if cost > player["tera_budget_remaining"]:
+            raise DraftError(
+                f"❌ You do not have enough Tera budget remaining. Making **{name}** a Tera "
+                f"Captain costs {cost} but you only have "
+                f"{player['tera_budget_remaining']} Tera points left."
+            )
+
+        already = tera_captains(conn, draft["id"], player["id"])
+        if replacing_key is not None:
+            # An edit that keeps a captain in place must not count it twice.
+            current = conn.execute(
+                "SELECT tera_captain FROM rosters WHERE pool_id = ? AND pokemon_key = ?",
+                (draft["id"], replacing_key),
+            ).fetchone()
+            if current is not None and current["tera_captain"]:
+                already -= 1
+        if already >= config.MAX_TERA_CAPTAINS:
+            raise DraftError(
+                f"❌ You already have the maximum of {config.MAX_TERA_CAPTAINS} Tera Captains."
+            )
+
     if picks_made(conn, draft["id"], player["id"]) >= draft["max_picks"]:
         raise DraftError(
             f"❌ You have already made the maximum of {draft['max_picks']} picks."
@@ -309,77 +347,204 @@ def validate_pick(conn, draft, player, round_number, pokemon, cost, replacing_ke
 # --------------------------------------------------------------------------
 
 
-def create_draft(conn, guild_id, channel_id, admin_channel_id, admin_role_id,
-                 budget, min_picks, max_picks, base_timer, players,
-                 max_trades=0, sheet_url=None):
-    """Create a draft in `setup` state. `players` is [(user_id, name), ...].
+def coach_numbers_for(label, count):
+    """Which Coaches rows / roster blocks a pool's seats occupy.
 
-    Everything is validated before the first INSERT, so a bad /setup leaves
-    the database untouched.
+    Pool A takes blocks 1 upwards, pool B starts at 11. That keeps each
+    pool under the matching "Pool A" / "Pool B" heading on the Rosters tab,
+    which is why a two-pool league is capped at ten coaches per pool.
     """
-    if get_live_draft(conn, channel_id) is not None:
+    first = 1 if label == "A" else config.POOL_B_FIRST_COACH
+    return list(range(first, first + count))
+
+
+def max_players_per_pool(doc_kind, pool_count):
+    """How many coaches a pool may hold.
+
+    Only a two-pool league is tight: pool B's blocks start at 11, so pool A
+    may not run past 10. One pool can use all of them.
+    """
+    if doc_kind == "template" and pool_count == 2:
+        return config.POOL_B_FIRST_COACH - 1
+    return config.MAX_PLAYERS
+
+
+def create_league(conn, guild_id, admin_channel_id, name, pools,
+                  budget, min_picks, max_picks, base_timer,
+                  mode="full_season", doc_kind="none", doc_url=None,
+                  tera_budget=0, max_trades=0):
+    """Create a league in `setup` state, with one or two pools.
+
+    `pools` is [(label, channel_id, [(user_id, display_name), ...]), ...],
+    pool A first. Everything is validated before the first INSERT, so a bad
+    /setup leaves the database untouched.
+    """
+    name = " ".join(str(name or "").split())
+    if not name:
+        raise DraftError("❌ The draft needs a name.")
+    if len(name) > 80:
+        raise DraftError("❌ That name is too long (80 characters maximum).")
+    if get_live_league_by_name(conn, guild_id, name) is not None:
         raise DraftError(
-            "❌ This channel already has a draft. Finish it, or an admin can "
-            "remove it with `/canceldraft`, before creating another."
+            f"❌ A draft called **{name}** is already running on this server. "
+            f"Names have to be unique so commands can tell them apart."
         )
+
+    if mode not in ("draft_only", "full_season"):
+        raise DraftError("❌ The mode must be `draft_only` or `full_season`.")
+    if doc_kind not in ("none", "tiering", "template"):
+        raise DraftError("❌ Unknown document type.")
 
     if budget <= 0:
         raise DraftError("❌ The starting budget must be greater than 0.")
+    if tera_budget < 0:
+        raise DraftError("❌ The Tera budget cannot be negative (use 0 for no Tera format).")
     if min_picks < 1:
         raise DraftError("❌ The minimum number of picks must be at least 1.")
     if max_picks < min_picks:
         raise DraftError("❌ The maximum number of picks cannot be less than the minimum.")
-    if max_picks > 50:
-        raise DraftError("❌ 50 rounds is the sensible upper limit for a draft.")
     if not config.MIN_BASE_TIMER_SECONDS <= base_timer <= config.MAX_BASE_TIMER_SECONDS:
         raise DraftError(
             f"❌ The base timer must be between {config.MIN_BASE_TIMER_SECONDS} and "
             f"{config.MAX_BASE_TIMER_SECONDS} seconds."
         )
-
     if max_trades < 0:
-        raise DraftError("❌ The maximum number of trades cannot be negative (use 0 for unlimited).")
+        raise DraftError("❌ The maximum number of trades cannot be negative (0 = unlimited).")
 
-    if not config.MIN_PLAYERS <= len(players) <= config.MAX_PLAYERS:
+    if not pools:
+        raise DraftError("❌ A league needs at least one pool.")
+    if len(pools) > 2:
+        raise DraftError("❌ A league can have at most two pools.")
+    if len(pools) == 2 and doc_kind != "template":
         raise DraftError(
-            f"❌ A draft needs between {config.MIN_PLAYERS} and {config.MAX_PLAYERS} players "
-            f"(you listed {len(players)})."
+            "❌ Two pools need a template document — the pool assignment lives on its "
+            "Coaches tab. Link a template, or set up a single pool."
         )
 
-    user_ids = [user_id for user_id, _ in players]
-    if len(set(user_ids)) != len(user_ids):
+    if doc_kind == "template":
+        rows = config.SHEET_LAYOUT["roster_rows"]
+        if max_picks > rows:
+            raise DraftError(
+                f"❌ The template gives each coach {rows} roster rows, so a draft linked "
+                f"to it can have at most {rows} rounds (you asked for {max_picks})."
+            )
+
+    seen_channels = {admin_channel_id}
+    everyone = []
+    limit = max_players_per_pool(doc_kind, len(pools))
+
+    for label, channel_id, roster in pools:
+        if channel_id in seen_channels:
+            raise DraftError(
+                "❌ Each pool needs its own channel, and none of them may be the admin "
+                "channel you ran `/setup` in."
+            )
+        seen_channels.add(channel_id)
+
+        if get_live_pool(conn, channel_id) is not None:
+            raise DraftError(
+                f"❌ <#{channel_id}> already has a draft running. Finish or cancel it first."
+            )
+        if not config.MIN_PLAYERS <= len(roster) <= limit:
+            raise DraftError(
+                f"❌ Pool {label} needs between {config.MIN_PLAYERS} and {limit} players "
+                f"(you listed {len(roster)})."
+            )
+        everyone += [user_id for user_id, _ in roster]
+
+    if len(set(everyone)) != len(everyone):
         raise DraftError("❌ The same player was listed twice.")
 
     cursor = conn.execute(
-        """INSERT INTO drafts (guild_id, channel_id, admin_channel_id, admin_role_id,
-                               budget, min_picks, max_picks, base_timer, max_trades,
-                               sheet_url, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?)""",
-        (guild_id, channel_id, admin_channel_id, admin_role_id, budget,
-         min_picks, max_picks, base_timer, max_trades, sheet_url, database.now()),
+        """INSERT INTO leagues (guild_id, name, admin_channel_id, mode, doc_kind, doc_url,
+                                budget, tera_budget, min_picks, max_picks, base_timer,
+                                max_trades, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?)""",
+        (guild_id, name, admin_channel_id, mode, doc_kind, doc_url, budget, tera_budget,
+         min_picks, max_picks, base_timer, max_trades, database.now()),
     )
-    draft_id = cursor.lastrowid
+    league_id = cursor.lastrowid
 
-    for seat, (user_id, display_name) in enumerate(players, start=1):
-        conn.execute(
-            """INSERT INTO players (draft_id, user_id, display_name, draft_position,
-                                    budget_remaining, current_timer)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (draft_id, user_id, display_name, seat, budget, base_timer),
+    for label, channel_id, roster in pools:
+        pool_cursor = conn.execute(
+            "INSERT INTO pools (league_id, label, channel_id, status) VALUES (?, ?, ?, 'setup')",
+            (league_id, label, channel_id),
         )
+        pool_id = pool_cursor.lastrowid
+        coaches = coach_numbers_for(label, len(roster))
+
+        for seat, ((user_id, display_name), coach_number) in enumerate(
+                zip(roster, coaches), start=1):
+            conn.execute(
+                """INSERT INTO players (pool_id, user_id, display_name, draft_position,
+                                        coach_number, budget_remaining,
+                                        tera_budget_remaining, current_timer)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (pool_id, user_id, display_name, seat, coach_number,
+                 budget, tera_budget, base_timer),
+            )
 
     conn.commit()
-    return draft_id
+    return league_id
 
 
-def update_settings(conn, draft, budget=None, min_picks=None, max_picks=None, sheet_url=None):
-    """/edit - only legal while the draft is still in `setup`."""
-    if draft["status"] != "setup":
+# --------------------------------------------------------------------------
+# Finding leagues and pools
+# --------------------------------------------------------------------------
+
+
+def get_league(conn, league_id):
+    return conn.execute("SELECT * FROM leagues WHERE id = ?", (league_id,)).fetchone()
+
+
+def get_live_league_by_name(conn, guild_id, name):
+    """An unfinished league on this server with this name. Case-insensitive."""
+    return conn.execute(
+        "SELECT * FROM leagues WHERE guild_id = ? AND lower(name) = lower(?) "
+        "AND status IN ('setup', 'active')",
+        (guild_id, " ".join(str(name or "").split())),
+    ).fetchone()
+
+
+def require_league_by_name(conn, guild_id, name):
+    league = get_live_league_by_name(conn, guild_id, name)
+    if league is None:
+        running = [row["name"] for row in conn.execute(
+            "SELECT name FROM leagues WHERE guild_id = ? AND status IN ('setup','active') "
+            "ORDER BY name", (guild_id,))]
+        hint = f" Running here: {', '.join(running)}." if running else ""
+        raise DraftError(f"❌ There is no draft called **{name}** on this server.{hint}")
+    return league
+
+
+def get_league_pools(conn, league_id):
+    return conn.execute(
+        "SELECT * FROM pool_view WHERE league_id = ? ORDER BY label", (league_id,)
+    ).fetchall()
+
+
+def leagues_in_admin_channel(conn, channel_id):
+    """Unfinished leagues whose trades are approved in this channel."""
+    return conn.execute(
+        "SELECT * FROM leagues WHERE admin_channel_id = ? AND status IN ('setup', 'active') "
+        "ORDER BY name",
+        (channel_id,),
+    ).fetchall()
+
+
+def update_settings(conn, ctx, budget=None, min_picks=None, max_picks=None, doc_url=None,
+                    tera_budget=None, max_trades=None):
+    """/edit - only legal while the league is still in `setup`."""
+    league = get_league(conn, ctx["league_id"])
+    if league["status"] != "setup":
         raise DraftError("❌ The draft has already started, so its settings can no longer be edited.")
 
-    new_budget = draft["budget"] if budget is None else budget
-    new_min = draft["min_picks"] if min_picks is None else min_picks
-    new_max = draft["max_picks"] if max_picks is None else max_picks
+    new_budget = league["budget"] if budget is None else budget
+    new_min = league["min_picks"] if min_picks is None else min_picks
+    new_max = league["max_picks"] if max_picks is None else max_picks
+    new_tera = league["tera_budget"] if tera_budget is None else tera_budget
+    new_trades = league["max_trades"] if max_trades is None else max_trades
+    new_doc = league["doc_url"] if doc_url is None else doc_url
 
     if new_budget <= 0:
         raise DraftError("❌ The starting budget must be greater than 0.")
@@ -387,25 +552,85 @@ def update_settings(conn, draft, budget=None, min_picks=None, max_picks=None, sh
         raise DraftError("❌ The minimum number of picks must be at least 1.")
     if new_max < new_min:
         raise DraftError("❌ The maximum number of picks cannot be less than the minimum.")
+    if new_tera < 0:
+        raise DraftError("❌ The Tera budget cannot be negative (use 0 for no Tera format).")
+    if new_trades < 0:
+        raise DraftError("❌ The maximum number of trades cannot be negative (0 = unlimited).")
+    if league["doc_kind"] == "template" and new_max > config.SHEET_LAYOUT["roster_rows"]:
+        raise DraftError(
+            f"❌ The template only has {config.SHEET_LAYOUT['roster_rows']} roster rows per coach."
+        )
 
     conn.execute(
-        "UPDATE drafts SET budget = ?, min_picks = ?, max_picks = ?, sheet_url = ? WHERE id = ?",
-        (new_budget, new_min, new_max, sheet_url if sheet_url is not None else draft["sheet_url"],
-         draft["id"]),
+        """UPDATE leagues SET budget = ?, min_picks = ?, max_picks = ?, tera_budget = ?,
+                              max_trades = ?, doc_url = ? WHERE id = ?""",
+        (new_budget, new_min, new_max, new_tera, new_trades, new_doc, league["id"]),
     )
-    # No picks exist yet, so every player simply gets the new budget.
-    conn.execute("UPDATE players SET budget_remaining = ? WHERE draft_id = ?",
-                 (new_budget, draft["id"]))
-    conn.commit()
-    return get_draft(conn, draft["id"])
-
-
-def cancel_draft(conn, draft_id):
+    # No picks exist yet, so every player simply gets the new budgets.
     conn.execute(
-        "UPDATE drafts SET status = 'cancelled', finished_at = ?, turn_deadline = NULL WHERE id = ?",
-        (database.now(), draft_id),
+        """UPDATE players SET budget_remaining = ?, tera_budget_remaining = ?
+           WHERE pool_id IN (SELECT id FROM pools WHERE league_id = ?)""",
+        (new_budget, new_tera, league["id"]),
     )
     conn.commit()
+    return get_league(conn, league["id"])
+
+
+def cancel_league(conn, league_id):
+    """Abandon a league and every pool in it. Nothing is deleted."""
+    stamp = database.now()
+    conn.execute(
+        "UPDATE pools SET status = 'cancelled', finished_at = ?, turn_deadline = NULL "
+        "WHERE league_id = ? AND status IN ('setup', 'active')",
+        (stamp, league_id),
+    )
+    conn.execute("UPDATE leagues SET status = 'cancelled', finished_at = ? WHERE id = ?",
+                 (stamp, league_id))
+    conn.commit()
+
+
+def archive_league(conn, league_id):
+    """Close a finished league so its channels are free for a new /setup.
+
+    Used by `draft_only` leagues once the last round is done, and available
+    to a moderator afterwards. History is kept, only the status changes.
+    """
+    stamp = database.now()
+    conn.execute(
+        "UPDATE pools SET status = 'complete', finished_at = COALESCE(finished_at, ?), "
+        "turn_deadline = NULL WHERE league_id = ? AND status IN ('setup', 'active')",
+        (stamp, league_id),
+    )
+    conn.execute("UPDATE leagues SET status = 'archived', finished_at = COALESCE(finished_at, ?) "
+                 "WHERE id = ?", (stamp, league_id))
+    conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Moderator roles (set per server with /draft-moderator)
+# --------------------------------------------------------------------------
+
+
+def add_moderator_role(conn, guild_id, role_id, added_by):
+    conn.execute(
+        "INSERT OR IGNORE INTO moderator_roles (guild_id, role_id, added_by, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (guild_id, role_id, added_by, database.now()),
+    )
+    conn.commit()
+
+
+def remove_moderator_role(conn, guild_id, role_id):
+    cursor = conn.execute(
+        "DELETE FROM moderator_roles WHERE guild_id = ? AND role_id = ?", (guild_id, role_id)
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def moderator_role_ids(conn, guild_id):
+    return {row["role_id"] for row in conn.execute(
+        "SELECT role_id FROM moderator_roles WHERE guild_id = ?", (guild_id,))}
 
 
 # --------------------------------------------------------------------------
@@ -430,7 +655,7 @@ def _event(kind, player=None, **fields):
     return event
 
 
-def start_draft(conn, draft):
+def start_pool(conn, draft):
     """/draft - flip the draft to active and open round 1."""
     if draft["status"] == "active":
         raise DraftError("❌ This draft is already running.")
@@ -439,23 +664,30 @@ def start_draft(conn, draft):
     if player_count(conn, draft["id"]) < config.MIN_PLAYERS:
         raise DraftError(f"❌ A draft needs at least {config.MIN_PLAYERS} players.")
 
+    stamp = database.now()
     conn.execute(
-        """UPDATE drafts SET status = 'active', current_round = 1, current_turn_index = 0,
-                             queue_exhausted = 0, halved_this_turn = 0, started_at = ? WHERE id = ?""",
-        (database.now(), draft["id"]),
+        """UPDATE pools SET status = 'active', current_round = 1, current_turn_index = 0,
+                            queue_exhausted = 0, halved_this_turn = 0, started_at = ?
+           WHERE id = ?""",
+        (stamp, draft["id"]),
+    )
+    conn.execute(
+        "UPDATE leagues SET status = 'active', started_at = COALESCE(started_at, ?) "
+        "WHERE id = ? AND status = 'setup'",
+        (stamp, draft["league_id"]),
     )
     conn.commit()
     return begin_turn(conn, draft["id"])
 
 
-def advance_turn(conn, draft_id):
+def advance_turn(conn, pool_id):
     """Move the pointer to the next seat, rolling into the next round.
 
     Also finishes the draft when the last round is done, or when no player
     can afford another pick.
     """
-    draft = get_draft(conn, draft_id)
-    total = player_count(conn, draft_id)
+    draft = get_pool(conn, pool_id)
+    total = player_count(conn, pool_id)
 
     index = draft["current_turn_index"] + 1
     round_number = draft["current_round"]
@@ -467,22 +699,47 @@ def advance_turn(conn, draft_id):
     # The draft also ends early if nobody can afford anything any more.
     if round_number > draft["max_picks"] or not anyone_can_pick(conn, draft):
         conn.execute(
-            """UPDATE drafts SET status = 'complete', finished_at = ?, turn_deadline = NULL,
-                                 queue_exhausted = 0, halved_this_turn = 0 WHERE id = ?""",
-            (database.now(), draft_id),
+            """UPDATE pools SET status = 'complete', finished_at = ?, turn_deadline = NULL,
+                                queue_exhausted = 0, halved_this_turn = 0 WHERE id = ?""",
+            (database.now(), pool_id),
         )
         conn.commit()
+        _finish_league_if_done(conn, draft["league_id"])
         return
 
     conn.execute(
-        """UPDATE drafts SET current_round = ?, current_turn_index = ?, turn_deadline = NULL,
+        """UPDATE pools SET current_round = ?, current_turn_index = ?, turn_deadline = NULL,
                              queue_exhausted = 0, halved_this_turn = 0 WHERE id = ?""",
-        (round_number, index, draft_id),
+        (round_number, index, pool_id),
     )
     conn.commit()
 
 
-def _halve_timer(conn, draft_id, player):
+def _finish_league_if_done(conn, league_id):
+    """Close the league once every pool has finished drafting.
+
+    A `draft_only` league is archived straight away, which frees its
+    channels for a new /setup. History is kept either way.
+    """
+    unfinished = conn.execute(
+        "SELECT COUNT(*) AS n FROM pools WHERE league_id = ? AND status IN ('setup', 'active')",
+        (league_id,),
+    ).fetchone()["n"]
+    if unfinished:
+        return False
+
+    league = get_league(conn, league_id)
+    if league is None or league["status"] not in ("setup", "active"):
+        return False
+
+    status = "archived" if league["mode"] == "draft_only" else "complete"
+    conn.execute("UPDATE leagues SET status = ?, finished_at = ? WHERE id = ?",
+                 (status, database.now(), league_id))
+    conn.commit()
+    return True
+
+
+def _halve_timer(conn, pool_id, player):
     """Divide this player's personal timer, respecting the configured floor.
 
     A turn may only cost a player one reduction. Without this guard a player
@@ -491,7 +748,7 @@ def _halve_timer(conn, draft_id, player):
 
     Returns (timer, was_reduced).
     """
-    draft = get_draft(conn, draft_id)
+    draft = get_pool(conn, pool_id)
     if draft["halved_this_turn"]:
         return player["current_timer"], False
 
@@ -501,7 +758,7 @@ def _halve_timer(conn, draft_id, player):
         "UPDATE players SET current_timer = ?, skip_count = skip_count + 1 WHERE id = ?",
         (reduced, player["id"]),
     )
-    conn.execute("UPDATE drafts SET halved_this_turn = 1 WHERE id = ?", (draft_id,))
+    conn.execute("UPDATE pools SET halved_this_turn = 1 WHERE id = ?", (pool_id,))
     return reduced, True
 
 
@@ -521,7 +778,7 @@ def _expire_stale_makeups(conn, draft, player):
     events = []
     stale = conn.execute(
         """SELECT * FROM makeups
-           WHERE draft_id = ? AND player_id = ? AND status = 'pending' AND round <= ?
+           WHERE pool_id = ? AND player_id = ? AND status = 'pending' AND round <= ?
            ORDER BY round""",
         (draft["id"], player["id"], draft["current_round"] - 1),
     ).fetchall()
@@ -534,7 +791,7 @@ def _expire_stale_makeups(conn, draft, player):
             (database.now(), makeup["id"]),
         )
         conn.execute(
-            "INSERT INTO skips (draft_id, player_id, round, reason, halved, created_at) "
+            "INSERT INTO skips (pool_id, player_id, round, reason, halved, created_at) "
             "VALUES (?, ?, ?, 'makeup deadline passed', 0, ?)",
             (draft["id"], player["id"], makeup["round"], database.now()),
         )
@@ -551,7 +808,7 @@ def _try_queue(conn, draft, player):
     """
     queued = conn.execute(
         """SELECT * FROM queued_picks
-           WHERE draft_id = ? AND player_id = ? AND round = ?
+           WHERE pool_id = ? AND player_id = ? AND round = ?
            ORDER BY priority""",
         (draft["id"], player["id"], draft["current_round"]),
     ).fetchall()
@@ -561,18 +818,21 @@ def _try_queue(conn, draft, player):
 
     for entry in queued:
         cost = entry["cost"] if entry["cost"] is not None else 0
+        tera = bool(entry["tera_captain"])
         try:
-            validate_pick(conn, draft, player, draft["current_round"], entry["pokemon"], cost)
+            validate_pick(conn, draft, player, draft["current_round"], entry["pokemon"],
+                          cost, tera_captain=tera)
         except DraftError:
             continue        # already taken, too expensive, ... try the next one
         pick = _record_pick(conn, draft, player, draft["current_round"],
-                            entry["pokemon"], cost, is_makeup=False, is_auto=True)
+                            entry["pokemon"], cost, tera_captain=tera,
+                            is_makeup=False, is_auto=True)
         return pick, True
 
     return None, True
 
 
-def begin_turn(conn, draft_id):
+def begin_turn(conn, pool_id):
     """Open the current turn, resolving everything that happens automatically.
 
     Loops because one turn can lead straight into the next: a queued pick,
@@ -587,11 +847,17 @@ def begin_turn(conn, draft_id):
         if guard > 1000:            # impossible in practice; stops a runaway loop
             break
 
-        draft = get_draft(conn, draft_id)
+        draft = get_pool(conn, pool_id)
         if draft["status"] != "active":
             if draft["status"] == "complete":
-                events.append(_event("draft_complete", total_rounds=draft["max_picks"],
-                                     round_reached=draft["current_round"]))
+                league = get_league(conn, draft["league_id"])
+                events.append(_event(
+                    "draft_complete", total_rounds=draft["max_picks"],
+                    round_reached=draft["current_round"], pool=draft["label"],
+                    league_name=draft["league_name"],
+                    league_finished=league is not None
+                    and league["status"] in ("complete", "archived"),
+                    archived=league is not None and league["status"] == "archived"))
             break
 
         player = current_player(conn, draft)
@@ -603,7 +869,7 @@ def begin_turn(conn, draft_id):
                                  reason=("roster full"
                                          if picks_made(conn, draft["id"], player["id"])
                                          >= draft["max_picks"] else "out of budget")))
-            advance_turn(conn, draft_id)
+            advance_turn(conn, pool_id)
             continue
 
         # 2. An unused makeup pick dies as this turn opens, and takes this
@@ -616,7 +882,7 @@ def begin_turn(conn, draft_id):
             # second halving for it.
             instant = any(event["back_to_back"] for event in expired)
             events.extend(skip_current_player(
-                conn, draft_id, reason="makeup deadline passed",
+                conn, pool_id, reason="makeup deadline passed",
                 halve=False if instant else None, _nested=True))
             continue
 
@@ -626,40 +892,40 @@ def begin_turn(conn, draft_id):
             events.append(_event("auto_pick", player, round=pick["round"],
                                  pokemon=pick["pokemon"], cost=pick["cost"],
                                  pick_order=pick["pick_order"]))
-            advance_turn(conn, draft_id)
+            advance_turn(conn, pool_id)
             continue    # the next player might also have a queue
 
         if had_queue:
             # Every queued Pokemon was gone. This must NOT be treated as a
             # normal skip, so flag the turn: if the clock later runs out the
             # player's timer is left alone.
-            conn.execute("UPDATE drafts SET queue_exhausted = 1 WHERE id = ?", (draft_id,))
+            conn.execute("UPDATE pools SET queue_exhausted = 1 WHERE id = ?", (pool_id,))
             conn.commit()
             events.append(_event("queue_exhausted", player, round=draft["current_round"]))
 
         # 4. Nothing automatic happened - start the clock.
         events.append(_event("turn_started", player, round=draft["current_round"],
                              seconds=player["current_timer"],
-                             pending_makeups=pending_makeup_rounds(conn, draft_id, player["id"])))
+                             pending_makeups=pending_makeup_rounds(conn, pool_id, player["id"])))
         break
 
     return events
 
 
-def open_turn_clock(conn, draft_id, deadline):
+def open_turn_clock(conn, pool_id, deadline):
     """Store when the current turn runs out (survives a bot restart)."""
-    conn.execute("UPDATE drafts SET turn_deadline = ? WHERE id = ?", (deadline, draft_id))
+    conn.execute("UPDATE pools SET turn_deadline = ? WHERE id = ?", (deadline, pool_id))
     conn.commit()
 
 
-def skip_current_player(conn, draft_id, reason="timer expired", halve=None, _nested=False):
+def skip_current_player(conn, pool_id, reason="timer expired", halve=None, _nested=False):
     """Skip whoever is on the clock and move on.
 
     `halve` defaults to "yes, unless the player's queue was exhausted" -
     a player whose queue was wiped out by other people should not be
     punished with a shorter timer.
     """
-    draft = get_draft(conn, draft_id)
+    draft = get_pool(conn, pool_id)
     if draft["status"] != "active":
         return []
 
@@ -670,22 +936,22 @@ def skip_current_player(conn, draft_id, reason="timer expired", halve=None, _nes
         halve = not draft["queue_exhausted"]
 
     if halve:
-        new_timer, halve = _halve_timer(conn, draft_id, player)
+        new_timer, halve = _halve_timer(conn, pool_id, player)
     else:
         new_timer = player["current_timer"]
 
     conn.execute(
-        "INSERT INTO skips (draft_id, player_id, round, reason, halved, created_at) "
+        "INSERT INTO skips (pool_id, player_id, round, reason, halved, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (draft_id, player["id"], draft["current_round"], reason, 1 if halve else 0, database.now()),
+        (pool_id, player["id"], draft["current_round"], reason, 1 if halve else 0, database.now()),
     )
     # Owed a makeup pick for the round they just missed, due before their
     # next turn. INSERT OR IGNORE protects the UNIQUE(draft, player, round)
     # constraint. created_turn is what lets the boundary grace period work.
     conn.execute(
-        "INSERT OR IGNORE INTO makeups (draft_id, player_id, round, status, created_turn, created_at) "
+        "INSERT OR IGNORE INTO makeups (pool_id, player_id, round, status, created_turn, created_at) "
         "VALUES (?, ?, ?, 'pending', ?, ?)",
-        (draft_id, player["id"], draft["current_round"], turn_number(conn, draft), database.now()),
+        (pool_id, player["id"], draft["current_round"], turn_number(conn, draft), database.now()),
     )
     conn.commit()
 
@@ -693,9 +959,9 @@ def skip_current_player(conn, draft_id, reason="timer expired", halve=None, _nes
                      round=draft["current_round"], new_timer=new_timer, halved=halve,
                      queue_exhausted=bool(draft["queue_exhausted"]))]
 
-    advance_turn(conn, draft_id)
+    advance_turn(conn, pool_id)
     if not _nested:
-        events.extend(begin_turn(conn, draft_id))
+        events.extend(begin_turn(conn, pool_id))
     return events
 
 
@@ -705,32 +971,45 @@ def skip_current_player(conn, draft_id, reason="timer expired", halve=None, _nes
 
 
 def _record_pick(conn, draft, player, round_number, pokemon, cost,
-                 is_makeup=False, is_auto=False):
-    """Write a validated pick to history + roster and charge the budget."""
+                 tera_captain=False, is_makeup=False, is_auto=False):
+    """Write a validated pick to history + roster and charge the budget(s).
+
+    A Tera Captain costs its Tera Tax from the normal budget and the Tera
+    budget both, which is exactly what the spreadsheet does: the Rosters
+    tab subtracts every row, and the Tera budget subtracts ticked rows.
+    """
     key = normalize(pokemon)
     order = next_pick_order(conn, draft["id"])
 
     cursor = conn.execute(
-        """INSERT INTO picks (draft_id, player_id, round, pokemon, pokemon_key, cost,
-                              pick_order, is_makeup, is_auto, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO picks (pool_id, player_id, round, pokemon, pokemon_key, cost,
+                              tera_captain, pick_order, is_makeup, is_auto, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (draft["id"], player["id"], round_number, str(pokemon).strip(), key, cost,
-         order, 1 if is_makeup else 0, 1 if is_auto else 0, database.now()),
+         1 if tera_captain else 0, order, 1 if is_makeup else 0,
+         1 if is_auto else 0, database.now()),
     )
     pick_id = cursor.lastrowid
 
     conn.execute(
-        """INSERT INTO rosters (draft_id, player_id, pokemon, pokemon_key, cost, pick_id, source)
-           VALUES (?, ?, ?, ?, ?, ?, 'draft')""",
-        (draft["id"], player["id"], str(pokemon).strip(), key, cost, pick_id),
+        """INSERT INTO rosters (pool_id, player_id, pokemon, pokemon_key, cost,
+                                tera_captain, pick_id, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'draft')""",
+        (draft["id"], player["id"], str(pokemon).strip(), key, cost,
+         1 if tera_captain else 0, pick_id),
     )
     conn.execute(
         "UPDATE players SET budget_remaining = budget_remaining - ? WHERE id = ?",
         (cost, player["id"]),
     )
+    if tera_captain:
+        conn.execute(
+            "UPDATE players SET tera_budget_remaining = tera_budget_remaining - ? WHERE id = ?",
+            (cost, player["id"]),
+        )
     # The queue for this round has now been used up.
     conn.execute(
-        "DELETE FROM queued_picks WHERE draft_id = ? AND player_id = ? AND round = ?",
+        "DELETE FROM queued_picks WHERE pool_id = ? AND player_id = ? AND round = ?",
         (draft["id"], player["id"], round_number),
     )
     conn.commit()
@@ -738,7 +1017,8 @@ def _record_pick(conn, draft, player, round_number, pokemon, cost,
     return conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
 
 
-def make_pick(conn, draft, user_id, round_number, pokemon, cost, acting_as_admin=False):
+def make_pick(conn, draft, user_id, round_number, pokemon, cost,
+              tera_captain=False, acting_as_admin=False):
     """/pick - the normal on-the-clock pick. Returns (pick, events)."""
     if draft["status"] != "active":
         raise DraftError("❌ This draft is not running.")
@@ -757,27 +1037,28 @@ def make_pick(conn, draft, user_id, round_number, pokemon, cost, acting_as_admin
     if round_number != draft["current_round"]:
         raise DraftError(f"❌ Incorrect round. It is currently Round {draft['current_round']}.")
 
-    validate_pick(conn, draft, player, round_number, pokemon, cost)
-    pick = _record_pick(conn, draft, player, round_number, pokemon, cost)
+    validate_pick(conn, draft, player, round_number, pokemon, cost, tera_captain=tera_captain)
+    pick = _record_pick(conn, draft, player, round_number, pokemon, cost,
+                        tera_captain=tera_captain)
 
     events = [_event("pick_made", get_player_by_id(conn, player["id"]),
                      round=round_number, pokemon=pick["pokemon"], cost=cost,
-                     pick_order=pick["pick_order"])]
+                     tera_captain=tera_captain, pick_order=pick["pick_order"])]
     advance_turn(conn, draft["id"])
     events.extend(begin_turn(conn, draft["id"]))
     return pick, events
 
 
-def pending_makeup_rounds(conn, draft_id, player_id):
+def pending_makeup_rounds(conn, pool_id, player_id):
     rows = conn.execute(
-        "SELECT round FROM makeups WHERE draft_id = ? AND player_id = ? AND status = 'pending' "
+        "SELECT round FROM makeups WHERE pool_id = ? AND player_id = ? AND status = 'pending' "
         "ORDER BY round",
-        (draft_id, player_id),
+        (pool_id, player_id),
     ).fetchall()
     return [row["round"] for row in rows]
 
 
-def make_makeup_pick(conn, draft, user_id, round_number, pokemon, cost):
+def make_makeup_pick(conn, draft, user_id, round_number, pokemon, cost, tera_captain=False):
     """/makeuppick - resolve a missed round. Never changes whose turn it is.
 
     Also allowed once the draft is complete, so that somebody skipped in the
@@ -789,7 +1070,7 @@ def make_makeup_pick(conn, draft, user_id, round_number, pokemon, cost):
     player = require_player(conn, draft["id"], user_id)
 
     makeup = conn.execute(
-        "SELECT * FROM makeups WHERE draft_id = ? AND player_id = ? AND round = ?",
+        "SELECT * FROM makeups WHERE pool_id = ? AND player_id = ? AND round = ?",
         (draft["id"], player["id"], round_number),
     ).fetchone()
 
@@ -812,8 +1093,9 @@ def make_makeup_pick(conn, draft, user_id, round_number, pokemon, cost):
         conn.commit()
         raise DraftError(f"❌ Your Round {round_number} makeup pick deadline has passed.")
 
-    validate_pick(conn, draft, player, round_number, pokemon, cost)
-    pick = _record_pick(conn, draft, player, round_number, pokemon, cost, is_makeup=True)
+    validate_pick(conn, draft, player, round_number, pokemon, cost, tera_captain=tera_captain)
+    pick = _record_pick(conn, draft, player, round_number, pokemon, cost,
+                        tera_captain=tera_captain, is_makeup=True)
 
     conn.execute("UPDATE makeups SET status = 'resolved', resolved_at = ? WHERE id = ?",
                  (database.now(), makeup["id"]))
@@ -821,7 +1103,7 @@ def make_makeup_pick(conn, draft, user_id, round_number, pokemon, cost):
     return pick
 
 
-def queue_picks(conn, draft, user_id, round_number, pokemon_names, costs=None):
+def queue_picks(conn, draft, user_id, round_number, pokemon_names, costs=None, teras=None):
     """/queuepick - store up to five fallbacks for one of your own turns."""
     if draft["status"] != "active":
         raise DraftError("❌ This draft is not running.")
@@ -836,33 +1118,34 @@ def queue_picks(conn, draft, user_id, round_number, pokemon_names, costs=None):
         raise DraftError(f"❌ You may queue at most {config.MAX_QUEUE_LENGTH} Pokémon.")
 
     costs = costs or [None] * len(pokemon_names)
+    teras = teras or [False] * len(pokemon_names)
 
     conn.execute(
-        "DELETE FROM queued_picks WHERE draft_id = ? AND player_id = ? AND round = ?",
+        "DELETE FROM queued_picks WHERE pool_id = ? AND player_id = ? AND round = ?",
         (draft["id"], player["id"], round_number),
     )
-    for priority, (name, cost) in enumerate(zip(pokemon_names, costs), start=1):
+    for priority, (name, cost, tera) in enumerate(zip(pokemon_names, costs, teras), start=1):
         conn.execute(
-            """INSERT INTO queued_picks (draft_id, player_id, round, priority,
-                                         pokemon, pokemon_key, cost)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO queued_picks (pool_id, player_id, round, priority,
+                                         pokemon, pokemon_key, cost, tera_captain)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (draft["id"], player["id"], round_number, priority,
-             name.strip(), normalize(name), cost),
+             name.strip(), normalize(name), cost, 1 if tera else 0),
         )
     conn.commit()
     return pokemon_names
 
 
-def get_queue(conn, draft_id, player_id, round_number):
+def get_queue(conn, pool_id, player_id, round_number):
     return conn.execute(
-        "SELECT * FROM queued_picks WHERE draft_id = ? AND player_id = ? AND round = ? "
+        "SELECT * FROM queued_picks WHERE pool_id = ? AND player_id = ? AND round = ? "
         "ORDER BY priority",
-        (draft_id, player_id, round_number),
+        (pool_id, player_id, round_number),
     ).fetchall()
 
 
 def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
-              target_user_id=None, acting_as_admin=False):
+              tera_captain=False, target_user_id=None, acting_as_admin=False):
     """/editpick - replace a pick that has already been made."""
     target_user_id = target_user_id or actor_user_id
     if target_user_id != actor_user_id and not acting_as_admin:
@@ -871,7 +1154,7 @@ def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
     player = require_player(conn, draft["id"], target_user_id)
 
     pick = conn.execute(
-        "SELECT * FROM picks WHERE draft_id = ? AND player_id = ? AND round = ?",
+        "SELECT * FROM picks WHERE pool_id = ? AND player_id = ? AND round = ?",
         (draft["id"], player["id"], round_number),
     ).fetchone()
 
@@ -887,12 +1170,14 @@ def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
         if round_number < 1 or round_number > draft["max_picks"]:
             raise DraftError(f"❌ This draft only has rounds 1–{draft['max_picks']}.")
 
-        validate_pick(conn, draft, player, round_number, pokemon, cost)
-        created = _record_pick(conn, draft, player, round_number, pokemon, cost)
+        validate_pick(conn, draft, player, round_number, pokemon, cost,
+                      tera_captain=tera_captain)
+        created = _record_pick(conn, draft, player, round_number, pokemon, cost,
+                               tera_captain=tera_captain)
         # Filling in the round settles any makeup pick owed for it.
         conn.execute(
             "UPDATE makeups SET status = 'resolved', resolved_at = ? "
-            "WHERE draft_id = ? AND player_id = ? AND round = ? AND status = 'pending'",
+            "WHERE pool_id = ? AND player_id = ? AND round = ? AND status = 'pending'",
             (database.now(), draft["id"], player["id"], round_number),
         )
         conn.commit()
@@ -901,6 +1186,8 @@ def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
             "round": round_number,
             "old_pokemon": None,
             "old_cost": None,
+            "old_tera": False,
+            "tera_captain": tera_captain,
             "new_pokemon": created["pokemon"],
             "new_cost": cost,
             "created": True,
@@ -919,22 +1206,33 @@ def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
     # then validate. If validation fails nothing has been committed yet.
     conn.execute("UPDATE players SET budget_remaining = budget_remaining + ? WHERE id = ?",
                  (pick["cost"], player["id"]))
+    if pick["tera_captain"]:
+        conn.execute(
+            "UPDATE players SET tera_budget_remaining = tera_budget_remaining + ? WHERE id = ?",
+            (pick["cost"], player["id"]))
     refreshed = get_player_by_id(conn, player["id"])
 
     try:
         validate_pick(conn, draft, refreshed, round_number, pokemon, cost,
-                      replacing_key=pick["pokemon_key"])
+                      tera_captain=tera_captain, replacing_key=pick["pokemon_key"])
     except DraftError:
         conn.rollback()
         raise
 
     key = normalize(pokemon)
-    conn.execute("UPDATE picks SET pokemon = ?, pokemon_key = ?, cost = ? WHERE id = ?",
-                 (str(pokemon).strip(), key, cost, pick["id"]))
-    conn.execute("UPDATE rosters SET pokemon = ?, pokemon_key = ?, cost = ? WHERE id = ?",
-                 (str(pokemon).strip(), key, cost, roster_row["id"]))
+    flag = 1 if tera_captain else 0
+    conn.execute(
+        "UPDATE picks SET pokemon = ?, pokemon_key = ?, cost = ?, tera_captain = ? WHERE id = ?",
+        (str(pokemon).strip(), key, cost, flag, pick["id"]))
+    conn.execute(
+        "UPDATE rosters SET pokemon = ?, pokemon_key = ?, cost = ?, tera_captain = ? WHERE id = ?",
+        (str(pokemon).strip(), key, cost, flag, roster_row["id"]))
     conn.execute("UPDATE players SET budget_remaining = budget_remaining - ? WHERE id = ?",
                  (cost, player["id"]))
+    if tera_captain:
+        conn.execute(
+            "UPDATE players SET tera_budget_remaining = tera_budget_remaining - ? WHERE id = ?",
+            (cost, player["id"]))
     conn.commit()
 
     return {
@@ -942,6 +1240,8 @@ def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
         "round": round_number,
         "old_pokemon": pick["pokemon"],
         "old_cost": pick["cost"],
+        "old_tera": bool(pick["tera_captain"]),
+        "tera_captain": tera_captain,
         "new_pokemon": str(pokemon).strip(),
         "new_cost": cost,
         "created": False,
@@ -982,16 +1282,19 @@ def propose_trade(conn, draft, user_id, drops, gets, partner_user_id=None):
 
     warnings = trade_warnings(conn, draft, proposer, partner, drops, gets)
 
+    # Numbered per league so that an admin channel shared by several pools
+    # never has two trade #1s in it.
     number = conn.execute(
-        "SELECT COALESCE(MAX(trade_number), 0) + 1 AS n FROM trades WHERE draft_id = ?",
-        (draft["id"],),
+        "SELECT COALESCE(MAX(trade_number), 0) + 1 AS n FROM trades WHERE league_id = ?",
+        (draft["league_id"],),
     ).fetchone()["n"]
 
     cursor = conn.execute(
-        """INSERT INTO trades (draft_id, trade_number, proposer_id, partner_id,
+        """INSERT INTO trades (league_id, pool_id, trade_number, proposer_id, partner_id,
                                drops, gets, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
-        (draft["id"], number, proposer["id"], partner["id"] if partner else None,
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+        (draft["league_id"], draft["id"], number, proposer["id"],
+         partner["id"] if partner else None,
          json.dumps(drops), json.dumps(gets), database.now()),
     )
     conn.commit()
@@ -999,12 +1302,12 @@ def propose_trade(conn, draft, user_id, drops, gets, partner_user_id=None):
     return record, warnings
 
 
-def trades_used(conn, draft_id, player_id):
+def trades_used(conn, pool_id, player_id):
     """How many approved trades a player is already part of."""
     return conn.execute(
-        "SELECT COUNT(*) AS n FROM trades WHERE draft_id = ? AND status = 'approved' "
+        "SELECT COUNT(*) AS n FROM trades WHERE pool_id = ? AND status = 'approved' "
         "AND (proposer_id = ? OR partner_id = ?)",
-        (draft_id, player_id, player_id),
+        (pool_id, player_id, player_id),
     ).fetchone()["n"]
 
 
@@ -1063,10 +1366,10 @@ def apply_sheet_cost(conn, draft, pokemon, cost):
     return True
 
 
-def get_trade(conn, draft_id, trade_number):
+def get_trade(conn, league_id, trade_number):
     return conn.execute(
-        "SELECT * FROM trades WHERE draft_id = ? AND trade_number = ?",
-        (draft_id, trade_number),
+        "SELECT * FROM trades WHERE league_id = ? AND trade_number = ?",
+        (league_id, trade_number),
     ).fetchone()
 
 
@@ -1076,7 +1379,7 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
     The admin has already decided the trade is legal, so this applies it as
     written and reports anything it could not do rather than refusing.
     """
-    trade = get_trade(conn, draft["id"], trade_number)
+    trade = get_trade(conn, draft["league_id"], trade_number)
     if trade is None:
         raise DraftError(f"❌ There is no trade #{trade_number} in this draft.")
     if trade["status"] != "pending":
@@ -1113,7 +1416,7 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
             # Free agency: no roster row yet, so one is created. The cost is
             # filled in from the sheet by the caller when one is linked.
             conn.execute(
-                """INSERT INTO rosters (draft_id, player_id, pokemon, pokemon_key, cost, source)
+                """INSERT INTO rosters (pool_id, player_id, pokemon, pokemon_key, cost, source)
                    VALUES (?, ?, ?, ?, 0, 'trade')""",
                 (draft["id"], proposer["id"], name.strip(), normalize(name)),
             )
@@ -1137,11 +1440,11 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
         (database.now(), approver_user_id, trade["id"]),
     )
     conn.commit()
-    return get_trade(conn, draft["id"], trade_number), notes
+    return get_trade(conn, draft["league_id"], trade_number), notes
 
 
 def reject_trade(conn, draft, trade_number, approver_user_id):
-    trade = get_trade(conn, draft["id"], trade_number)
+    trade = get_trade(conn, draft["league_id"], trade_number)
     if trade is None:
         raise DraftError(f"❌ There is no trade #{trade_number} in this draft.")
     if trade["status"] != "pending":
@@ -1151,7 +1454,116 @@ def reject_trade(conn, draft, trade_number, approver_user_id):
         (database.now(), approver_user_id, trade["id"]),
     )
     conn.commit()
-    return get_trade(conn, draft["id"], trade_number)
+    return get_trade(conn, draft["league_id"], trade_number)
+
+
+# --------------------------------------------------------------------------
+# Substitutions
+# --------------------------------------------------------------------------
+
+
+def request_substitution(conn, draft, user_id, display_name, reason):
+    """Record a request to join or leave a draft, for a moderator to act on.
+
+    Somebody already drafting is asking to sub **out**; anybody else is
+    offering to sub **in**. Nothing changes until a moderator runs
+    /substitute - this only puts the request in front of them.
+    """
+    reason = " ".join(str(reason or "").split())
+    if not reason:
+        raise DraftError("❌ Please give a reason for the substitution.")
+    if len(reason) > 400:
+        raise DraftError("❌ That reason is too long (400 characters maximum).")
+
+    player = get_player(conn, draft["id"], user_id)
+    kind = "out" if player is not None else "in"
+
+    existing = conn.execute(
+        "SELECT * FROM sub_requests WHERE league_id = ? AND user_id = ? AND status = 'open'",
+        (draft["league_id"], user_id),
+    ).fetchone()
+    if existing is not None:
+        raise DraftError(
+            f"❌ You already have an open substitution request "
+            f"(#{existing['request_number']}). A moderator will deal with it."
+        )
+
+    number = conn.execute(
+        "SELECT COALESCE(MAX(request_number), 0) + 1 AS n FROM sub_requests WHERE league_id = ?",
+        (draft["league_id"],),
+    ).fetchone()["n"]
+
+    cursor = conn.execute(
+        """INSERT INTO sub_requests (league_id, pool_id, request_number, user_id,
+                                     display_name, kind, reason, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
+        (draft["league_id"], draft["id"], number, user_id, display_name, kind,
+         reason, database.now()),
+    )
+    conn.commit()
+    return conn.execute("SELECT * FROM sub_requests WHERE id = ?",
+                        (cursor.lastrowid,)).fetchone()
+
+
+def open_sub_requests(conn, league_id):
+    return conn.execute(
+        "SELECT * FROM sub_requests WHERE league_id = ? AND status = 'open' "
+        "ORDER BY request_number",
+        (league_id,),
+    ).fetchall()
+
+
+def substitute_player(conn, draft, out_user_id, in_user_id, in_display_name):
+    """Hand a seat over to somebody else, keeping the team intact.
+
+    The seat is what persists: roster, budgets, draft position, picks and
+    any makeup picks all stay exactly as they were, and only the person
+    holding them changes. Their personal timer and skip count are reset to
+    the base, because a replacement should not inherit somebody else's
+    penalties - a moderator has to approve the swap, so that cannot be
+    used to dodge a shrinking clock.
+    """
+    player = get_player(conn, draft["id"], out_user_id)
+    if player is None:
+        raise DraftError("❌ That player is not in this pool's draft.")
+    if in_user_id == out_user_id:
+        raise DraftError("❌ Those are the same person.")
+
+    # One person may not hold two seats in the same league.
+    clash = conn.execute(
+        """SELECT players.*, pools.label FROM players
+           JOIN pools ON pools.id = players.pool_id
+           WHERE pools.league_id = ? AND players.user_id = ?""",
+        (draft["league_id"], in_user_id),
+    ).fetchone()
+    if clash is not None:
+        raise DraftError(
+            f"❌ <@{in_user_id}> is already drafting in this league (pool {clash['label']})."
+        )
+
+    conn.execute(
+        """UPDATE players SET user_id = ?, display_name = ?, current_timer = ?,
+                              skip_count = 0 WHERE id = ?""",
+        (in_user_id, in_display_name, draft["base_timer"], player["id"]),
+    )
+    # Any request either of them had open is now dealt with.
+    conn.execute(
+        "UPDATE sub_requests SET status = 'resolved', resolved_at = ? "
+        "WHERE league_id = ? AND user_id IN (?, ?) AND status = 'open'",
+        (database.now(), draft["league_id"], out_user_id, in_user_id),
+    )
+    conn.commit()
+
+    return {
+        "pool": draft["label"],
+        "seat": player["draft_position"],
+        "coach_number": player["coach_number"],
+        "out_user_id": out_user_id,
+        "out_name": player["display_name"],
+        "in_user_id": in_user_id,
+        "in_name": in_display_name,
+        "roster": roster_view(conn, draft, get_player_by_id(conn, player["id"])),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1161,60 +1573,68 @@ def reject_trade(conn, draft, trade_number, approver_user_id):
 
 def roster_view(conn, draft, player):
     rows = conn.execute(
-        "SELECT * FROM rosters WHERE draft_id = ? AND player_id = ? ORDER BY id",
+        "SELECT * FROM rosters WHERE pool_id = ? AND player_id = ? ORDER BY id",
         (draft["id"], player["id"]),
     ).fetchall()
     spent = sum(row["cost"] for row in rows)
+    captains = [(row["pokemon"], row["cost"]) for row in rows if row["tera_captain"]]
     return {
         "player": player,
         "pokemon": [(row["pokemon"], row["cost"]) for row in rows],
+        "entries": [(row["pokemon"], row["cost"], bool(row["tera_captain"])) for row in rows],
         "spent": spent,
         "remaining": player["budget_remaining"],
         "count": len(rows),
         "max_picks": draft["max_picks"],
         "min_picks": draft["min_picks"],
+        "tera_format": bool(draft["tera_budget"]),
+        "tera_budget": draft["tera_budget"],
+        "tera_remaining": player["tera_budget_remaining"],
+        "tera_captains": captains,
+        "max_tera": config.MAX_TERA_CAPTAINS,
     }
 
 
-def round_picks(conn, draft_id, round_number):
+def round_picks(conn, pool_id, round_number):
     return conn.execute(
         """SELECT picks.*, players.display_name, players.user_id
            FROM picks JOIN players ON players.id = picks.player_id
-           WHERE picks.draft_id = ? AND picks.round = ?
+           WHERE picks.pool_id = ? AND picks.round = ?
            ORDER BY picks.pick_order""",
-        (draft_id, round_number),
+        (pool_id, round_number),
     ).fetchall()
 
 
 def completed_rounds(conn, draft):
     """Rounds that have at least one pick, most recent last."""
     rows = conn.execute(
-        "SELECT DISTINCT round FROM picks WHERE draft_id = ? ORDER BY round", (draft["id"],)
+        "SELECT DISTINCT round FROM picks WHERE pool_id = ? ORDER BY round", (draft["id"],)
     ).fetchall()
     return [row["round"] for row in rows]
 
 
 def roster_block(conn, draft, player, rows):
-    """The column of names to write into one coach's roster block.
+    """One coach's roster column, as [(pokemon, is_tera_captain), ...].
 
-    Index 0 is round 1. A Pokemon this player drafted sits in its own round's
-    row, so the block reads like the draft did. Anything dropped in a trade
-    simply leaves its row empty, and anything gained in a trade has no round
-    of its own, so it drops into the first free row - repeating until the
-    block is full.
+    Index 0 is round 1. A Pokemon this player drafted sits in its own
+    round's row, so the block reads like the draft did. Anything dropped in
+    a trade simply leaves its row empty, and anything gained in a trade has
+    no round of its own, so it drops into the first free row - repeating
+    until the block is full.
 
     That keeps the block a true picture of the current roster, which is what
     the spreadsheet adds up to work out the coach's remaining budget.
     """
-    block = [""] * rows
+    block = [("", False)] * rows
     leftovers = []
 
     owned = conn.execute(
-        "SELECT * FROM rosters WHERE draft_id = ? AND player_id = ? ORDER BY id",
+        "SELECT * FROM rosters WHERE pool_id = ? AND player_id = ? ORDER BY id",
         (draft["id"], player["id"]),
     ).fetchall()
 
     for entry in owned:
+        item = (entry["pokemon"], bool(entry["tera_captain"]))
         round_number = None
         # Only a pick this player made themselves has a round on this block.
         # A traded-in Pokemon carries the original drafter's pick, which means
@@ -1226,63 +1646,60 @@ def roster_block(conn, draft, player, rows):
             if pick and pick["player_id"] == player["id"]:
                 round_number = pick["round"]
 
-        if round_number and 1 <= round_number <= rows and not block[round_number - 1]:
-            block[round_number - 1] = entry["pokemon"]
+        if round_number and 1 <= round_number <= rows and not block[round_number - 1][0]:
+            block[round_number - 1] = item
         else:
-            leftovers.append(entry["pokemon"])
+            leftovers.append(item)
 
-    for name in leftovers:
+    for item in leftovers:
         for index in range(rows):
-            if not block[index]:
-                block[index] = name
+            if not block[index][0]:
+                block[index] = item
                 break
 
     return block
 
 
-def export_for_sheet(conn, draft_id):
+def export_for_sheet(conn, league_id):
     """Everything the spreadsheet needs, read here on the main thread.
 
-    Returns (coach_names, roster_blocks, overflow):
-      coach_names   - usernames in draft order, for Coaches!B
-      roster_blocks - {draft_position: [name per round]}, for the Rosters tab
-      overflow      - {display_name: count} for anyone whose roster no longer
-                      fits in a block, which can only happen if trades have
-                      added more Pokemon than they removed
+    Returns (coaches, blocks, overflow):
+      coaches  - {coach_number: (display_name, pool_label)} for Coaches!B and !Y
+      blocks   - {coach_number: [(pokemon, is_tera_captain), ...]} per round
+      overflow - {display_name: count} for anyone whose roster no longer fits
+                 in a block, which can only happen if trades have added more
+                 Pokemon than they removed
 
     Reading here means the background thread that talks to Google never
     touches the SQLite connection.
     """
-    draft = get_draft(conn, draft_id)
     rows = config.SHEET_LAYOUT["roster_rows"]
+    coaches, blocks, overflow = {}, {}, {}
 
-    coach_names = []
-    roster_blocks = {}
-    overflow = {}
+    for pool in get_league_pools(conn, league_id):
+        for player in get_players(conn, pool["id"]):
+            coaches[player["coach_number"]] = (player["display_name"], pool["label"])
+            block = roster_block(conn, pool, player, rows)
+            blocks[player["coach_number"]] = block
 
-    for player in get_players(conn, draft_id):
-        coach_names.append(player["display_name"])
-        block = roster_block(conn, draft, player, rows)
-        roster_blocks[player["draft_position"]] = block
+            owned = roster_size(conn, pool["id"], player["id"])
+            shown = sum(1 for name, _ in block if name)
+            if owned > shown:
+                overflow[player["display_name"]] = owned - shown
 
-        owned = roster_size(conn, draft_id, player["id"])
-        shown = sum(1 for name in block if name)
-        if owned > shown:
-            overflow[player["display_name"]] = owned - shown
-
-    return coach_names, roster_blocks, overflow
+    return coaches, blocks, overflow
 
 
 def status_view(conn, draft):
     player = current_player(conn, draft)
     total_picks = conn.execute(
-        "SELECT COUNT(*) AS n FROM picks WHERE draft_id = ?", (draft["id"],)
+        "SELECT COUNT(*) AS n FROM picks WHERE pool_id = ?", (draft["id"],)
     ).fetchone()["n"]
 
     pending = conn.execute(
         """SELECT makeups.round, players.display_name, players.user_id
            FROM makeups JOIN players ON players.id = makeups.player_id
-           WHERE makeups.draft_id = ? AND makeups.status = 'pending'
+           WHERE makeups.pool_id = ? AND makeups.status = 'pending'
            ORDER BY makeups.round""",
         (draft["id"],),
     ).fetchall()
@@ -1293,4 +1710,5 @@ def status_view(conn, draft):
         "total_picks": total_picks,
         "expected_picks": draft["max_picks"] * player_count(conn, draft["id"]),
         "pending_makeups": [(row["display_name"], row["round"]) for row in pending],
+        "tera_format": bool(draft["tera_budget"]),
     }

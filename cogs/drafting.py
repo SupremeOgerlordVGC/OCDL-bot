@@ -35,13 +35,13 @@ async def pokemon_autocomplete(interaction: discord.Interaction, current: str):
     """
     try:
         bot = interaction.client
-        draft = rules.get_channel_draft(bot.conn, interaction.channel_id)
-        if draft is None or not bot.sheets.enabled or not draft["sheet_url"]:
+        draft = rules.get_channel_pool(bot.conn, interaction.channel_id)
+        if draft is None or not bot.sheets.enabled or not draft["doc_url"]:
             return []
 
         taken = rules.drafted_keys(bot.conn, draft["id"])
         matches = await asyncio.to_thread(
-            bot.sheets.suggest, draft["sheet_url"], current, taken
+            bot.sheets.suggest, draft["doc_url"], current, taken
         )
         return [app_commands.Choice(name=f"{entry['name']} — {entry['cost']} pts",
                                     value=entry["name"])
@@ -66,10 +66,10 @@ class DraftingCog(commands.Cog):
           ("missing", None)     - the sheet works but has no such Pokémon.
           ("ok", entry)         - found.
         """
-        if not self.bot.sheets.enabled or not draft["sheet_url"]:
+        if not self.bot.sheets.enabled or not draft["doc_url"]:
             return "unavailable", None
         try:
-            entry = await asyncio.to_thread(self.bot.sheets.lookup, draft["sheet_url"], pokemon)
+            entry = await asyncio.to_thread(self.bot.sheets.lookup, draft["doc_url"], pokemon)
         except Exception:
             log.exception("sheet lookup failed; continuing without a cost check")
             return "unavailable", None
@@ -118,7 +118,7 @@ class DraftingCog(commands.Cog):
     )
     @app_commands.autocomplete(pokemon=pokemon_autocomplete)
     async def pick(self, interaction: discord.Interaction, round: int, pokemon: str, cost: int):
-        draft = rules.require_active_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_active_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         is_admin = ui.has_admin_rights(interaction, draft)
@@ -145,7 +145,7 @@ class DraftingCog(commands.Cog):
     )
     async def queuepick(self, interaction: discord.Interaction, round: int,
                         pokemon: str, costs: str = None):
-        draft = rules.require_active_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_active_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         names = rules.parse_pokemon_list(pokemon, config.MAX_QUEUE_LENGTH)
@@ -221,7 +221,7 @@ class DraftingCog(commands.Cog):
     @app_commands.autocomplete(pokemon=pokemon_autocomplete)
     async def makeuppick(self, interaction: discord.Interaction, round: int,
                          pokemon: str, cost: int):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         pokemon = await self.resolve_pokemon(draft, pokemon, cost)
@@ -259,7 +259,7 @@ class DraftingCog(commands.Cog):
     @app_commands.autocomplete(pokemon=pokemon_autocomplete)
     async def editpick(self, interaction: discord.Interaction, round: int, pokemon: str,
                        cost: int, player: discord.Member = None):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         is_admin = ui.has_admin_rights(interaction, draft)
@@ -296,7 +296,7 @@ class DraftingCog(commands.Cog):
 
     @app_commands.command(name="status", description="Show the current state of this draft.")
     async def status(self, interaction: discord.Interaction):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         view = rules.status_view(self.bot.conn, draft)
 
         lines = [f"**Draft #{draft['id']} — {draft['status']}**"]
@@ -337,7 +337,7 @@ class DraftingCog(commands.Cog):
     @app_commands.command(name="progress", description="Show the picks made so far.")
     @app_commands.describe(round="Show only this round. Leave blank for every completed round.")
     async def progress(self, interaction: discord.Interaction, round: int = None):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         rounds = [round] if round else rules.completed_rounds(self.bot.conn, draft)
@@ -368,7 +368,7 @@ class DraftingCog(commands.Cog):
     @app_commands.command(name="roster", description="Show a player's team.")
     @app_commands.describe(player="Whose roster to show. Defaults to you.")
     async def roster(self, interaction: discord.Interaction, player: discord.Member = None):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
 
         target_id = player.id if player else interaction.user.id
         target = rules.get_player(self.bot.conn, draft["id"], target_id)

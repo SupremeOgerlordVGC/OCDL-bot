@@ -207,7 +207,7 @@ async def announce(bot, draft_id, events, channel=None):
     if not events:
         return
 
-    draft = rules.get_draft(bot.conn, draft_id)
+    draft = rules.get_pool(bot.conn, draft_id)
     channel = channel or bot.get_channel(draft["channel_id"])
 
     lines = [render_event(event, draft) for event in events]
@@ -256,7 +256,7 @@ def _stop_unwatched_clock(bot, draft_id, events):
 
 def _start_timer(bot, draft_id, event):
     """Begin the countdown for a turn and remember its deadline."""
-    draft = rules.get_draft(bot.conn, draft_id)
+    draft = rules.get_pool(bot.conn, draft_id)
     token = (draft["current_round"], draft["current_turn_index"])
     deadline = bot.timers.schedule(draft_id, event["seconds"], token)
     rules.open_turn_clock(bot.conn, draft_id, deadline)
@@ -273,17 +273,17 @@ def sync_pick_to_sheet(bot, draft_id, event):
     if not bot.sheets.can_write:
         return
 
-    draft = rules.get_draft(bot.conn, draft_id)
-    if not draft["sheet_url"]:
+    draft = rules.get_pool(bot.conn, draft_id)
+    if not draft["doc_url"]:
         return
 
-    sheet_url = draft["sheet_url"]
+    doc_url = draft["doc_url"]
     position, round_number = event["position"], event["round"]
     pokemon = event["pokemon"]
 
     async def worker():
         try:
-            await asyncio.to_thread(bot.sheets.write_pick, sheet_url,
+            await asyncio.to_thread(bot.sheets.write_pick, doc_url,
                                     position, round_number, pokemon)
         except Exception:
             log.exception("sheet update failed for draft %s (draft data is unaffected)", draft_id)
@@ -300,18 +300,18 @@ def resync_sheet(bot, draft_id):
     if not bot.sheets.can_write:
         return
 
-    draft = rules.get_draft(bot.conn, draft_id)
-    if not draft["sheet_url"]:
+    draft = rules.get_pool(bot.conn, draft_id)
+    if not draft["doc_url"]:
         return
 
-    sheet_url = draft["sheet_url"]
+    doc_url = draft["doc_url"]
     coaches, rosters, overflow = rules.export_for_sheet(bot.conn, draft_id)
     if overflow:
         log.warning("draft %s: rosters too big for the sheet blocks: %s", draft_id, overflow)
 
     async def worker():
         try:
-            await asyncio.to_thread(bot.sheets.full_sync, sheet_url, coaches, rosters)
+            await asyncio.to_thread(bot.sheets.full_sync, doc_url, coaches, rosters)
         except Exception:
             log.exception("sheet resync failed for draft %s (local data is fine)", draft_id)
 

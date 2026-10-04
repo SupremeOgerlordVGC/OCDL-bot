@@ -80,7 +80,7 @@ class AdminCog(commands.Cog):
             base_timer=timer,
             players=roster,
             max_trades=max_trades,
-            sheet_url=sheet_link,
+            doc_url=sheet_link,
         )
 
         order = "\n".join(f"{seat}. <@{user_id}>" for seat, (user_id, _) in enumerate(roster, 1))
@@ -126,7 +126,7 @@ class AdminCog(commands.Cog):
     async def edit_draft(self, interaction: discord.Interaction, budget: int = None,
                          min_picks: int = None, max_picks: int = None,
                          sheet_link: str = None):
-        draft = rules.require_live_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_live_pool(self.bot.conn, interaction.channel_id)
         self.require_admin(interaction, draft)
 
         if budget is None and min_picks is None and max_picks is None and sheet_link is None:
@@ -134,24 +134,24 @@ class AdminCog(commands.Cog):
 
         updated = rules.update_settings(self.bot.conn, draft, budget=budget,
                                         min_picks=min_picks, max_picks=max_picks,
-                                        sheet_url=sheet_link)
+                                        doc_url=sheet_link)
 
         await interaction.response.send_message(
             f"✅ Draft updated.\n"
             f"• Budget: **{updated['budget']}**\n"
             f"• Picks: **{updated['min_picks']}–{updated['max_picks']}**\n"
-            f"• Google Sheet: {updated['sheet_url'] or 'none'}",
+            f"• Google Sheet: {updated['doc_url'] or 'none'}",
             ephemeral=True,
         )
 
     # ---- /draft ---------------------------------------------------------
 
     @app_commands.command(name="draft", description="Start the draft in this channel.")
-    async def start_draft(self, interaction: discord.Interaction):
-        draft = rules.require_live_draft(self.bot.conn, interaction.channel_id)
+    async def start_pool(self, interaction: discord.Interaction):
+        draft = rules.require_live_pool(self.bot.conn, interaction.channel_id)
         self.require_admin(interaction, draft)
 
-        events = rules.start_draft(self.bot.conn, draft)
+        events = rules.start_pool(self.bot.conn, draft)
 
         posted = await ui.safe_send(
             interaction.channel,
@@ -176,7 +176,7 @@ class AdminCog(commands.Cog):
     )
     @app_commands.describe(confirm="Type the word CANCEL to confirm.")
     async def cancel_draft(self, interaction: discord.Interaction, confirm: str):
-        draft = rules.require_live_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_live_pool(self.bot.conn, interaction.channel_id)
         self.require_admin(interaction, draft)
 
         if confirm.strip().upper() != "CANCEL":
@@ -199,12 +199,12 @@ class AdminCog(commands.Cog):
         description="Push this draft's data from the database to the Google Sheet.",
     )
     async def sync_sheet(self, interaction: discord.Interaction):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         self.require_admin(interaction, draft)
 
         if not self.bot.sheets.enabled:
             raise rules.DraftError(f"❌ Google Sheets is not available: {self.bot.sheets.reason}")
-        if not draft["sheet_url"]:
+        if not draft["doc_url"]:
             raise rules.DraftError("❌ This draft has no Google Sheet. Add one with `/edit`.")
 
         await interaction.response.defer(ephemeral=True)
@@ -214,7 +214,7 @@ class AdminCog(commands.Cog):
         coaches, rosters, overflow = rules.export_for_sheet(self.bot.conn, draft["id"])
         try:
             written = await asyncio.to_thread(
-                self.bot.sheets.full_sync, draft["sheet_url"], coaches, rosters
+                self.bot.sheets.full_sync, draft["doc_url"], coaches, rosters
             )
         except sheets.SheetError as error:
             # A failed sync leaves the local database untouched, which is the
@@ -259,16 +259,16 @@ class AdminCog(commands.Cog):
         description="Admin only: report the structure of the linked Google Sheet. Reads only.",
     )
     async def inspect_sheet(self, interaction: discord.Interaction):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         self.require_admin(interaction, draft)
 
         if not self.bot.sheets.enabled:
             raise rules.DraftError(f"❌ Google Sheets is not available: {self.bot.sheets.reason}")
-        if not draft["sheet_url"]:
+        if not draft["doc_url"]:
             raise rules.DraftError("❌ This draft has no Google Sheet. Add one with `/edit`.")
 
         await interaction.response.defer(ephemeral=True)
-        report = await asyncio.to_thread(self.bot.sheets.describe, draft["sheet_url"])
+        report = await asyncio.to_thread(self.bot.sheets.describe, draft["doc_url"])
 
         lines = [f"**{report['title']}**", f"Tabs: {', '.join(report['tabs'])}", ""]
         if report["problems"]:

@@ -28,7 +28,16 @@ BACKUPS_TO_KEEP = 40
 # --------------------------------------------------------------------------
 
 MIN_PLAYERS = 2
-MAX_PLAYERS = 16
+# The spreadsheet has 20 coach rows and 20 roster blocks.
+MAX_PLAYERS = 20
+
+# Pool B's roster blocks start at this coach number, which is what caps a
+# two-pool league at ten coaches per pool. One pool can use all 20.
+POOL_B_FIRST_COACH = 11
+
+# Most Tera Captains one team may have. Standard across drafts; there is no
+# minimum. A captain is charged its Tera Tax against both budgets.
+MAX_TERA_CAPTAINS = 3
 
 # Longest queue a player may set up with /queuepick.
 MAX_QUEUE_LENGTH = 5
@@ -104,38 +113,64 @@ SHEETS_WRITE_ENABLED = True
 # Nothing is guessed at runtime: if a tab is missing the sheet layer says so
 # rather than writing to the wrong place.
 SHEET_LAYOUT = {
-    # ---- Pokedex: the draft pool. READ ONLY. ----
-    # Column E is the Pokemon name used in every command; column K is its
-    # cost. Costs are read live, so a league that re-prices the template
-    # works with no code changes.
-    "pokedex_tab": "Pokédex",
-    "pokedex_first_row": 2,
-    "pokedex_name_column": "E",
-    "pokedex_cost_column": "K",
+    # ---- The tiering list: names and prices. READ ONLY. ----
+    # This is the one shape the bot reads costs from, and it is the same
+    # whether it comes from a template or a standalone tiering document:
+    #   column A = Pokemon name, B = price, C = Tera price, from row 2.
+    # In a template, the TAB to read is named in the Settings cell below,
+    # so a league can re-price by switching tiering tabs with no code change.
+    "tiering_name_column": "A",
+    "tiering_cost_column": "B",
+    "tiering_tera_column": "C",
+    "tiering_first_row": 2,
 
-    # ---- Coaches: player list. The bot WRITES column B. ----
+    # ---- Settings: the league's own configuration. READ ONLY. ----
+    # Read through these named ranges rather than fixed cells, so the
+    # template can move them around without breaking the bot.
+    "settings_tab": "Settings",
+    "named_ranges": {
+        "budget": "Budget",
+        "tera_budget": "TeraBudget",
+        "pool_count": "NumPools",
+        "tera_format": "TeraFormat",
+        "tiering_sheet": "TieringSheet",
+        "season_weeks": "SeasonWeeks",
+    },
+
+    # ---- Coaches: the player list. The bot WRITES usernames and pools. ----
     # Writing a username here updates it everywhere else in the document,
     # because every other tab references Coaches!B.
     "coaches_tab": "Coaches",
     "coaches_name_column": "B",
+    "coaches_pool_column": "Y",
     "coaches_first_row": 2,
-    "coaches_last_row": 17,
+    "coaches_last_row": 21,
 
-    # ---- Rosters: one block per coach. The bot WRITES the leftmost column. ----
-    # Each entry is the top-left cell of a coach's block, in coach order:
-    # index 0 is coach 1 (draft seat 1), index 15 is coach 16.
-    # Each block is `roster_rows` tall and one row per draft round. The
-    # cells are merged across four columns, so writing the leftmost one is
-    # correct; the columns either side hold image and cost formulas that
-    # must never be written to.
+    # ---- Rosters: the bot WRITES one column of Pokemon names per coach. ----
+    # A Tera format uses the "Tera Rosters" tab instead, which is laid out
+    # identically but adds a Tera Captain tick box.
     "rosters_tab": "Rosters",
+    "tera_rosters_tab": "Tera Rosters",
     "roster_rows": 12,
+    # Top-left pick cell of each coach's block, in coach order: index 0 is
+    # coach 1. Coaches 1-10 sit under the "Pool A" heading, 11-20 under
+    # "Pool B". The columns either side hold image and cost formulas that
+    # must never be written to.
     "roster_blocks": [
-        "C4",  "J4",  "Q4",  "X4",
-        "C19", "J19", "Q19", "X19",
-        "C34", "J34", "Q34", "X34",
-        "C49", "J49", "Q49", "X49",
+        "C6",  "J6",  "Q6",  "X6",  "AE6",
+        "C21", "J21", "Q21", "X21", "AE21",
+        "C38", "J38", "Q38", "X38", "AE38",
+        "C53", "J53", "Q53", "X53", "AE53",
     ],
+    # The Tera Captain tick box sits this many columns right of the name.
+    "tera_flag_offset": 3,
+
+    # ---- Schedule: READ ONLY, for /postschedule. ----
+    "schedule_tab": "BackendSchedule",
+    "schedule_first_row": 4,
+    "schedule_week_column": "A",
+    "schedule_side_a_column": "E",
+    "schedule_side_b_column": "F",
 }
 
 # A Pokemon is banned - not draftable - when its cost cell is blank, holds

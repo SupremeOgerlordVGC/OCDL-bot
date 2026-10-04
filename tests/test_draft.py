@@ -23,19 +23,44 @@ import draft           # noqa: E402
 
 
 def make_draft(conn, channel_id=100, players=4, budget=100, min_picks=2,
-               max_picks=3, base_timer=120, max_trades=0, start=True):
-    """Create (and usually start) a draft with generated players."""
+               max_picks=3, base_timer=120, max_trades=0, tera_budget=0,
+               doc_kind="none", mode="full_season", name=None, start=True):
+    """Create (and usually start) a one-pool league, returning the pool."""
     roster = [(1000 + i, f"Player{i}") for i in range(1, players + 1)]
-    draft_id = draft.create_draft(
-        conn, guild_id=1, channel_id=channel_id, admin_channel_id=999,
-        admin_role_id=555, budget=budget, min_picks=min_picks, max_picks=max_picks,
-        base_timer=base_timer, players=roster, max_trades=max_trades,
+    draft.create_league(
+        conn, guild_id=1, admin_channel_id=999,
+        name=name or f"League {channel_id}",
+        pools=[("A", channel_id, roster)],
+        budget=budget, min_picks=min_picks, max_picks=max_picks,
+        base_timer=base_timer, mode=mode, doc_kind=doc_kind,
+        tera_budget=tera_budget, max_trades=max_trades,
     )
-    row = draft.get_draft(conn, draft_id)
+    pool = draft.get_live_pool(conn, channel_id)
     if start:
-        draft.start_draft(conn, row)
-        row = draft.get_draft(conn, draft_id)
-    return row
+        draft.start_pool(conn, pool)
+        pool = draft.get_pool(conn, pool["id"])
+    return pool
+
+
+def make_two_pool_league(conn, name="Two Pools", channel_a=201, channel_b=202,
+                         players=3, budget=100, max_picks=3, start=True):
+    """A template-backed league with both pools, returning (pool_a, pool_b)."""
+    roster_a = [(1000 + i, f"A{i}") for i in range(1, players + 1)]
+    roster_b = [(2000 + i, f"B{i}") for i in range(1, players + 1)]
+    draft.create_league(
+        conn, guild_id=1, admin_channel_id=999, name=name,
+        pools=[("A", channel_a, roster_a), ("B", channel_b, roster_b)],
+        budget=budget, min_picks=1, max_picks=max_picks, base_timer=120,
+        doc_kind="template", doc_url="https://example/sheet",
+    )
+    pool_a = draft.get_live_pool(conn, channel_a)
+    pool_b = draft.get_live_pool(conn, channel_b)
+    if start:
+        draft.start_pool(conn, pool_a)
+        draft.start_pool(conn, pool_b)
+        pool_a = draft.get_pool(conn, pool_a["id"])
+        pool_b = draft.get_pool(conn, pool_b["id"])
+    return pool_a, pool_b
 
 
 def user(n):
@@ -44,7 +69,7 @@ def user(n):
 
 
 def on_clock(conn, draft_row):
-    return draft.current_player(conn, draft.get_draft(conn, draft_row["id"]))["display_name"]
+    return draft.current_player(conn, draft.get_pool(conn, draft_row["id"]))["display_name"]
 
 
 class SnakeOrderTests(unittest.TestCase):
@@ -68,7 +93,7 @@ class SnakeOrderTests(unittest.TestCase):
 
         seen = []
         for _ in range(4 * 3):
-            live = draft.get_draft(conn, row["id"])
+            live = draft.get_pool(conn, row["id"])
             player = draft.current_player(conn, live)
             seen.append((live["current_round"], player["draft_position"]))
             draft.make_pick(conn, live, player["user_id"], live["current_round"],
@@ -77,7 +102,7 @@ class SnakeOrderTests(unittest.TestCase):
         self.assertEqual(seen[0:4], [(1, 1), (1, 2), (1, 3), (1, 4)])
         self.assertEqual(seen[4:8], [(2, 4), (2, 3), (2, 2), (2, 1)])
         self.assertEqual(seen[8:12], [(3, 1), (3, 2), (3, 3), (3, 4)])
-        self.assertEqual(draft.get_draft(conn, row["id"])["status"], "complete")
+        self.assertEqual(draft.get_pool(conn, row["id"])["status"], "complete")
 
 
 class ChannelIsolationTests(unittest.TestCase):
@@ -110,7 +135,7 @@ class ChannelIsolationTests(unittest.TestCase):
         a = make_draft(self.conn, channel_id=111, players=2, budget=100, start=False)
         b = make_draft(self.conn, channel_id=222, players=2, budget=100, start=False)
         draft.update_settings(self.conn, a, budget=500)
-        self.assertEqual(draft.get_draft(self.conn, b["id"])["budget"], 100)
+        self.assertEqual(draft.get_pool(self.conn, b["id"])["budget"], 100)
         self.assertEqual(draft.get_player(self.conn, b["id"], user(1))["budget_remaining"], 100)
 
 
@@ -121,7 +146,7 @@ class PickValidationTests(unittest.TestCase):
 
     def test_duplicate_pokemon_is_refused(self):
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 5)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         with self.assertRaises(draft.DraftError) as caught:
             draft.make_pick(self.conn, live, user(2), 1, "garchomp", 5)
         self.assertIn("already been drafted", str(caught.exception))
@@ -167,13 +192,13 @@ class PickValidationTests(unittest.TestCase):
         small = make_draft(self.conn, channel_id=777, players=2, budget=100, max_picks=2)
         # Two rounds x two players: everyone reaches the cap exactly.
         for _ in range(4):
-            live = draft.get_draft(self.conn, small["id"])
+            live = draft.get_pool(self.conn, small["id"])
             player = draft.current_player(self.conn, live)
             draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
                             f"Cap{player['id']}{live['current_round']}", 1)
         p1 = draft.get_player(self.conn, small["id"], user(1))
         self.assertEqual(draft.picks_made(self.conn, small["id"], p1["id"]), 2)
-        self.assertEqual(draft.get_draft(self.conn, small["id"])["status"], "complete")
+        self.assertEqual(draft.get_pool(self.conn, small["id"])["status"], "complete")
 
 
 class TimerTests(unittest.TestCase):
@@ -203,7 +228,7 @@ class TimerTests(unittest.TestCase):
 
         # Everybody else keeps picking; Player2 never responds again.
         for _ in range(60):
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             if live["status"] != "active":
                 break
             player = draft.current_player(self.conn, live)
@@ -227,7 +252,7 @@ class TimerTests(unittest.TestCase):
                    if e["type"] == "skipped" and e["player_id"] == player_id]
 
         for _ in range(60):
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             if live["status"] != "active":
                 break
             player = draft.current_player(self.conn, live)
@@ -253,7 +278,7 @@ class TimerTests(unittest.TestCase):
 
     def test_successful_pick_does_not_restore_the_timer(self):
         draft.skip_current_player(self.conn, self.draft["id"])
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         player2 = draft.current_player(self.conn, live)
         draft.make_pick(self.conn, live, player2["user_id"], 1, "Heatran", 10)
         self.assertEqual(draft.get_player(self.conn, self.draft["id"], user(1))["current_timer"], 60)
@@ -271,7 +296,7 @@ class MakeupPickTests(unittest.TestCase):
         inspect exactly what happened on that one turn.
         """
         for _ in range(50):
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             if live["status"] != "active":
                 raise AssertionError(f"draft ended before any {kind!r} event")
             player = draft.current_player(self.conn, live)
@@ -285,7 +310,7 @@ class MakeupPickTests(unittest.TestCase):
     def advance_to(self, position, expected_round=None):
         """Play filler picks until `position` is on the clock."""
         for _ in range(50):
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             if live["status"] != "active":
                 return live
             player = draft.current_player(self.conn, live)
@@ -303,12 +328,12 @@ class MakeupPickTests(unittest.TestCase):
 
     def test_makeup_pick_resolves_the_round_and_keeps_the_turn(self):
         draft.skip_current_player(self.conn, self.draft["id"])
-        before = draft.get_draft(self.conn, self.draft["id"])
+        before = draft.get_pool(self.conn, self.draft["id"])
         current_before = draft.current_player(self.conn, before)["id"]
 
         pick = draft.make_makeup_pick(self.conn, before, user(1), 1, "Garchomp", 12)
 
-        after = draft.get_draft(self.conn, self.draft["id"])
+        after = draft.get_pool(self.conn, self.draft["id"])
         self.assertEqual(pick["round"], 1)               # recorded to the missed round
         self.assertEqual(pick["is_makeup"], 1)
         self.assertEqual(draft.current_player(self.conn, after)["id"], current_before)
@@ -329,19 +354,19 @@ class MakeupPickTests(unittest.TestCase):
         # turn is the last of round 2 - everything before that is the window.
         draft.skip_current_player(self.conn, self.draft["id"])
         for _ in range(3):                       # P2, P3 (round 1), then P3 (round 2)
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             player = draft.current_player(self.conn, live)
             draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
                             f"F{player['id']}-{live['current_round']}", 1)
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         self.assertEqual(live["current_round"], 2)
         self.assertEqual(draft.current_player(self.conn, live)["display_name"], "Player2")
 
         pick = draft.make_makeup_pick(self.conn, live, user(1), 1, "Garchomp", 12)
         self.assertEqual(pick["round"], 1)
         # The makeup did not steal Player2's turn.
-        after = draft.get_draft(self.conn, self.draft["id"])
+        after = draft.get_pool(self.conn, self.draft["id"])
         self.assertEqual(draft.current_player(self.conn, after)["display_name"], "Player2")
 
     def test_missing_the_deadline_forfeits_the_next_turn(self):
@@ -358,7 +383,7 @@ class MakeupPickTests(unittest.TestCase):
         expired = [e for e in events if e["type"] == "makeup_expired"][0]
         self.assertEqual(expired["round"], 1)
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         with self.assertRaises(draft.DraftError) as caught:
             draft.make_makeup_pick(self.conn, live, user(1), 1, "Garchomp", 12)
         self.assertIn("expired", str(caught.exception))
@@ -412,18 +437,18 @@ class MakeupPickTests(unittest.TestCase):
         # Player1 queues for round 2, then plays round 1 normally.
         draft.queue_picks(self.conn, self.draft, user(1), 2, ["Sniped"], [5])
         for _ in range(3):                       # finish round 1
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             player = draft.current_player(self.conn, live)
             draft.make_pick(self.conn, live, player["user_id"], 1,
                             f"R1-{player['id']}", 1)
 
         # Round 2 runs 3, 2, 1 - Player3 takes the queued Pokémon first.
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(3), 2, "Sniped", 5)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(2), 2, "R2-2", 1)
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         self.assertEqual(draft.current_player(self.conn, live)["display_name"], "Player1")
         self.assertEqual(live["queue_exhausted"], 1)
 
@@ -467,7 +492,7 @@ class QueuedPickTests(unittest.TestCase):
         draft.queue_picks(self.conn, self.draft, user(2), 1, ["Garchomp"], [12])
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)   # steals it
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         self.assertEqual(live["queue_exhausted"], 1)
         self.assertEqual(draft.current_player(self.conn, live)["display_name"], "Player2")
 
@@ -489,7 +514,7 @@ class QueuedPickTests(unittest.TestCase):
 
     def test_cannot_queue_for_a_turn_that_has_passed(self):
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         with self.assertRaises(draft.DraftError):
             draft.queue_picks(self.conn, live, user(1), 1, ["Heatran"], [10])
 
@@ -500,7 +525,7 @@ class QueuedPickTests(unittest.TestCase):
 
         picks = draft.round_picks(self.conn, self.draft["id"], 1)
         self.assertEqual([p["pokemon"] for p in picks], ["Garchomp", "Heatran", "Landorus"])
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         self.assertEqual(live["current_round"], 2)
         self.assertEqual(draft.current_player(self.conn, live)["display_name"], "Player3")
 
@@ -512,7 +537,7 @@ class EditPickTests(unittest.TestCase):
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
 
     def test_edit_updates_roster_budget_and_availability(self):
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.edit_pick(self.conn, live, user(1), 1, "Heatran", 10)
 
         p1 = draft.get_player(self.conn, self.draft["id"], user(1))
@@ -524,9 +549,9 @@ class EditPickTests(unittest.TestCase):
         self.assertIsNotNone(draft.find_owner(self.conn, self.draft["id"], "heatran"))
 
     def test_edit_cannot_duplicate_another_players_pokemon(self):
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(2), 1, "Heatran", 10)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         with self.assertRaises(draft.DraftError):
             draft.edit_pick(self.conn, live, user(1), 1, "Heatran", 10)
         # The rejected edit changed nothing.
@@ -535,25 +560,25 @@ class EditPickTests(unittest.TestCase):
         self.assertEqual(draft.roster_view(self.conn, live, p1)["pokemon"], [("Garchomp", 12)])
 
     def test_edit_rejected_when_over_budget(self):
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         with self.assertRaises(draft.DraftError):
             draft.edit_pick(self.conn, live, user(1), 1, "Kyogre", 500)
         self.assertEqual(draft.get_player(self.conn, self.draft["id"], user(1))["budget_remaining"], 38)
 
     def test_player_cannot_edit_someone_else(self):
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         with self.assertRaises(draft.DraftError):
             draft.edit_pick(self.conn, live, user(2), 1, "Heatran", 10, target_user_id=user(1))
 
     def test_admin_can_edit_someone_else(self):
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         result = draft.edit_pick(self.conn, live, 99999, 1, "Heatran", 10,
                                  target_user_id=user(1), acting_as_admin=True)
         self.assertEqual(result["old_pokemon"], "Garchomp")
         self.assertEqual(result["new_pokemon"], "Heatran")
 
     def test_editing_your_own_pokemon_price_only(self):
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.edit_pick(self.conn, live, user(1), 1, "Garchomp", 5)
         self.assertEqual(draft.get_player(self.conn, self.draft["id"], user(1))["budget_remaining"], 45)
 
@@ -563,9 +588,9 @@ class TradeTests(unittest.TestCase):
         self.conn = database.connect(":memory:")
         self.draft = make_draft(self.conn, players=2, budget=100, max_picks=2)
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(2), 1, "Heatran", 10)
-        self.live = draft.get_draft(self.conn, self.draft["id"])
+        self.live = draft.get_pool(self.conn, self.draft["id"])
 
     def test_trade_ids_count_up_from_one(self):
         first, _ = draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], ["Heatran"],
@@ -641,7 +666,7 @@ class RestartTests(unittest.TestCase):
 
             # Pretend the VM rebooted.
             conn = database.connect(path)
-            live = draft.get_live_draft(conn, 100)
+            live = draft.get_live_pool(conn, 100)
             self.assertIsNotNone(live)
             self.assertEqual(live["status"], "active")
             self.assertEqual(live["current_round"], 1)
@@ -666,7 +691,7 @@ class ViewTests(unittest.TestCase):
     def test_progress_preserves_chronological_snake_order(self):
         names = ["Garchomp", "Rotom-Wash", "Heatran"]
         for name in names:
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             player = draft.current_player(self.conn, live)
             draft.make_pick(self.conn, live, player["user_id"], 1, name, 5)
 
@@ -676,7 +701,7 @@ class ViewTests(unittest.TestCase):
 
         # Round 2 runs backwards.
         for name in ["A", "B", "C"]:
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             player = draft.current_player(self.conn, live)
             draft.make_pick(self.conn, live, player["user_id"], 2, name, 5)
         picks = draft.round_picks(self.conn, self.draft["id"], 2)
@@ -684,7 +709,7 @@ class ViewTests(unittest.TestCase):
 
     def test_roster_view_totals(self):
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         player = draft.get_player(self.conn, self.draft["id"], user(1))
         view = draft.roster_view(self.conn, live, player)
         self.assertEqual(view["spent"], 12)
@@ -694,7 +719,7 @@ class ViewTests(unittest.TestCase):
 
     def test_status_view_reports_pending_makeups(self):
         draft.skip_current_player(self.conn, self.draft["id"])
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         status = draft.status_view(self.conn, live)
         self.assertEqual(status["pending_makeups"], [("Player1", 1)])
         self.assertEqual(status["current_player"]["display_name"], "Player2")
@@ -709,7 +734,7 @@ class SetupValidationTests(unittest.TestCase):
         with self.assertRaises(draft.DraftError):
             make_draft(self.conn, channel_id=1, players=1)
         with self.assertRaises(draft.DraftError):
-            make_draft(self.conn, channel_id=2, players=17)
+            make_draft(self.conn, channel_id=2, players=config.MAX_PLAYERS + 1)
 
     def test_max_below_min_is_refused(self):
         with self.assertRaises(draft.DraftError):
@@ -723,9 +748,9 @@ class SetupValidationTests(unittest.TestCase):
 
     def test_edit_allowed_before_start(self):
         row = make_draft(self.conn, channel_id=5, players=2, start=False)
-        updated = draft.update_settings(self.conn, row, budget=200, sheet_url="http://x")
+        updated = draft.update_settings(self.conn, row, budget=200, doc_url="http://x")
         self.assertEqual(updated["budget"], 200)
-        self.assertEqual(updated["sheet_url"], "http://x")
+        self.assertEqual(updated["doc_url"], "http://x")
         self.assertEqual(draft.get_player(self.conn, row["id"], user(1))["budget_remaining"], 200)
 
     def test_pick_before_start_is_refused(self):
@@ -746,7 +771,7 @@ class FullDraftSimulationTests(unittest.TestCase):
 
         counter = 0
         for _ in range(players * 4 * 6):
-            live = draft.get_draft(conn, row["id"])
+            live = draft.get_pool(conn, row["id"])
             if live["status"] != "active":
                 break
             player = draft.current_player(conn, live)
@@ -771,13 +796,13 @@ class FullDraftSimulationTests(unittest.TestCase):
                     counter += 1
                     draft.make_makeup_pick(conn, live, player["user_id"], pending[0],
                                            f"M{counter}", rng.randint(1, 5))
-                    live = draft.get_draft(conn, row["id"])
+                    live = draft.get_pool(conn, row["id"])
 
             counter += 1
             draft.make_pick(conn, live, player["user_id"], live["current_round"],
                             f"P{counter}", rng.randint(1, 12))
 
-        return conn, draft.get_draft(conn, row["id"])
+        return conn, draft.get_pool(conn, row["id"])
 
     def test_invariants_hold_for_every_player_count(self):
         for players in range(config.MIN_PLAYERS, config.MAX_PLAYERS + 1):
@@ -789,7 +814,7 @@ class FullDraftSimulationTests(unittest.TestCase):
 
                 # No Pokemon is ever owned twice.
                 rows = conn.execute(
-                    "SELECT pokemon_key, COUNT(*) AS n FROM rosters WHERE draft_id = ? "
+                    "SELECT pokemon_key, COUNT(*) AS n FROM rosters WHERE pool_id = ? "
                     "GROUP BY pokemon_key HAVING n > 1", (live["id"],)).fetchall()
                 self.assertEqual(rows, [])
 
@@ -804,13 +829,13 @@ class FullDraftSimulationTests(unittest.TestCase):
 
                 # Chronological pick order has no gaps or repeats.
                 orders = [r["pick_order"] for r in conn.execute(
-                    "SELECT pick_order FROM picks WHERE draft_id = ? ORDER BY pick_order",
+                    "SELECT pick_order FROM picks WHERE pool_id = ? ORDER BY pick_order",
                     (live["id"],))]
                 self.assertEqual(orders, list(range(1, len(orders) + 1)))
 
                 # Every player picked at most once per round.
                 dupes = conn.execute(
-                    "SELECT player_id, round, COUNT(*) AS n FROM picks WHERE draft_id = ? "
+                    "SELECT player_id, round, COUNT(*) AS n FROM picks WHERE pool_id = ? "
                     "GROUP BY player_id, round HAVING n > 1", (live["id"],)).fetchall()
                 self.assertEqual(dupes, [])
                 conn.close()
@@ -823,16 +848,16 @@ class AfterTheDraftTests(unittest.TestCase):
         self.conn = database.connect(":memory:")
         self.draft = make_draft(self.conn, channel_id=808, players=2, budget=100, max_picks=2)
         for _ in range(4):
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             player = draft.current_player(self.conn, live)
             draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
                             f"Mon{player['id']}{live['current_round']}", 10)
-        self.finished = draft.get_draft(self.conn, self.draft["id"])
+        self.finished = draft.get_pool(self.conn, self.draft["id"])
         self.assertEqual(self.finished["status"], "complete")
 
     def test_live_lookup_is_empty_but_channel_lookup_still_works(self):
-        self.assertIsNone(draft.get_live_draft(self.conn, 808))
-        found = draft.require_channel_draft(self.conn, 808)
+        self.assertIsNone(draft.get_live_pool(self.conn, 808))
+        found = draft.require_channel_pool(self.conn, 808)
         self.assertEqual(found["id"], self.draft["id"])
 
     def test_rosters_and_history_survive(self):
@@ -861,13 +886,13 @@ class AfterTheDraftTests(unittest.TestCase):
         conn = database.connect(":memory:")
         row = make_draft(conn, channel_id=909, players=2, budget=100, max_picks=2)
         for _ in range(3):      # three normal picks
-            live = draft.get_draft(conn, row["id"])
+            live = draft.get_pool(conn, row["id"])
             player = draft.current_player(conn, live)
             draft.make_pick(conn, live, player["user_id"], live["current_round"],
                             f"X{player['id']}{live['current_round']}", 5)
         draft.skip_current_player(conn, row["id"])      # last pick of the draft is missed
 
-        finished = draft.get_draft(conn, row["id"])
+        finished = draft.get_pool(conn, row["id"])
         self.assertEqual(finished["status"], "complete")
         player = draft.current_player(conn, finished)
         self.assertIsNone(player)
@@ -890,12 +915,12 @@ class BudgetExhaustionTests(unittest.TestCase):
 
         # Two picks each at 5 points empties both budgets after round 2.
         for _ in range(4):
-            live = draft.get_draft(conn, row["id"])
+            live = draft.get_pool(conn, row["id"])
             player = draft.current_player(conn, live)
             draft.make_pick(conn, live, player["user_id"], live["current_round"],
                             f"M{player['id']}{live['current_round']}", 5)
 
-        finished = draft.get_draft(conn, row["id"])
+        finished = draft.get_pool(conn, row["id"])
         self.assertEqual(finished["status"], "complete")
         self.assertEqual(finished["current_round"], 2,
                          "ended in round 2, well before the sixth round")
@@ -910,16 +935,16 @@ class BudgetExhaustionTests(unittest.TestCase):
         # Player1 spends everything at once; the others stay cheap.
         draft.make_pick(conn, row, user(1), 1, "Expensive", 10)
         for _ in range(2):
-            live = draft.get_draft(conn, row["id"])
+            live = draft.get_pool(conn, row["id"])
             player = draft.current_player(conn, live)
             draft.make_pick(conn, live, player["user_id"], live["current_round"],
                             f"Cheap{player['id']}", 1)
 
         # Round 2 runs 3,2,1 - Player1 should be passed over without penalty.
-        live = draft.get_draft(conn, row["id"])
+        live = draft.get_pool(conn, row["id"])
         collected = []
         for _ in range(2):
-            live = draft.get_draft(conn, row["id"])
+            live = draft.get_pool(conn, row["id"])
             if live["status"] != "active":
                 break
             player = draft.current_player(conn, live)
@@ -945,13 +970,13 @@ class TradeLimitTests(unittest.TestCase):
         self.draft = make_draft(self.conn, channel_id=1300, players=2, budget=100,
                                 min_picks=1, max_picks=3, max_trades=1)
         for _ in range(6):
-            live = draft.get_draft(self.conn, self.draft["id"])
+            live = draft.get_pool(self.conn, self.draft["id"])
             if live["status"] != "active":
                 break
             player = draft.current_player(self.conn, live)
             draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
                             f"P{player['id']}R{live['current_round']}", 5)
-        self.live = draft.get_draft(self.conn, self.draft["id"])
+        self.live = draft.get_pool(self.conn, self.draft["id"])
 
     def test_setup_stores_the_trade_cap(self):
         self.assertEqual(self.live["max_trades"], 1)
@@ -981,16 +1006,16 @@ class TradeLimitTests(unittest.TestCase):
         row = make_draft(conn, channel_id=1301, players=2, budget=100,
                          min_picks=1, max_picks=1, max_trades=0)
         draft.make_pick(conn, row, user(1), 1, "A", 5)
-        live = draft.get_draft(conn, row["id"])
+        live = draft.get_pool(conn, row["id"])
         draft.make_pick(conn, live, user(2), 1, "B", 5)
-        live = draft.get_draft(conn, row["id"])
+        live = draft.get_pool(conn, row["id"])
         for name in ["C", "D", "E"]:
             record, _ = draft.propose_trade(conn, live, user(1), ["A"], [name])
             draft.approve_trade(conn, live, record["trade_number"], 999)
-            live = draft.get_draft(conn, row["id"])
+            live = draft.get_pool(conn, row["id"])
             # the newly acquired Pokemon becomes the next thing to trade away
             conn.execute("UPDATE rosters SET pokemon = 'A', pokemon_key = 'a' "
-                         "WHERE draft_id = ? AND pokemon_key = ?", (row["id"], name.lower()))
+                         "WHERE pool_id = ? AND pokemon_key = ?", (row["id"], name.lower()))
             conn.commit()
         self.assertEqual(draft.trades_used(conn, row["id"],
                                            draft.get_player(conn, row["id"], user(1))["id"]), 3)
@@ -1003,7 +1028,7 @@ class AdminEditPickTests(unittest.TestCase):
 
     def test_admin_can_fill_in_a_round_with_no_pick(self):
         draft.skip_current_player(self.conn, self.draft["id"])     # Player1 misses round 1
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
 
         result = draft.edit_pick(self.conn, live, 99999, 1, "Garchomp", 12,
                                  target_user_id=user(1), acting_as_admin=True)
@@ -1018,16 +1043,16 @@ class AdminEditPickTests(unittest.TestCase):
 
     def test_a_player_cannot_invent_a_pick_for_themselves(self):
         draft.skip_current_player(self.conn, self.draft["id"])
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         with self.assertRaises(draft.DraftError) as caught:
             draft.edit_pick(self.conn, live, user(1), 1, "Garchomp", 12)
         self.assertIn("makeuppick", str(caught.exception))
 
     def test_created_pick_still_obeys_the_rules(self):
         draft.skip_current_player(self.conn, self.draft["id"])
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(2), 1, "Garchomp", 12)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         with self.assertRaises(draft.DraftError):
             draft.edit_pick(self.conn, live, 99999, 1, "Garchomp", 12,
                             target_user_id=user(1), acting_as_admin=True)
@@ -1042,18 +1067,19 @@ class SheetExportTests(unittest.TestCase):
 
     def test_block_puts_each_pick_in_its_round_row(self):
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(2), 1, "Heatran", 10)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(2), 2, "Skarmory", 8)
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         p2 = draft.get_player(self.conn, self.draft["id"], user(2))
         block = draft.roster_block(self.conn, live, p2, 12)
 
-        self.assertEqual(block[0], "Heatran")     # round 1 -> first row
-        self.assertEqual(block[1], "Skarmory")    # round 2 -> second row
-        self.assertEqual(block[2:], [""] * 10)
+        names = [name for name, _ in block]
+        self.assertEqual(names[0], "Heatran")     # round 1 -> first row
+        self.assertEqual(names[1], "Skarmory")    # round 2 -> second row
+        self.assertEqual(names[2:], [""] * 10)
         self.assertEqual(len(block), 12)
 
     def test_dropped_pokemon_leave_their_row_and_gains_take_the_first_free_one(self):
@@ -1062,63 +1088,407 @@ class SheetExportTests(unittest.TestCase):
         # top: first the empty row 1, then the next free row.
         for round_number in range(1, 4):
             for _ in range(2):
-                live = draft.get_draft(self.conn, self.draft["id"])
+                live = draft.get_pool(self.conn, self.draft["id"])
                 if live["status"] != "active":
                     break
                 player = draft.current_player(self.conn, live)
                 draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
                                 f"{player['display_name']}-R{live['current_round']}", 5)
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         record, _ = draft.propose_trade(self.conn, live, user(2),
                                         ["Player2-R1"], ["FreeAgentA", "FreeAgentB"])
         draft.approve_trade(self.conn, live, record["trade_number"], 999)
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         p2 = draft.get_player(self.conn, self.draft["id"], user(2))
-        block = draft.roster_block(self.conn, live, p2, 12)
+        names = [name for name, _ in draft.roster_block(self.conn, live, p2, 12)]
 
-        self.assertEqual(block[:4], ["FreeAgentA", "Player2-R2", "Player2-R3", "FreeAgentB"])
-        self.assertNotIn("Player2-R1", block)
+        self.assertEqual(names[:4], ["FreeAgentA", "Player2-R2", "Player2-R3", "FreeAgentB"])
+        self.assertNotIn("Player2-R1", names)
 
     def test_traded_pokemon_fill_the_first_free_row(self):
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(2), 1, "Heatran", 10)
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         record, _ = draft.propose_trade(self.conn, live, user(1), ["Garchomp"], ["Heatran"],
                                         partner_user_id=user(2))
         draft.approve_trade(self.conn, live, record["trade_number"], 999)
 
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         p1 = draft.get_player(self.conn, self.draft["id"], user(1))
-        block = draft.roster_block(self.conn, live, p1, 12)
+        names = [name for name, _ in draft.roster_block(self.conn, live, p1, 12)]
         # Heatran has no round of its own on Player1's sheet, so it takes the
         # first free row - keeping the block a true picture of the roster.
-        self.assertEqual(block[0], "Heatran")
-        self.assertEqual(block.count("Heatran"), 1)
+        self.assertEqual(names[0], "Heatran")
+        self.assertEqual(names.count("Heatran"), 1)
 
-    def test_export_returns_coach_names_in_draft_order(self):
+    def test_export_is_keyed_by_coach_number_with_pool_letters(self):
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
-        coaches, blocks, overflow = draft.export_for_sheet(self.conn, self.draft["id"])
-        self.assertEqual(coaches, ["Player1", "Player2"])
+        coaches, blocks, overflow = draft.export_for_sheet(
+            self.conn, self.draft["league_id"])
+        self.assertEqual(coaches, {1: ("Player1", "A"), 2: ("Player2", "A")})
         self.assertEqual(sorted(blocks), [1, 2])
-        self.assertEqual(blocks[1][0], "Garchomp")
+        self.assertEqual(blocks[1][0], ("Garchomp", False))
         self.assertEqual(overflow, {})
 
     def test_a_roster_too_big_for_a_block_is_reported(self):
         # A block only has room for so many rounds. Trades can push a roster
         # past that, and the sheet cannot show what will not fit.
         draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
-        live = draft.get_draft(self.conn, self.draft["id"])
+        live = draft.get_pool(self.conn, self.draft["id"])
         record, _ = draft.propose_trade(self.conn, live, user(1),
                                         ["Garchomp"], ["A", "B", "C"])
         draft.approve_trade(self.conn, live, record["trade_number"], 999)
 
-        _, blocks, overflow = draft.export_for_sheet(self.conn, self.draft["id"])
+        _, blocks, overflow = draft.export_for_sheet(self.conn, self.draft["league_id"])
         self.assertEqual(overflow, {})          # three fit fine in twelve rows
-        self.assertEqual([n for n in blocks[1] if n], ["A", "B", "C"])
+        self.assertEqual([n for n, _ in blocks[1] if n], ["A", "B", "C"])
+
+
+
+class TeraCaptainTests(unittest.TestCase):
+    """A Tera Captain costs its Tera Tax from BOTH budgets.
+
+    Numbers follow the real example: 115 budget, 28 Tera budget, Great Tusk
+    at COST 18 / TT 17.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=400, players=2, budget=115,
+                                min_picks=1, max_picks=5, tera_budget=28)
+
+    def p1(self):
+        return draft.get_player(self.conn, self.draft["id"], user(1))
+
+    def test_a_normal_pick_leaves_the_tera_budget_alone(self):
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Great Tusk", 18)
+        player = self.p1()
+        self.assertEqual(player["budget_remaining"], 115 - 18)
+        self.assertEqual(player["tera_budget_remaining"], 28)
+
+    def test_a_captain_costs_its_tera_tax_from_both_budgets(self):
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Great Tusk", 17,
+                        tera_captain=True)
+        player = self.p1()
+        self.assertEqual(player["budget_remaining"], 115 - 17)
+        self.assertEqual(player["tera_budget_remaining"], 28 - 17)
+
+    def wait_for_player_one(self):
+        """Play filler picks until Player1 is on the clock, then return the pool."""
+        for _ in range(40):
+            live = draft.get_pool(self.conn, self.draft["id"])
+            player = draft.current_player(self.conn, live)
+            if player["user_id"] == user(1):
+                return live
+            draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
+                            f"Filler{player['id']}R{live['current_round']}", 1)
+        raise AssertionError("Player1 never came up")
+
+    def test_at_most_three_captains(self):
+        for index in range(1, config.MAX_TERA_CAPTAINS + 2):
+            live = self.wait_for_player_one()
+            if index <= config.MAX_TERA_CAPTAINS:
+                draft.make_pick(self.conn, live, user(1), live["current_round"],
+                                f"Cap{index}", 5, tera_captain=True)
+            else:
+                with self.assertRaises(draft.DraftError) as caught:
+                    draft.make_pick(self.conn, live, user(1), live["current_round"],
+                                    f"Cap{index}", 5, tera_captain=True)
+                self.assertIn("maximum of 3 Tera Captains", str(caught.exception))
+                # The fourth is fine as a normal pick.
+                draft.make_pick(self.conn, live, user(1), live["current_round"],
+                                f"Cap{index}", 5)
+
+        player = self.p1()
+        self.assertEqual(draft.tera_captains(self.conn, self.draft["id"], player["id"]), 3)
+        self.assertEqual(player["tera_budget_remaining"], 28 - 15)
+        self.assertEqual(player["budget_remaining"], 115 - 20)
+
+    def test_tera_budget_is_enforced_separately(self):
+        # Affordable on the normal budget, but far beyond the Tera budget.
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.make_pick(self.conn, self.draft, user(1), 1, "Miraidon", 30,
+                            tera_captain=True)
+        self.assertIn("Tera budget", str(caught.exception))
+        self.assertEqual(self.p1()["budget_remaining"], 115, "nothing was charged")
+
+    def test_no_captains_outside_a_tera_format(self):
+        plain = make_draft(self.conn, channel_id=401, players=2, budget=100,
+                           min_picks=1, max_picks=3, tera_budget=0)
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.make_pick(self.conn, plain, user(1), 1, "Great Tusk", 18,
+                            tera_captain=True)
+        self.assertIn("not a Tera format", str(caught.exception))
+
+    def test_tera_format_works_without_any_document(self):
+        # The price comes from /pick, so no sheet is needed.
+        self.assertEqual(self.draft["doc_kind"], "none")
+        self.assertTrue(self.draft["tera_budget"])
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Homebrew", 9,
+                        tera_captain=True)
+        self.assertEqual(self.p1()["tera_budget_remaining"], 28 - 9)
+
+    def test_editing_a_captain_refunds_both_budgets(self):
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Great Tusk", 17,
+                        tera_captain=True)
+        live = draft.get_pool(self.conn, self.draft["id"])
+        draft.edit_pick(self.conn, live, user(1), 1, "Iron Valiant", 12,
+                        tera_captain=True)
+        player = self.p1()
+        self.assertEqual(player["budget_remaining"], 115 - 12)
+        self.assertEqual(player["tera_budget_remaining"], 28 - 12)
+
+    def test_demoting_a_captain_returns_the_tera_points(self):
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Great Tusk", 17,
+                        tera_captain=True)
+        live = draft.get_pool(self.conn, self.draft["id"])
+        # Same Pokemon, now a normal pick at its full COST.
+        draft.edit_pick(self.conn, live, user(1), 1, "Great Tusk", 18,
+                        tera_captain=False)
+        player = self.p1()
+        self.assertEqual(player["budget_remaining"], 115 - 18)
+        self.assertEqual(player["tera_budget_remaining"], 28, "Tera points refunded")
+        self.assertEqual(draft.tera_captains(self.conn, self.draft["id"], player["id"]), 0)
+
+    def test_roster_view_reports_captains(self):
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Great Tusk", 17,
+                        tera_captain=True)
+        live = draft.get_pool(self.conn, self.draft["id"])
+        view = draft.roster_view(self.conn, live, self.p1())
+        self.assertTrue(view["tera_format"])
+        self.assertEqual(view["tera_captains"], [("Great Tusk", 17)])
+        self.assertEqual(view["tera_remaining"], 11)
+        self.assertEqual(view["entries"], [("Great Tusk", 17, True)])
+
+
+class TwoPoolTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.a, self.b = make_two_pool_league(self.conn, players=3)
+
+    def test_pools_are_separate_drafts_in_separate_channels(self):
+        self.assertEqual(self.a["label"], "A")
+        self.assertEqual(self.b["label"], "B")
+        self.assertEqual(self.a["league_id"], self.b["league_id"])
+        self.assertNotEqual(self.a["id"], self.b["id"])
+        self.assertEqual(draft.get_live_pool(self.conn, 201)["id"], self.a["id"])
+        self.assertEqual(draft.get_live_pool(self.conn, 202)["id"], self.b["id"])
+
+    def test_the_same_pokemon_can_go_once_in_each_pool(self):
+        draft.make_pick(self.conn, self.a, 1001, 1, "Garchomp", 12)
+        draft.make_pick(self.conn, self.b, 2001, 1, "Garchomp", 12)
+
+        self.assertIsNotNone(draft.find_owner(self.conn, self.a["id"], "garchomp"))
+        self.assertIsNotNone(draft.find_owner(self.conn, self.b["id"], "garchomp"))
+        # ...but not twice inside one pool.
+        live = draft.get_pool(self.conn, self.a["id"])
+        with self.assertRaises(draft.DraftError):
+            draft.make_pick(self.conn, live, 1002, 1, "garchomp", 12)
+
+    def test_turns_advance_independently(self):
+        draft.make_pick(self.conn, self.a, 1001, 1, "Mon1", 5)
+        a = draft.get_pool(self.conn, self.a["id"])
+        b = draft.get_pool(self.conn, self.b["id"])
+        self.assertEqual(draft.current_player(self.conn, a)["display_name"], "A2")
+        self.assertEqual(draft.current_player(self.conn, b)["display_name"], "B1",
+                         "pool B should not have moved")
+
+    def test_coach_numbers_split_the_spreadsheet_grid(self):
+        a_numbers = [p["coach_number"] for p in draft.get_players(self.conn, self.a["id"])]
+        b_numbers = [p["coach_number"] for p in draft.get_players(self.conn, self.b["id"])]
+        self.assertEqual(a_numbers, [1, 2, 3])
+        self.assertEqual(b_numbers, [11, 12, 13])
+
+    def test_export_covers_both_pools_with_their_letters(self):
+        draft.make_pick(self.conn, self.a, 1001, 1, "Garchomp", 12)
+        draft.make_pick(self.conn, self.b, 2001, 1, "Garchomp", 12)
+        coaches, blocks, _ = draft.export_for_sheet(self.conn, self.a["league_id"])
+        self.assertEqual(coaches[1], ("A1", "A"))
+        self.assertEqual(coaches[11], ("B1", "B"))
+        self.assertEqual(blocks[1][0], ("Garchomp", False))
+        self.assertEqual(blocks[11][0], ("Garchomp", False))
+
+    def test_league_finishes_only_when_both_pools_do(self):
+        def play_out(pool):
+            for _ in range(60):
+                live = draft.get_pool(self.conn, pool["id"])
+                if live["status"] != "active":
+                    return
+                player = draft.current_player(self.conn, live)
+                draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
+                                f"{live['label']}{player['id']}R{live['current_round']}", 1)
+
+        play_out(self.a)
+        league = draft.get_league(self.conn, self.a["league_id"])
+        self.assertEqual(draft.get_pool(self.conn, self.a["id"])["status"], "complete")
+        self.assertEqual(league["status"], "active", "pool B is still drafting")
+
+        play_out(self.b)
+        league = draft.get_league(self.conn, self.a["league_id"])
+        self.assertEqual(league["status"], "complete")
+
+    def test_two_pools_need_a_template(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.create_league(
+                self.conn, guild_id=1, admin_channel_id=999, name="No Template",
+                pools=[("A", 301, [(1, "x"), (2, "y")]), ("B", 302, [(3, "p"), (4, "q")])],
+                budget=100, min_picks=1, max_picks=2, base_timer=120, doc_kind="none")
+        self.assertIn("template", str(caught.exception))
+
+    def test_two_pools_are_capped_at_ten_each(self):
+        self.assertEqual(draft.max_players_per_pool("template", 2), 10)
+        self.assertEqual(draft.max_players_per_pool("template", 1), config.MAX_PLAYERS)
+        self.assertEqual(draft.coach_numbers_for("A", 3), [1, 2, 3])
+        self.assertEqual(draft.coach_numbers_for("B", 3), [11, 12, 13])
+
+
+class LeagueNameTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+
+    def test_names_must_be_unique_while_running(self):
+        make_draft(self.conn, channel_id=501, players=2, name="Season 4")
+        with self.assertRaises(draft.DraftError) as caught:
+            make_draft(self.conn, channel_id=502, players=2, name="season 4")
+        self.assertIn("already running", str(caught.exception))
+
+    def test_a_finished_name_can_be_reused(self):
+        pool = make_draft(self.conn, channel_id=503, players=2, min_picks=1,
+                          max_picks=1, name="Cup")
+        for _ in range(2):
+            live = draft.get_pool(self.conn, pool["id"])
+            player = draft.current_player(self.conn, live)
+            draft.make_pick(self.conn, live, player["user_id"], 1, f"M{player['id']}", 1)
+        make_draft(self.conn, channel_id=504, players=2, name="Cup")
+
+    def test_lookup_by_name(self):
+        make_draft(self.conn, channel_id=505, players=2, name="Ogerpon Cup")
+        found = draft.require_league_by_name(self.conn, 1, "ogerpon cup")
+        self.assertEqual(found["name"], "Ogerpon Cup")
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.require_league_by_name(self.conn, 1, "Nope")
+        self.assertIn("Ogerpon Cup", str(caught.exception), "should list what is running")
+
+    def test_several_leagues_share_one_admin_channel(self):
+        make_draft(self.conn, channel_id=506, players=2, name="One")
+        make_draft(self.conn, channel_id=507, players=2, name="Two")
+        rows = draft.leagues_in_admin_channel(self.conn, 999)
+        self.assertEqual([r["name"] for r in rows], ["One", "Two"])
+
+
+class SubstitutionTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=600, players=3, budget=100,
+                                min_picks=1, max_picks=3, base_timer=120)
+
+    def test_a_player_asks_to_sub_out(self):
+        record = draft.request_substitution(self.conn, self.draft, user(1),
+                                            "Player1", "exams next week")
+        self.assertEqual(record["kind"], "out")
+        self.assertEqual(record["request_number"], 1)
+        self.assertEqual(record["status"], "open")
+
+    def test_an_outsider_asks_to_sub_in(self):
+        record = draft.request_substitution(self.conn, self.draft, 7777,
+                                            "Newcomer", "happy to help")
+        self.assertEqual(record["kind"], "in")
+
+    def test_a_reason_is_required(self):
+        with self.assertRaises(draft.DraftError):
+            draft.request_substitution(self.conn, self.draft, user(1), "Player1", "   ")
+
+    def test_only_one_open_request_each(self):
+        draft.request_substitution(self.conn, self.draft, user(1), "Player1", "busy")
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.request_substitution(self.conn, self.draft, user(1), "Player1", "still busy")
+        self.assertIn("already have an open", str(caught.exception))
+
+    def test_substituting_hands_over_the_whole_team(self):
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
+        draft.skip_current_player(self.conn, self.draft["id"])      # Player2 misses round 1
+        live = draft.get_pool(self.conn, self.draft["id"])
+        before = draft.get_player(self.conn, self.draft["id"], user(2))
+        self.assertEqual(before["current_timer"], 60)
+
+        result = draft.substitute_player(self.conn, live, user(2), 8888, "Stand In")
+
+        self.assertEqual(result["out_name"], "Player2")
+        self.assertEqual(result["in_name"], "Stand In")
+        self.assertIsNone(draft.get_player(self.conn, self.draft["id"], user(2)))
+
+        after = draft.get_player(self.conn, self.draft["id"], 8888)
+        self.assertEqual(after["id"], before["id"], "same seat")
+        self.assertEqual(after["draft_position"], before["draft_position"])
+        self.assertEqual(after["coach_number"], before["coach_number"])
+        self.assertEqual(after["budget_remaining"], before["budget_remaining"])
+        # A replacement does not inherit somebody else's penalties.
+        self.assertEqual(after["current_timer"], 120)
+        self.assertEqual(after["skip_count"], 0)
+        # The makeup pick they inherited is still owed.
+        self.assertEqual(draft.pending_makeup_rounds(self.conn, self.draft["id"], after["id"]), [1])
+
+    def test_the_roster_travels_with_the_seat(self):
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
+        live = draft.get_pool(self.conn, self.draft["id"])
+        draft.substitute_player(self.conn, live, user(1), 8888, "Stand In")
+
+        after = draft.get_player(self.conn, self.draft["id"], 8888)
+        view = draft.roster_view(self.conn, live, after)
+        self.assertEqual(view["pokemon"], [("Garchomp", 12)])
+        # History records the pick under the seat, so it reads as the new name.
+        picks = draft.round_picks(self.conn, self.draft["id"], 1)
+        self.assertEqual(picks[0]["display_name"], "Stand In")
+
+    def test_cannot_sub_in_somebody_already_drafting(self):
+        live = draft.get_pool(self.conn, self.draft["id"])
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.substitute_player(self.conn, live, user(1), user(2), "Player2")
+        self.assertIn("already drafting", str(caught.exception))
+
+    def test_substituting_closes_the_open_requests(self):
+        draft.request_substitution(self.conn, self.draft, user(1), "Player1", "busy")
+        draft.request_substitution(self.conn, self.draft, 8888, "Stand In", "available")
+        self.assertEqual(len(draft.open_sub_requests(self.conn, self.draft["league_id"])), 2)
+
+        live = draft.get_pool(self.conn, self.draft["id"])
+        draft.substitute_player(self.conn, live, user(1), 8888, "Stand In")
+        self.assertEqual(draft.open_sub_requests(self.conn, self.draft["league_id"]), [])
+
+
+class DraftOnlyModeTests(unittest.TestCase):
+    def test_a_draft_only_league_archives_itself(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=700, players=2, budget=50, min_picks=1,
+                          max_picks=2, mode="draft_only")
+        for _ in range(4):
+            live = draft.get_pool(conn, pool["id"])
+            player = draft.current_player(conn, live)
+            draft.make_pick(conn, live, player["user_id"], live["current_round"],
+                            f"M{player['id']}{live['current_round']}", 1)
+
+        league = draft.get_league(conn, pool["league_id"])
+        self.assertEqual(league["status"], "archived")
+        # The channel is free again, but the history is still readable.
+        self.assertIsNone(draft.get_live_pool(conn, 700))
+        self.assertEqual(len(draft.round_picks(conn, pool["id"], 1)), 2)
+
+    def test_a_full_season_league_stays_open_for_trades(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=701, players=2, budget=50, min_picks=1,
+                          max_picks=2, mode="full_season")
+        for _ in range(4):
+            live = draft.get_pool(conn, pool["id"])
+            player = draft.current_player(conn, live)
+            draft.make_pick(conn, live, player["user_id"], live["current_round"],
+                            f"M{player['id']}{live['current_round']}", 1)
+
+        league = draft.get_league(conn, pool["league_id"])
+        self.assertEqual(league["status"], "complete")
 
 
 

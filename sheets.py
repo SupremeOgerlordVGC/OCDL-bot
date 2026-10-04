@@ -93,6 +93,29 @@ def parse_cost(raw):
     return value
 
 
+def column_number(letters):
+    """'A' -> 1, 'Z' -> 26, 'AA' -> 27."""
+    total = 0
+    for char in letters.upper():
+        total = total * 26 + (ord(char) - ord("A") + 1)
+    return total
+
+
+def column_letters(number):
+    """1 -> 'A', 27 -> 'AA'. The inverse of column_number."""
+    letters = ""
+    while number > 0:
+        number, remainder = divmod(number - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def shift_column(reference, columns):
+    """Move a cell reference sideways: shift_column('C6', 3) -> 'F6'."""
+    letters, row = split_cell(reference)
+    return f"{column_letters(column_number(letters) + columns)}{row}"
+
+
 def split_cell(reference):
     """'C4' -> ('C', 4)."""
     match = re.fullmatch(r"([A-Za-z]+)(\d+)", reference.strip())
@@ -137,12 +160,12 @@ class SheetSync:
 
     # ---- low level helpers ---------------------------------------------
 
-    def _book(self, sheet_url):
+    def _book(self, doc_url):
         """Open a spreadsheet, reusing the handle between calls."""
         if not self.enabled:
             raise SheetError(f"Google Sheets is not available: {self.reason}")
 
-        key = extract_key(sheet_url)
+        key = extract_key(doc_url)
         if not key:
             raise SheetError("This draft has no Google Sheet configured.")
 
@@ -156,8 +179,8 @@ class SheetSync:
                 ) from error
         return self._books[key]
 
-    def _tab(self, sheet_url, tab_name):
-        book = self._book(sheet_url)
+    def _tab(self, doc_url, tab_name):
+        book = self._book(doc_url)
         try:
             return book.worksheet(tab_name)
         except Exception as error:
@@ -167,24 +190,24 @@ class SheetSync:
                 f"Fix the tab names in `config.SHEET_LAYOUT`."
             ) from error
 
-    def forget_cache(self, sheet_url):
-        self._pool_cache.pop(extract_key(sheet_url), None)
+    def forget_cache(self, doc_url):
+        self._pool_cache.pop(extract_key(doc_url), None)
 
     # ---- reading the Pokédex -------------------------------------------
 
-    def pool(self, sheet_url, force=False):
+    def pool(self, doc_url, force=False):
         """Every Pokémon in the Pokédex.
 
         Returns a list of {key, name, cost, banned, row}. `cost` is None for
         a banned Pokémon.
         """
-        key = extract_key(sheet_url)
+        key = extract_key(doc_url)
         cached = self._pool_cache.get(key)
         if cached and not force and time.time() - cached[0] < self.CACHE_SECONDS:
             return cached[1]
 
         layout = config.SHEET_LAYOUT
-        tab = self._tab(sheet_url, layout["pokedex_tab"])
+        tab = self._tab(doc_url, layout["pokedex_tab"])
         first = layout["pokedex_first_row"]
         name_col = layout["pokedex_name_column"]
         cost_col = layout["pokedex_cost_column"]
@@ -224,24 +247,24 @@ class SheetSync:
         self._pool_cache[key] = (time.time(), entries)
         return entries
 
-    def lookup(self, sheet_url, pokemon):
+    def lookup(self, doc_url, pokemon):
         """Find one Pokémon in the Pokédex, or None."""
         wanted = normalize(pokemon)
-        for entry in self.pool(sheet_url):
+        for entry in self.pool(doc_url):
             if entry["key"] == wanted:
                 return entry
         return None
 
-    def at_cost(self, sheet_url, cost, taken_keys):
+    def at_cost(self, doc_url, cost, taken_keys):
         """Undrafted, non-banned Pokémon that cost exactly `cost`."""
-        return [entry for entry in self.pool(sheet_url)
+        return [entry for entry in self.pool(doc_url)
                 if entry["cost"] == cost and entry["key"] not in taken_keys]
 
-    def suggest(self, sheet_url, text, taken_keys, limit=25):
+    def suggest(self, doc_url, text, taken_keys, limit=25):
         """Autocomplete matches: undrafted, not banned, name contains `text`."""
         wanted = normalize(text)
         starts, contains = [], []
-        for entry in self.pool(sheet_url):
+        for entry in self.pool(doc_url):
             if entry["banned"] or entry["key"] in taken_keys:
                 continue
             if not wanted:
@@ -256,7 +279,7 @@ class SheetSync:
 
     # ---- writing --------------------------------------------------------
 
-    def write_pick(self, sheet_url, draft_position, round_number, pokemon):
+    def write_pick(self, doc_url, draft_position, round_number, pokemon):
         """Write one Pokémon into one coach's roster block.
 
         Called from a background thread with plain values only - never a
@@ -268,7 +291,7 @@ class SheetSync:
 
         layout = config.SHEET_LAYOUT
         cell = self._roster_cell(draft_position, round_number)
-        tab = self._tab(sheet_url, layout["rosters_tab"])
+        tab = self._tab(doc_url, layout["rosters_tab"])
         tab.update_acell(cell, pokemon)
         return True
 
@@ -293,7 +316,17 @@ class SheetSync:
         column, first_row = split_cell(blocks[draft_position - 1])
         return f"{column}{first_row + round_number - 1}"
 
-    def full_sync(self, sheet_url, coach_names, roster_blocks):
+    @staticmethod
+    def _tera_cell(draft_position, round_number):
+        """The Tera Captain tick box beside a pick.
+
+        It sits a fixed number of columns right of the name - clear of the
+        image formula on one side and the cost formula on the other.
+        """
+        return shift_column(SheetSync._roster_cell(draft_position, round_number),
+                            config.SHEET_LAYOUT["tera_flag_offset"])
+
+    def full_sync(self, doc_url, coach_names, roster_blocks):
         """Rewrite the coach names and every roster block from local data.
 
         `coach_names` is a list in draft order; `roster_blocks` maps draft
@@ -305,7 +338,7 @@ class SheetSync:
                 "Sheet writing is switched off. Set `SHEETS_WRITE_ENABLED = True` in "
                 "config.py once the template layout has been confirmed."
             )
-        if not sheet_url:
+        if not doc_url:
             raise SheetError("This draft has no Google Sheet configured.")
 
         layout = config.SHEET_LAYOUT
@@ -325,7 +358,7 @@ class SheetSync:
         padded = list(coach_names) + [""] * (seats - len(coach_names))
         column = layout["coaches_name_column"]
 
-        coaches_tab = self._tab(sheet_url, layout["coaches_tab"])
+        coaches_tab = self._tab(doc_url, layout["coaches_tab"])
         coaches_tab.update(values=[[name] for name in padded],
                            range_name=f"{column}{first}:{column}{last}",
                            value_input_option="USER_ENTERED")
@@ -344,19 +377,19 @@ class SheetSync:
                 "values": [[name] for name in padded_names],
             })
 
-        rosters_tab = self._tab(sheet_url, layout["rosters_tab"])
+        rosters_tab = self._tab(doc_url, layout["rosters_tab"])
         if updates:
             rosters_tab.batch_update(updates, value_input_option="USER_ENTERED")
 
-        self.forget_cache(sheet_url)
+        self.forget_cache(doc_url)
         return {"coaches": len(coach_names), "rosters": len(updates)}
 
     # ---- inspection -----------------------------------------------------
 
-    def describe(self, sheet_url):
+    def describe(self, doc_url):
         """Check the document against config.SHEET_LAYOUT. Changes nothing."""
         layout = config.SHEET_LAYOUT
-        book = self._book(sheet_url)
+        book = self._book(doc_url)
         titles = [w.title for w in book.worksheets()]
 
         report = {"title": book.title, "tabs": titles, "problems": [], "notes": []}
@@ -370,7 +403,7 @@ class SheetSync:
         if report["problems"]:
             return report
 
-        entries = self.pool(sheet_url, force=True)
+        entries = self.pool(doc_url, force=True)
         draftable = [e for e in entries if not e["banned"]]
         costs = sorted({e["cost"] for e in draftable})
         report["notes"].append(
@@ -381,7 +414,7 @@ class SheetSync:
             f"Point values in use: {costs[0]}–{costs[-1]}." if costs else "No costs found."
         )
 
-        coaches_tab = self._tab(sheet_url, layout["coaches_tab"])
+        coaches_tab = self._tab(doc_url, layout["coaches_tab"])
         column = layout["coaches_name_column"]
         current = coaches_tab.get(
             f"{column}{layout['coaches_first_row']}:{column}{layout['coaches_last_row']}")

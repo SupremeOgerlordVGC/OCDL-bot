@@ -22,6 +22,13 @@ class CostParsingTests(unittest.TestCase):
         self.assertEqual(sheets.parse_cost("3.0"), 3)
         self.assertEqual(sheets.parse_cost(1), 1)
 
+    def test_tera_flag_column_sits_beside_the_name(self):
+        # The tick box is three columns right of the Pokemon name, and must
+        # never land on the image or cost formulas either side of it.
+        self.assertEqual(sheets.SheetSync._tera_cell(1, 1), "F6")
+        self.assertEqual(sheets.SheetSync._tera_cell(2, 1), "M6")
+        self.assertEqual(sheets.SheetSync._tera_cell(20, 12), "AH64")
+
     def test_currency_formatting_is_tolerated(self):
         # The template's cost column is formatted as currency. The bot asks
         # Google for unformatted values, but a league that types costs as
@@ -56,12 +63,14 @@ class CellMappingTests(unittest.TestCase):
                 self.assertEqual(sheets.SheetSync._roster_cell(position, 1), start)
 
     def test_rounds_walk_down_the_same_column(self):
-        # Coach 1's block starts at C4 and is 12 rounds tall.
-        self.assertEqual(sheets.SheetSync._roster_cell(1, 1), "C4")
-        self.assertEqual(sheets.SheetSync._roster_cell(1, 12), "C15")
-        # Coach 16 sits in the bottom right of the grid.
-        self.assertEqual(sheets.SheetSync._roster_cell(16, 1), "X49")
-        self.assertEqual(sheets.SheetSync._roster_cell(16, 12), "X60")
+        # Coach 1's block starts at C6 and is 12 rounds tall.
+        self.assertEqual(sheets.SheetSync._roster_cell(1, 1), "C6")
+        self.assertEqual(sheets.SheetSync._roster_cell(1, 12), "C17")
+        # Coach 11 is the first of pool B, bottom half of the grid.
+        self.assertEqual(sheets.SheetSync._roster_cell(11, 1), "C38")
+        # Coach 20 sits in the bottom right.
+        self.assertEqual(sheets.SheetSync._roster_cell(20, 1), "AE53")
+        self.assertEqual(sheets.SheetSync._roster_cell(20, 12), "AE64")
 
     def test_no_two_coaches_share_a_cell(self):
         rows = config.SHEET_LAYOUT["roster_rows"]
@@ -71,12 +80,12 @@ class CellMappingTests(unittest.TestCase):
                 cell = sheets.SheetSync._roster_cell(position, round_number)
                 self.assertNotIn(cell, seen, f"{cell} used twice")
                 seen.add(cell)
-        self.assertEqual(len(seen), 16 * rows)
+        self.assertEqual(len(seen), len(config.SHEET_LAYOUT["roster_blocks"]) * rows)
 
     def test_out_of_range_is_refused(self):
         rows = config.SHEET_LAYOUT["roster_rows"]
         with self.assertRaises(sheets.SheetError):
-            sheets.SheetSync._roster_cell(17, 1)          # no such coach
+            sheets.SheetSync._roster_cell(21, 1)          # no such coach
         with self.assertRaises(sheets.SheetError):
             sheets.SheetSync._roster_cell(1, rows + 1)    # block is not that tall
         with self.assertRaises(sheets.SheetError):

@@ -145,7 +145,7 @@ class DraftBot(commands.Bot):
 
     async def on_timer_expired(self, draft_id, token):
         """A player's clock ran out."""
-        draft = rules.get_draft(self.conn, draft_id)
+        draft = rules.get_pool(self.conn, draft_id)
         if draft is None or draft["status"] != "active":
             return
 

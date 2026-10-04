@@ -29,7 +29,7 @@ class ExtrasCog(commands.Cog):
         draft channel, so admins can name the draft channel explicitly.
         """
         channel_id = channel.id if channel else interaction.channel_id
-        draft = rules.get_channel_draft(self.bot.conn, channel_id)
+        draft = rules.get_channel_pool(self.bot.conn, channel_id)
         if draft is None:
             where = channel.mention if channel else "this channel"
             raise rules.DraftError(
@@ -54,7 +54,7 @@ class ExtrasCog(commands.Cog):
     )
     async def trade(self, interaction: discord.Interaction, drops: str, gets: str,
                     partner: discord.Member = None):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         drop_list = rules.parse_pokemon_list(drops, config.MAX_TRADE_SIZE)
@@ -131,11 +131,11 @@ class ExtrasCog(commands.Cog):
         record, notes = rules.approve_trade(self.bot.conn, draft, trade_id, interaction.user.id)
 
         # A free-agency pickup has no cost until the Pokédex is consulted.
-        if self.bot.sheets.enabled and draft["sheet_url"]:
+        if self.bot.sheets.enabled and draft["doc_url"]:
             for name in json.loads(record["gets"]):
                 try:
                     entry = await asyncio.to_thread(
-                        self.bot.sheets.lookup, draft["sheet_url"], name)
+                        self.bot.sheets.lookup, draft["doc_url"], name)
                 except Exception:
                     log.exception("could not read the cost of %s after a trade", name)
                     continue
@@ -217,11 +217,11 @@ class ExtrasCog(commands.Cog):
     @app_commands.command(name="search", description="Look a Pokémon up in the linked Google Sheet.")
     @app_commands.describe(pokemon="The Pokémon to look for")
     async def search(self, interaction: discord.Interaction, pokemon: str):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         self.require_sheet(draft)
 
         await interaction.response.defer(ephemeral=True)
-        entry = await asyncio.to_thread(self.bot.sheets.lookup, draft["sheet_url"], pokemon)
+        entry = await asyncio.to_thread(self.bot.sheets.lookup, draft["doc_url"], pokemon)
 
         if entry is None:
             await interaction.followup.send(
@@ -256,12 +256,12 @@ class ExtrasCog(commands.Cog):
     )
     @app_commands.describe(cost="The point value to list")
     async def available(self, interaction: discord.Interaction, cost: int):
-        draft = rules.require_channel_draft(self.bot.conn, interaction.channel_id)
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         self.require_sheet(draft)
 
         await interaction.response.defer(ephemeral=True)
         entries = await asyncio.to_thread(
-            self.bot.sheets.at_cost, draft["sheet_url"], cost, self.taken_keys(draft["id"])
+            self.bot.sheets.at_cost, draft["doc_url"], cost, self.taken_keys(draft["id"])
         )
 
         if not entries:
@@ -286,7 +286,7 @@ class ExtrasCog(commands.Cog):
                 f"❌ This command needs Google Sheets, which is not available: "
                 f"{self.bot.sheets.reason}"
             )
-        if not draft["sheet_url"]:
+        if not draft["doc_url"]:
             raise rules.DraftError(
                 "❌ This draft has no Google Sheet linked. An admin can add one with `/edit`."
             )
