@@ -481,3 +481,111 @@ class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(larry["current_timer"], 60)
         self.assertEqual(rules.current_player(self.conn, self.draft())["display_name"], "Alex")
         self.bot.timers.cancel_all()
+
+
+class SheetWritePathTests(unittest.IsolatedAsyncioTestCase):
+    """The sheet write path is wrapped in try/except so a Google outage can
+    never undo a pick. That also means a wrong call signature would fail
+    silently, so these tests check the arguments that actually go out."""
+
+    class RecordingSheets(StubPriceList):
+        can_write = True
+
+        def __init__(self):
+            self.picks = []
+            self.syncs = []
+
+        def roster_tab_name(self, tera_format):
+            return "Tera Rosters" if tera_format else "Rosters"
+
+        def write_pick(self, doc_url, tera_format, coach_number, round_number,
+                       pokemon, tera_captain=False):
+            self.picks.append((doc_url, tera_format, coach_number, round_number,
+                               pokemon, tera_captain))
+            return True
+
+        def full_sync(self, doc_url, tera_format, coaches, blocks):
+            self.syncs.append((doc_url, tera_format, coaches, blocks))
+            return {"coaches": len(coaches), "rosters": len(blocks),
+                    "tab": self.roster_tab_name(tera_format)}
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9100)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.recorder = self.RecordingSheets()
+        self.bot.sheets = self.recorder
+        self.pool_id = make_pool(
+            self.conn, 9100, [(11, "Larry"), (22, "Alex")],
+            budget=115, tera_budget=28, max_picks=3,
+            doc_url="https://docs.google.com/spreadsheets/d/TEST/edit",
+        )
+
+    def pool(self):
+        return rules.get_pool(self.conn, self.pool_id)
+
+    async def settle(self):
+        """Let the fire-and-forget sheet tasks finish.
+
+        They hand off to a worker thread, so a short real wait is needed -
+        yielding to the event loop alone is not always enough. The draft's
+        turn timers are long-running tasks, so this cannot simply wait for
+        every pending task to finish.
+        """
+        self.bot.timers.cancel_all()
+        await asyncio.sleep(0.05)
+
+    async def test_a_pick_is_written_with_the_right_arguments(self):
+        await ui.announce(self.bot, self.pool_id, rules.start_pool(self.conn, self.pool()))
+        _, events = rules.make_pick(self.conn, self.pool(), 11, 1, "Garchomp", 11,
+                                    tera_captain=True)
+        await ui.announce(self.bot, self.pool_id, events)
+        await self.settle()
+
+        self.assertTrue(self.recorder.picks, "nothing was written to the sheet")
+        doc_url, tera_format, coach, round_number, pokemon, captain = self.recorder.picks[0]
+        self.assertIn("TEST", doc_url)
+        self.assertTrue(tera_format, "a Tera league writes to the Tera Rosters tab")
+        self.assertEqual(coach, 1, "Larry is coach 1, so roster block 1")
+        self.assertEqual(round_number, 1)
+        self.assertEqual(pokemon, "Garchomp")
+        self.assertTrue(captain)
+        self.bot.timers.cancel_all()
+
+    async def test_a_normal_pick_is_not_flagged_as_a_captain(self):
+        await ui.announce(self.bot, self.pool_id, rules.start_pool(self.conn, self.pool()))
+        _, events = rules.make_pick(self.conn, self.pool(), 11, 1, "Garchomp", 12)
+        await ui.announce(self.bot, self.pool_id, events)
+        await self.settle()
+
+        self.assertFalse(self.recorder.picks[0][5])
+        self.bot.timers.cancel_all()
+
+    async def test_a_full_sync_sends_coaches_and_blocks(self):
+        rules.start_pool(self.conn, self.pool())
+        rules.make_pick(self.conn, self.pool(), 11, 1, "Garchomp", 11, tera_captain=True)
+
+        ui.resync_sheet(self.bot, self.pool_id)
+        await self.settle()
+
+        self.assertTrue(self.recorder.syncs)
+        doc_url, tera_format, coaches, blocks = self.recorder.syncs[0]
+        self.assertTrue(tera_format)
+        self.assertEqual(coaches[1], ("Larry", "A"))
+        self.assertEqual(blocks[1][0], ("Garchomp", True))
+        self.bot.timers.cancel_all()
+
+    async def test_nothing_is_written_for_a_tiering_document(self):
+        # A tiering sheet is read-only: it has no roster blocks to fill in.
+        self.conn.execute("UPDATE leagues SET doc_kind = 'tiering'")
+        self.conn.commit()
+
+        rules.start_pool(self.conn, self.pool())
+        _, events = rules.make_pick(self.conn, self.pool(), 11, 1, "Garchomp", 12)
+        await ui.announce(self.bot, self.pool_id, events)
+        ui.resync_sheet(self.bot, self.pool_id)
+        await self.settle()
+
+        self.assertEqual(self.recorder.picks, [])
+        self.assertEqual(self.recorder.syncs, [])
+        self.bot.timers.cancel_all()

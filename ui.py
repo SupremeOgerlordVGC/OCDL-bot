@@ -293,57 +293,67 @@ def _start_timer(bot, draft_id, event):
     rules.open_turn_clock(bot.conn, draft_id, deadline)
 
 
-def sync_pick_to_sheet(bot, draft_id, event):
-    """Push a single pick to Google Sheets in the background.
+def sync_pick_to_sheet(bot, pool_id, event):
+    """Push a single pick to the league template in the background.
 
     Fire and forget on purpose: the draft has already been saved locally, so
     a slow or broken Google API must not hold up the next player's turn.
-    The sheet URL is read here, on the main thread, so the worker thread
+    Everything the worker needs is read here, on the main thread, so it
     never touches the database.
     """
     if not bot.sheets.can_write:
         return
 
-    draft = rules.get_pool(bot.conn, draft_id)
-    if not draft["doc_url"]:
-        return
+    draft = rules.get_pool(bot.conn, pool_id)
+    if not draft["doc_url"] or draft["doc_kind"] != "template":
+        return      # a tiering document has nowhere to write picks to
 
     doc_url = draft["doc_url"]
-    position, round_number = event["position"], event["round"]
+    tera_format = bool(draft["tera_budget"])
+    coach_number = event["coach_number"]
+    round_number = event["round"]
     pokemon = event["pokemon"]
+    tera_captain = bool(event.get("tera_captain"))
 
     async def worker():
         try:
-            await asyncio.to_thread(bot.sheets.write_pick, doc_url,
-                                    position, round_number, pokemon)
+            await asyncio.to_thread(bot.sheets.write_pick, doc_url, tera_format,
+                                    coach_number, round_number, pokemon, tera_captain)
         except Exception:
-            log.exception("sheet update failed for draft %s (draft data is unaffected)", draft_id)
+            log.exception("sheet update failed for pool %s (draft data is unaffected)",
+                          pool_id)
 
     asyncio.create_task(worker())
 
 
-def resync_sheet(bot, draft_id):
-    """Rewrite the whole sheet in the background.
+def resync_sheet(bot, pool_id):
+    """Rewrite the whole league on the sheet, in the background.
 
-    Used after anything that can change more than one row - an edited pick
-    or an approved trade, both of which affect availability.
+    Used after anything that can change more than one row: a new league, an
+    edited pick, an approved trade or a substitution. It writes the coach
+    list and every roster block for BOTH pools, because they share one
+    document.
     """
     if not bot.sheets.can_write:
         return
 
-    draft = rules.get_pool(bot.conn, draft_id)
-    if not draft["doc_url"]:
-        return
+    draft = rules.get_pool(bot.conn, pool_id)
+    if not draft["doc_url"] or draft["doc_kind"] != "template":
+        return      # a tiering document has no rosters to write to
 
     doc_url = draft["doc_url"]
-    coaches, rosters, overflow = rules.export_for_sheet(bot.conn, draft_id)
+    tera_format = bool(draft["tera_budget"])
+    # Keyed by league, not pool: one document holds both pools' rosters.
+    coaches, rosters, overflow = rules.export_for_sheet(bot.conn, draft["league_id"])
     if overflow:
-        log.warning("draft %s: rosters too big for the sheet blocks: %s", draft_id, overflow)
+        log.warning("league %s: rosters too big for the sheet blocks: %s",
+                    draft["league_id"], overflow)
 
     async def worker():
         try:
-            await asyncio.to_thread(bot.sheets.full_sync, doc_url, coaches, rosters)
+            await asyncio.to_thread(bot.sheets.full_sync, doc_url, tera_format,
+                                    coaches, rosters)
         except Exception:
-            log.exception("sheet resync failed for draft %s (local data is fine)", draft_id)
+            log.exception("sheet resync failed for pool %s (local data is fine)", pool_id)
 
     asyncio.create_task(worker())
