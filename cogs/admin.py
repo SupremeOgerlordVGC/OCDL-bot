@@ -25,6 +25,7 @@ log = logging.getLogger("draftbot.admin")
 
 MODES = [
     app_commands.Choice(name="Full season (draft, trades and schedule)", value="full_season"),
+    app_commands.Choice(name="Draft + schedule (no trades)", value="draft_schedule"),
     app_commands.Choice(name="Draft only (archive once the draft finishes)", value="draft_only"),
 ]
 
@@ -43,6 +44,7 @@ class AdminCog(commands.Cog):
         name="A name for this draft. Must be unique on this server.",
         draft_channel="Channel where pool A drafts",
         players="Pool A players, @mentioned in draft order",
+        players_role="Instead of listing them: a role whose members the bot shuffles",
         min_picks="Minimum Pokémon each player must draft",
         max_picks="Maximum Pokémon each player may draft (this is the number of rounds)",
         timer="Base pick timer in seconds, e.g. 120",
@@ -54,17 +56,23 @@ class AdminCog(commands.Cog):
         tiering_link="Simple tiering sheet: names in A, prices in B, Tera prices in C.",
         draft_channel_b="Optional second pool's channel (needs a template)",
         players_b="Optional second pool's players, @mentioned in draft order",
+        players_role_b="Instead of listing them: a role for the second pool",
+        weeks="Season length when the bot generates the schedule itself",
     )
     @app_commands.choices(mode=MODES)
     async def setup_league(self, interaction: discord.Interaction, name: str,
-                           draft_channel: discord.TextChannel, players: str,
+                           draft_channel: discord.TextChannel,
                            min_picks: int, max_picks: int, timer: int,
                            mode: app_commands.Choice[str],
+                           players: str = None,
+                           players_role: discord.Role = None,
                            budget: int = None, tera_budget: int = None,
                            max_trades: int = 0, template_link: str = None,
                            tiering_link: str = None,
                            draft_channel_b: discord.TextChannel = None,
-                           players_b: str = None):
+                           players_b: str = None,
+                           players_role_b: discord.Role = None,
+                           weeks: int = None):
         if interaction.guild is None:
             raise rules.DraftError("❌ Leagues can only be created inside a server.")
         ui.require_moderator(self.bot, interaction)
@@ -79,9 +87,11 @@ class AdminCog(commands.Cog):
         doc_kind = "template" if template_link else ("tiering" if tiering_link else "none")
         doc_url = template_link or tiering_link
 
-        if (draft_channel_b is None) != (players_b is None):
+        has_pool_b_players = bool(players_b) or players_role_b is not None
+        if (draft_channel_b is None) != has_pool_b_players:
             raise rules.DraftError(
-                "❌ A second pool needs both `draft_channel_b` and `players_b`."
+                "❌ A second pool needs both a channel and its players — give "
+                "`draft_channel_b` plus either `players_b` or `players_role_b`."
             )
 
         # A template declares the league's own budget, so the sheet wins.
@@ -120,11 +130,16 @@ class AdminCog(commands.Cog):
                 )
             tera_budget = tera_budget or 0
 
-        roster_a = await ui.parse_players(interaction.guild, players)
+        roster_a, shuffled_a = await ui.roster_from_options(
+            interaction.guild, players, players_role, "A")
         pools = [("A", draft_channel.id, roster_a)]
+        shuffled = {"A": shuffled_a}
+
         if draft_channel_b is not None:
-            roster_b = await ui.parse_players(interaction.guild, players_b)
+            roster_b, shuffled_b = await ui.roster_from_options(
+                interaction.guild, players_b, players_role_b, "B")
             pools.append(("B", draft_channel_b.id, roster_b))
+            shuffled["B"] = shuffled_b
 
         league_id = rules.create_league(
             self.bot.conn,
@@ -141,8 +156,18 @@ class AdminCog(commands.Cog):
             doc_url=doc_url,
             tera_budget=tera_budget,
             max_trades=max_trades,
+            season_weeks=weeks or 0,
         )
         league = rules.get_league(self.bot.conn, league_id)
+
+        # Without a template there is no schedule to read, so the bot makes
+        # its own for any mode that posts one.
+        generated_weeks = 0
+        if league["mode"] in config.SCHEDULE_MODES and doc_kind != "template":
+            generated_weeks = rules.generate_fixtures(
+                self.bot.conn, league_id, weeks=weeks)
+            notes.append(f"Generated a {generated_weeks}-week schedule "
+                         f"(`/postschedule` to post a week)")
 
         # Push the coach names and pool letters straight to the template;
         # every other tab in it reads the names from there.
@@ -162,15 +187,18 @@ class AdminCog(commands.Cog):
                if tera_budget else "\n")
             + f"• Picks: **{min_picks}–{max_picks}** per player ({max_picks} rounds)\n"
             f"• Base timer: **{ui.format_seconds(timer)}**\n"
-            f"• Trades per player: **{max_trades or 'unlimited'}**\n"
-            f"• Document: {document}\n"
+            + (f"• Trades per player: **{max_trades or 'unlimited'}**\n"
+               if league["mode"] == "full_season" else "")
+            + f"• Document: {document}\n"
             f"• Trade approvals: {interaction.channel.mention}\n"
         )
         for pool in pool_rows:
             seats = rules.get_players(self.bot.conn, pool["id"])
             order = "\n".join(f"{p['draft_position']}. <@{p['user_id']}>" for p in seats)
+            how = (" *(order randomised by the bot)*"
+                   if shuffled.get(pool["label"]) else " *(order as listed)*")
             summary += (f"\n**Pool {pool['label']}** — <#{pool['channel_id']}> "
-                        f"({len(seats)} players)\n{order}\n")
+                        f"({len(seats)} players){how}\n{order}\n")
 
         await ui.safe_send(interaction.channel, summary)
         for pool in pool_rows:
@@ -356,51 +384,128 @@ class AdminCog(commands.Cog):
         ui.require_moderator(self.bot, interaction)
         league = rules.require_league_by_name(self.bot.conn, interaction.guild_id, name)
 
-        if league["mode"] != "full_season":
+        if league["mode"] not in config.SCHEDULE_MODES:
             raise rules.DraftError(
-                "❌ Schedules are a full-season feature. **{}** is a draft-only league."
-                .format(league["name"])
+                f"❌ **{league['name']}** is a draft-only league, so it has no schedule. "
+                f"Use the `draft_schedule` or `full_season` mode for that."
             )
-        if league["doc_kind"] != "template":
-            raise rules.DraftError(
-                "❌ The schedule lives on the league template, so this needs a template link."
-            )
-        if not self.bot.sheets.enabled:
-            raise rules.DraftError(
-                f"❌ Google Sheets is not available: {self.bot.sheets.reason}")
         if week < 1:
             raise rules.DraftError("❌ Weeks start at 1.")
 
         await interaction.response.defer(ephemeral=True)
-        matches = await asyncio.to_thread(
-            self.bot.sheets.read_schedule, league["doc_url"], week)
 
-        if not matches:
+        if league["doc_kind"] == "template":
+            # The template owns the fixtures, so read them from the sheet.
+            if not self.bot.sheets.enabled:
+                raise rules.DraftError(
+                    f"❌ Google Sheets is not available: {self.bot.sheets.reason}")
+            sheet_matches = await asyncio.to_thread(
+                self.bot.sheets.read_schedule, league["doc_url"], week)
+
+            mentions = {}
+            for pool in rules.get_league_pools(self.bot.conn, league["id"]):
+                for player in rules.get_players(self.bot.conn, pool["id"]):
+                    mentions[rules.normalize(player["display_name"])] = player["user_id"]
+
+            unknown = []
+            pairs = [(_who(home, mentions, unknown), _who(away, mentions, unknown))
+                     for home, away in sheet_matches]
+            footnote = (f"*Not matched to a Discord account: "
+                        f"{', '.join(sorted(set(unknown)))}. Run `/sync` so the sheet's "
+                        f"coach names match the bot's.*" if unknown else "")
+        else:
+            # The bot generated the schedule itself.
+            fixtures = rules.get_fixtures(self.bot.conn, league["id"], week)
+            pairs = [(f"<@{home['user_id']}>", f"<@{away['user_id']}>")
+                     for home, away in fixtures]
+            available = rules.fixture_weeks(self.bot.conn, league["id"])
+            footnote = (f"*Season runs weeks {available[0]}–{available[-1]}.*"
+                        if available else "")
+
+        if not pairs:
             await interaction.followup.send(
-                f"No matches found for week {week} on the schedule.", ephemeral=True)
+                f"No matches found for week {week}.", ephemeral=True)
             return
 
-        # Coach names on the sheet are the usernames the bot wrote there, so
-        # they map straight back to Discord accounts.
-        mentions = {}
-        for pool in rules.get_league_pools(self.bot.conn, league["id"]):
-            for player in rules.get_players(self.bot.conn, pool["id"]):
-                mentions[rules.normalize(player["display_name"])] = player["user_id"]
-
         lines = [f"📅 **{league['name']} — Week {week}**", ""]
-        unknown = []
-        for home, away in matches:
-            lines.append(f"{_who(home, mentions, unknown)} **vs** {_who(away, mentions, unknown)}")
-
-        if unknown:
-            lines += ["", f"*Not matched to a Discord account: "
-                          f"{', '.join(sorted(set(unknown)))}. Run `/sync` so the sheet's "
-                          f"coach names match the bot's.*"]
+        lines += [f"{home} **vs** {away}" for home, away in pairs]
+        if footnote:
+            lines += ["", footnote]
 
         for message in ui.pack_messages(lines):
             await ui.safe_send(interaction.channel, message)
         await interaction.followup.send(
-            f"✅ Posted {len(matches)} match(es) for week {week}.", ephemeral=True)
+            f"✅ Posted {len(pairs)} match(es) for week {week}.", ephemeral=True)
+
+    @app_commands.command(
+        name="reschedule",
+        description="Moderator only: regenerate the bot's own schedule at random.",
+    )
+    @app_commands.describe(name="The league's name", weeks="Season length, or leave blank")
+    async def reschedule(self, interaction: discord.Interaction, name: str,
+                         weeks: int = None):
+        ui.require_moderator(self.bot, interaction)
+        league = rules.require_league_by_name(self.bot.conn, interaction.guild_id, name)
+
+        if league["doc_kind"] == "template":
+            raise rules.DraftError(
+                "❌ This league's schedule lives on its template, so change it there."
+            )
+        if league["mode"] not in config.SCHEDULE_MODES:
+            raise rules.DraftError(
+                f"❌ **{league['name']}** does not use a schedule."
+            )
+
+        made = rules.generate_fixtures(self.bot.conn, league["id"], weeks=weeks)
+        await interaction.response.send_message(
+            f"🎲 Generated a fresh {made}-week schedule for **{league['name']}**. "
+            f"Post a week with `/postschedule`.",
+            ephemeral=True,
+        )
+
+    # ---- /removeplayer --------------------------------------------------
+
+    @app_commands.command(
+        name="removeplayer",
+        description="Moderator only: take a player out of this pool's draft.",
+    )
+    @app_commands.describe(
+        player="The player to remove",
+        keep_roster="Keep their Pokémon out of the pool instead of releasing them",
+    )
+    async def removeplayer(self, interaction: discord.Interaction,
+                           player: discord.Member, keep_roster: bool = False):
+        pool = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
+        ui.require_moderator(self.bot, interaction)
+
+        await interaction.response.defer(ephemeral=True)
+        result = rules.remove_player(self.bot.conn, pool, player.id,
+                                     release_roster=not keep_roster)
+
+        if result["seat_deleted"]:
+            detail = (f"The draft had not started, so their seat is gone and the "
+                      f"order closes up: **{result['players_left']}** players left.")
+        else:
+            detail = ("The draft is under way, so their seat stays in the order and "
+                      "is passed over from now on — removing it would have moved "
+                      "everybody else's turn.")
+
+        released = ""
+        if result["released"]:
+            released = (f"\n• Back in the pool: {', '.join(result['released'])}")
+        elif keep_roster:
+            released = "\n• Their Pokémon stay out of the pool."
+
+        await ui.safe_send(
+            interaction.channel,
+            f"🚪 **{result['display_name']}** has been removed from Pool "
+            f"{result['pool']} by a moderator.\n• {detail}{released}",
+        )
+        if pool["doc_kind"] == "template":
+            ui.resync_sheet(self.bot, pool["id"])
+
+        await interaction.followup.send(
+            f"✅ {player.mention} removed from Pool {result['pool']}.", ephemeral=True)
 
     # ---- /sync ----------------------------------------------------------
 

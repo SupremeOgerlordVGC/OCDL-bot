@@ -44,6 +44,18 @@ carries on.
 **Snake order is generated from the player list.** Round 1 runs 1→N, round 2
 runs N→1, and so on, for any number of players from 2 up.
 
+**Three modes.** `/setup` asks how much of the season the bot should run:
+
+| Mode | Draft | Schedule | Trades |
+|---|---|---|---|
+| `draft_only` | ✅ then archives itself | — | — |
+| `draft_schedule` | ✅ | ✅ | — |
+| `full_season` | ✅ | ✅ | ✅ |
+
+With a template the schedule is read from the sheet. Without one the bot
+**generates its own** randomised round-robin, so a `draft_schedule` league needs
+no spreadsheet at all.
+
 **Documents are optional.** A league can run with no document at all, with a
 simple tiering sheet, or with the full league template — see
 [Documents](#documents).
@@ -106,9 +118,13 @@ works normally.
    Never commit `.env`. It is already listed in `.gitignore`. If the token ever
    leaks, press **Reset Token** and paste the new one in.
 
-4. Still on the Bot tab, no privileged intents are required. The bot uses slash
-   commands only, so leave *Message Content Intent* and *Server Members Intent*
-   switched off.
+4. Still on the Bot tab, under **Privileged Gateway Intents**, switch on
+   **Server Members Intent** if you want to hand `/setup` a role instead of
+   typing the player list — Discord will not otherwise tell the bot who holds a
+   role. Leave *Message Content Intent* off; slash commands do not need it.
+
+   If you skip this the bot still starts normally, logs a one-line warning, and
+   simply asks you to @mention players instead.
 
 5. Open **OAuth2 → URL Generator**:
    - Scopes: `bot` and `applications.commands`
@@ -255,17 +271,29 @@ sudo systemctl start draftbot
 
 | Command | Who | What it does |
 |---|---|---|
-| `/setup` | Moderator | Creates a league **in the admin channel you run it from**. Takes a name, mode, pool channel(s) with their own player lists, budgets, pick limits, timer, trade cap and an optional document. Does **not** start the draft. |
+| `/setup` | Moderator | Creates a league **in the admin channel you run it from**. Takes a name, mode, pool channel(s) with their players, budgets, pick limits, timer, trade cap and an optional document. Does **not** start the draft. |
+| `/removeplayer player [keep_roster]` | Moderator | Takes a player out of this pool's draft. |
+| `/reschedule name [weeks]` | Moderator | Rolls a fresh random schedule, when the bot is the one generating it. |
 | `/edit` | Moderator | Changes budgets, pick limits, trade cap or the document link. Locked once `/draft` runs. |
 | `/draft` | Moderator | Run in a pool's channel: starts that pool, pings the first player and begins their timer. |
 | `/draft-moderator` | Administrator | Grants or revokes a role's access to every moderator command on the server. Run with no options to list the current roles. |
 | `/canceldraft` | Moderator | Cancels a league by name. Data is kept, not deleted. |
 | `/archive` | Moderator | Closes a finished league and frees its channels. Draft-only leagues do this themselves. |
 
-Players are given as @mentions in draft order:
-`players: @Larry @Alex @Sarah`. The first mention is coach 1, which is also
-their roster block on the spreadsheet. A second pool needs both
-`draft_channel_b` and `players_b`, and a template.
+**Giving `/setup` the players.** Two ways, and you pick one per pool:
+
+* `players: @Larry @Alex @Sarah` — **your** order is the draft order. The first
+  mention is coach 1, which is also their roster block on the spreadsheet.
+* `players_role: @Season 4` — the bot takes everyone with that role and
+  **shuffles them into a random draft order** for you. Bots in the role are
+  skipped.
+
+A second pool uses `draft_channel_b` with either `players_b` or
+`players_role_b`, and needs a template.
+
+Listing by role needs Discord's privileged **Server Members Intent** — see
+[Getting a bot token](#getting-a-bot-token). Without it the bot still runs, and
+tells you to @mention players instead.
 
 Nobody can use the moderator commands until an Administrator has run
 `/draft-moderator`. Administrators and the server owner always have access.
@@ -291,7 +319,7 @@ Both are proposed in a pool channel and sent to the league's admin channel.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/trade drops gets [partner]` | Any player | Proposes a trade (up to 5 each way). With `partner` it is a player-to-player swap; without, a free-agency move against the undrafted pool. Nothing changes yet. |
+| `/trade drops gets [partner] [for_player]` | Any player | Proposes a trade (up to 5 each way). With `partner` it is a player-to-player swap; without, a free-agency move against the undrafted pool. Moderators can use `for_player` to file a trade on somebody else's behalf. Nothing changes yet. |
 | `/approvetrade trade_id [name]` | Moderator | Applies the trade to rosters and budgets. A trade can only be approved once. |
 | `/rejecttrade trade_id [name]` | Moderator | Rejects it. Nothing changes. |
 | `/trades [name]` | Anyone | Lists a league's trades and their status. |
@@ -308,7 +336,8 @@ Trades are a full-season feature; a draft-only league refuses them.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/postschedule week name` | Moderator | Posts that week's matchups into the channel you run it in, pinging both players. Needs a template and full-season mode. Never automatic. |
+| `/postschedule week name` | Moderator | Posts that week's matchups into the channel you run it in, pinging both players. Reads the template's schedule, or the bot's own generated one. Never automatic. |
+| `/reschedule name [weeks]` | Moderator | Regenerates the bot's own schedule at random. Refused when the schedule lives on a template. |
 | `/sync` | Moderator | Rewrites the coach list and every roster block from the database. |
 | `/inspectsheet` | Moderator | Reports the document's structure without changing anything. |
 | `/backup` | Moderator | Saves a timestamped copy of the database. |
@@ -325,7 +354,8 @@ A league can run three ways, and you pick at most one document.
 | Tera Captains | ✅ (you type the price) | ✅ | ✅ |
 | Rosters written to the sheet | — | — | ✅ |
 | Settings read from the sheet | — | — | ✅ |
-| Two pools, `/postschedule` | — | — | ✅ |
+| Two pools | — | — | ✅ |
+| `/postschedule` | ✅ *(bot generates the fixtures)* | ✅ *(bot generates)* | ✅ *(read from the sheet)* |
 
 A sheet that stops responding never blocks a pick — the draft carries on using
 the local database.
@@ -500,6 +530,32 @@ changes. Their timer and skip count reset to the base, because a replacement
 should not inherit somebody else's penalties — and a moderator has to approve
 the swap, so that cannot be used to dodge a shrinking clock.
 
+**Players can be listed or rolled.** Typing `players:` keeps your order, which
+becomes the draft order. Giving `players_role:` makes the bot shuffle everyone
+holding that role, so it picks the order for you. One or the other per pool,
+never both.
+
+**The bot generates its own schedule when there is no template.** A randomised
+round-robin by the circle method: every coach meets every other exactly once,
+nobody plays twice in a week, an odd number of coaches gets a bye each week, and
+sides alternate so nobody is always listed first. Fixtures may pair coaches from
+different pools — only the draft itself is split. `/reschedule` rolls a new one.
+With a template the sheet's own fixtures are used instead.
+
+**Removing a player depends on when you do it.** Before the draft starts there is
+nothing to preserve, so `/removeplayer` deletes the seat and the order closes up.
+Once drafting has begun the seat is **kept and marked withdrawn** instead, and
+simply passed over from then on — deleting it would shift everybody else's turn
+and could invalidate the turn pointer. Their Pokémon go back into the pool by
+default (`keep_roster` holds them out), their queues and pending makeup picks are
+cleared, and their picks stay in the history. To swap one person for another
+without disturbing the team, use `/substitute` instead.
+
+**Moderators can act for players.** `/trade ... for_player:@someone` files a
+trade on their behalf — useful when somebody cannot manage the command — and
+still goes through the normal approval. `/editpick ... player:@someone` fixes or
+adds a pick, and `/substitute` hands a seat over.
+
 **Moderator roles are per server, not per league.** One set of people can look
 after every league running on it. Administrators and the server owner always
 have access.
@@ -526,7 +582,7 @@ turn opens again and the player is pinged.
 python3 -m unittest discover -s tests -v
 ```
 
-146 tests, no Discord connection and no network needed. They cover snake order
+172 tests, no Discord connection and no network needed. They cover snake order
 for every player count, round transitions, channel and pool isolation, timer
 halving and the makeup cascade, the snake-boundary case (one halving for two
 lost rounds, none if the queue was sniped), queued picks and the
@@ -537,7 +593,9 @@ caps, substitutions, draft-only archiving, moderator-created picks, roster
 blocks after trades, price-list name resolution, behaviour during a Google
 outage, behaviour when the bot is refused permission to post, restart recovery,
 the spreadsheet cell mapping, the arguments actually sent to the sheet, and a
-randomised full-draft simulation that checks the invariants that matter —
+round-robin schedule generation for every player count, player removal before
+and during a draft, role-based player lists, and a randomised full-draft
+simulation that checks the invariants that matter —
 nobody owns the same Pokémon twice, budgets never go negative, spent +
 remaining always equals the starting budget, and pick order has no gaps.
 

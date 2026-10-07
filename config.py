@@ -23,9 +23,28 @@ BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 BACKUP_INTERVAL_HOURS = 6
 BACKUPS_TO_KEEP = 40
 
+# Listing players by role needs Discord's privileged "Server Members
+# Intent", because otherwise the bot cannot see who holds a role. Switch it
+# on at https://discord.com/developers/applications -> your app -> Bot ->
+# Privileged Gateway Intents -> Server Members Intent.
+#
+# If it is not switched on there, the bot notices at login, carries on
+# without it, and tells you - so nothing breaks, you just have to list
+# players by @mention instead of by role.
+REQUEST_MEMBERS_INTENT = True
+
 # --------------------------------------------------------------------------
 # Draft rules
 # --------------------------------------------------------------------------
+
+# How much of a season the bot runs.
+#   draft_only     - run the draft, then archive the league
+#   draft_schedule - draft plus schedule posting, but no trades
+#   full_season    - draft, trades and schedule posting
+LEAGUE_MODES = ("draft_only", "draft_schedule", "full_season")
+
+# Modes in which /postschedule works.
+SCHEDULE_MODES = ("draft_schedule", "full_season")
 
 MIN_PLAYERS = 2
 # The spreadsheet has 20 coach rows and 20 roster blocks.

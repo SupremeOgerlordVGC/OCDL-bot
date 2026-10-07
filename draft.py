@@ -12,6 +12,7 @@ can never leave a half-finished change in the database.
 """
 
 import json
+import random
 
 import config
 import database
@@ -238,10 +239,12 @@ def next_pick_order(conn, pool_id):
 def player_can_pick(conn, draft, player):
     """False when a player can no longer take any pick at all.
 
-    Either they have filled their roster, or they cannot afford even the
+    They have withdrawn, filled their roster, or cannot afford even the
     cheapest possible Pokemon. When this is true of everybody, the draft is
     over even if there are rounds left.
     """
+    if player["status"] != "active":
+        return False
     if picks_made(conn, draft["id"], player["id"]) >= draft["max_picks"]:
         return False
     return player["budget_remaining"] >= config.MINIMUM_PICK_COST
@@ -372,7 +375,7 @@ def max_players_per_pool(doc_kind, pool_count):
 def create_league(conn, guild_id, admin_channel_id, name, pools,
                   budget, min_picks, max_picks, base_timer,
                   mode="full_season", doc_kind="none", doc_url=None,
-                  tera_budget=0, max_trades=0):
+                  tera_budget=0, max_trades=0, season_weeks=0):
     """Create a league in `setup` state, with one or two pools.
 
     `pools` is [(label, channel_id, [(user_id, display_name), ...]), ...],
@@ -390,8 +393,10 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
             f"Names have to be unique so commands can tell them apart."
         )
 
-    if mode not in ("draft_only", "full_season"):
-        raise DraftError("❌ The mode must be `draft_only` or `full_season`.")
+    if mode not in config.LEAGUE_MODES:
+        raise DraftError(
+            f"❌ The mode must be one of: {', '.join(config.LEAGUE_MODES)}."
+        )
     if doc_kind not in ("none", "tiering", "template"):
         raise DraftError("❌ Unknown document type.")
 
@@ -458,10 +463,11 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
     cursor = conn.execute(
         """INSERT INTO leagues (guild_id, name, admin_channel_id, mode, doc_kind, doc_url,
                                 budget, tera_budget, min_picks, max_picks, base_timer,
-                                max_trades, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?)""",
+                                max_trades, season_weeks, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?)""",
         (guild_id, name, admin_channel_id, mode, doc_kind, doc_url, budget, tera_budget,
-         min_picks, max_picks, base_timer, max_trades, database.now()),
+         min_picks, max_picks, base_timer, max_trades, max(0, season_weeks),
+         database.now()),
     )
     league_id = cursor.lastrowid
 
@@ -1565,6 +1571,174 @@ def substitute_player(conn, draft, out_user_id, in_user_id, in_display_name):
         "in_name": in_display_name,
         "roster": roster_view(conn, draft, get_player_by_id(conn, player["id"])),
     }
+
+
+# --------------------------------------------------------------------------
+# Removing a player
+# --------------------------------------------------------------------------
+
+
+def remove_player(conn, draft, user_id, release_roster=True):
+    """Take a player out of a draft.
+
+    Before the draft starts there is nothing to preserve, so the seat is
+    deleted and the seats behind it shuffle up.
+
+    Once drafting has begun the seat is kept and marked `withdrawn`
+    instead. That matters: the snake order is built from the seat count, so
+    deleting one mid-draft would move everybody else's turn and could
+    invalidate the turn pointer. A withdrawn seat is simply passed over.
+
+    `release_roster` puts their Pokemon back in the pool for everybody else,
+    which is usually what you want when somebody drops out. Their picks stay
+    in the history either way.
+    """
+    player = get_player(conn, draft["id"], user_id)
+    if player is None:
+        raise DraftError("❌ That player is not in this pool's draft.")
+    if player["status"] != "active":
+        raise DraftError(f"❌ **{player['display_name']}** has already been removed.")
+
+    released = []
+    if release_roster:
+        released = [row["pokemon"] for row in conn.execute(
+            "SELECT pokemon FROM rosters WHERE pool_id = ? AND player_id = ?",
+            (draft["id"], player["id"]))]
+        conn.execute("DELETE FROM rosters WHERE pool_id = ? AND player_id = ?",
+                     (draft["id"], player["id"]))
+
+    conn.execute(
+        "DELETE FROM queued_picks WHERE pool_id = ? AND player_id = ?",
+        (draft["id"], player["id"]))
+    conn.execute(
+        "UPDATE makeups SET status = 'expired', resolved_at = ? "
+        "WHERE pool_id = ? AND player_id = ? AND status = 'pending'",
+        (database.now(), draft["id"], player["id"]))
+
+    if draft["status"] == "setup":
+        seat = player["draft_position"]
+        coach = player["coach_number"]
+        conn.execute("DELETE FROM players WHERE id = ?", (player["id"],))
+        # Close the gap so seats stay 1..N and coach numbers stay contiguous.
+        conn.execute(
+            """UPDATE players SET draft_position = draft_position - 1,
+                                  coach_number = coach_number - 1
+               WHERE pool_id = ? AND draft_position > ?""",
+            (draft["id"], seat))
+        removed_seat = True
+    else:
+        conn.execute("UPDATE players SET status = 'withdrawn' WHERE id = ?",
+                     (player["id"],))
+        removed_seat = False
+
+    conn.commit()
+    return {
+        "display_name": player["display_name"],
+        "user_id": user_id,
+        "seat": player["draft_position"],
+        "pool": draft["label"],
+        "seat_deleted": removed_seat,
+        "released": released,
+        "players_left": player_count(conn, draft["id"]),
+    }
+
+
+# --------------------------------------------------------------------------
+# Season schedule
+#
+# With a template the fixtures live on the spreadsheet. Without one the bot
+# makes its own, so a "draft and schedule" league still has something to
+# post.
+# --------------------------------------------------------------------------
+
+
+def round_robin(entrants, weeks=None, rng=None):
+    """A randomised round-robin schedule as [[(home, away), ...], ...].
+
+    Uses the circle method: fix the first entrant and rotate the rest, which
+    pairs everybody exactly once over len(entrants) - 1 weeks. An odd number
+    of entrants gets a bye each week, and home and away alternate so nobody
+    is always on the same side.
+    """
+    rng = rng or random.Random()
+    order = list(entrants)
+    if len(order) < 2:
+        return []
+    rng.shuffle(order)
+
+    if len(order) % 2:
+        order.append(None)              # None is the bye
+    count = len(order)
+    per_cycle = count - 1
+    weeks = per_cycle if weeks is None else max(1, weeks)
+
+    fixed, rotating = order[0], order[1:]
+    schedule = []
+    for week in range(weeks):
+        shift = week % per_cycle
+        turned = rotating[-shift:] + rotating[:-shift] if shift else list(rotating)
+        line = [fixed] + turned
+
+        pairs = []
+        for index in range(count // 2):
+            home, away = line[index], line[count - 1 - index]
+            if home is None or away is None:
+                continue                # that entrant has the bye this week
+            if week % 2:
+                home, away = away, home
+            pairs.append((home, away))
+        schedule.append(pairs)
+    return schedule
+
+
+def generate_fixtures(conn, league_id, weeks=None, rng=None):
+    """Build and store a schedule for every active player in the league.
+
+    Fixtures can pair coaches from different pools - only the draft itself
+    is split by pool. Replaces any schedule already generated.
+    """
+    players = []
+    for pool in get_league_pools(conn, league_id):
+        players += [row for row in get_players(conn, pool["id"])
+                    if row["status"] == "active"]
+
+    if len(players) < 2:
+        raise DraftError("❌ A schedule needs at least two players.")
+
+    league = get_league(conn, league_id)
+    weeks = weeks or (league["season_weeks"] or None)
+    schedule = round_robin([row["id"] for row in players], weeks=weeks, rng=rng)
+
+    conn.execute("DELETE FROM fixtures WHERE league_id = ?", (league_id,))
+    stamp = database.now()
+    for week_number, pairs in enumerate(schedule, start=1):
+        for match_number, (home, away) in enumerate(pairs, start=1):
+            conn.execute(
+                """INSERT INTO fixtures (league_id, week, match_number,
+                                         home_player_id, away_player_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (league_id, week_number, match_number, home, away, stamp),
+            )
+    conn.commit()
+    return len(schedule)
+
+
+def get_fixtures(conn, league_id, week):
+    """One week's fixtures as [(home player row, away player row), ...]."""
+    rows = conn.execute(
+        "SELECT * FROM fixtures WHERE league_id = ? AND week = ? ORDER BY match_number",
+        (league_id, week),
+    ).fetchall()
+    return [(get_player_by_id(conn, row["home_player_id"]),
+             get_player_by_id(conn, row["away_player_id"])) for row in rows]
+
+
+def fixture_weeks(conn, league_id):
+    rows = conn.execute(
+        "SELECT DISTINCT week FROM fixtures WHERE league_id = ? ORDER BY week",
+        (league_id,),
+    ).fetchall()
+    return [row["week"] for row in rows]
 
 
 # --------------------------------------------------------------------------

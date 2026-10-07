@@ -9,6 +9,8 @@ Each test builds a throwaway in-memory database, so tests never interfere
 with a real draft.
 """
 
+import collections
+import itertools
 import os
 import random
 import sys
@@ -1489,6 +1491,242 @@ class DraftOnlyModeTests(unittest.TestCase):
 
         league = draft.get_league(conn, pool["league_id"])
         self.assertEqual(league["status"], "complete")
+
+
+
+class ScheduleTests(unittest.TestCase):
+    """The bot generates its own schedule when there is no template."""
+
+    def test_round_robin_is_a_real_round_robin(self):
+        for count in range(2, config.MAX_PLAYERS + 1):
+            with self.subTest(players=count):
+                entrants = list(range(1, count + 1))
+                schedule = draft.round_robin(entrants, rng=random.Random(count))
+
+                # A full cycle takes one week fewer than the number of
+                # entrants, rounded up for a bye.
+                self.assertEqual(len(schedule), count - 1 if count % 2 == 0 else count)
+
+                met = collections.Counter()
+                for pairs in schedule:
+                    self.assertEqual(len(pairs), count // 2)
+                    playing = [name for pair in pairs for name in pair]
+                    self.assertEqual(len(playing), len(set(playing)),
+                                     "nobody may play twice in a week")
+                    for home, away in pairs:
+                        met[frozenset((home, away))] += 1
+
+                everyone = {frozenset(pair)
+                            for pair in itertools.combinations(entrants, 2)}
+                self.assertEqual(set(met), everyone, "everybody must meet everybody")
+                self.assertTrue(all(times == 1 for times in met.values()),
+                                "nobody plays the same opponent twice")
+
+    def test_the_order_is_randomised(self):
+        entrants = list(range(1, 9))
+        first = draft.round_robin(entrants, rng=random.Random(1))
+        second = draft.round_robin(entrants, rng=random.Random(2))
+        self.assertNotEqual(first, second)
+
+    def test_a_season_can_be_shortened_or_extended(self):
+        short = draft.round_robin(list(range(1, 11)), weeks=3, rng=random.Random(1))
+        self.assertEqual(len(short), 3)
+        long = draft.round_robin(list(range(1, 7)), weeks=10, rng=random.Random(1))
+        self.assertEqual(len(long), 10, "cycles repeat for a longer season")
+
+    def test_too_few_entrants_has_no_fixtures(self):
+        self.assertEqual(draft.round_robin([1]), [])
+        self.assertEqual(draft.round_robin([]), [])
+
+    def test_fixtures_are_stored_and_readable_by_week(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=900, players=4, min_picks=1, max_picks=2,
+                          mode="draft_schedule")
+        weeks = draft.generate_fixtures(conn, pool["league_id"], rng=random.Random(5))
+        self.assertEqual(weeks, 3)
+        self.assertEqual(draft.fixture_weeks(conn, pool["league_id"]), [1, 2, 3])
+
+        pairs = draft.get_fixtures(conn, pool["league_id"], 1)
+        self.assertEqual(len(pairs), 2)
+        names = {row["display_name"] for pair in pairs for row in pair}
+        self.assertEqual(names, {"Player1", "Player2", "Player3", "Player4"})
+
+    def test_fixtures_can_pair_players_from_different_pools(self):
+        conn = database.connect(":memory:")
+        pool_a, pool_b = make_two_pool_league(conn, name="Cross", players=2)
+        draft.generate_fixtures(conn, pool_a["league_id"], rng=random.Random(3))
+
+        pool_of = {}
+        for pool in (pool_a, pool_b):
+            for player in draft.get_players(conn, pool["id"]):
+                pool_of[player["id"]] = pool["label"]
+
+        crossings = 0
+        for week in draft.fixture_weeks(conn, pool_a["league_id"]):
+            for home, away in draft.get_fixtures(conn, pool_a["league_id"], week):
+                if pool_of[home["id"]] != pool_of[away["id"]]:
+                    crossings += 1
+        self.assertGreater(crossings, 0, "the season should cross the pools")
+
+    def test_regenerating_replaces_the_old_schedule(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=901, players=4, min_picks=1, max_picks=2,
+                          mode="draft_schedule")
+        draft.generate_fixtures(conn, pool["league_id"], rng=random.Random(1))
+        draft.generate_fixtures(conn, pool["league_id"], weeks=2, rng=random.Random(2))
+        self.assertEqual(draft.fixture_weeks(conn, pool["league_id"]), [1, 2])
+
+    def test_withdrawn_players_are_left_out_of_a_new_schedule(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=902, players=4, min_picks=1, max_picks=2,
+                          mode="draft_schedule")
+        draft.remove_player(conn, pool, user(4))
+        live = draft.get_pool(conn, pool["id"])
+        draft.generate_fixtures(conn, live["league_id"], rng=random.Random(1))
+
+        names = set()
+        for week in draft.fixture_weeks(conn, live["league_id"]):
+            for home, away in draft.get_fixtures(conn, live["league_id"], week):
+                names.add(home["display_name"])
+                names.add(away["display_name"])
+        self.assertNotIn("Player4", names)
+
+
+class RemovePlayerTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+
+    def test_before_the_draft_starts_the_seat_is_deleted(self):
+        pool = make_draft(self.conn, channel_id=1000, players=4, start=False)
+        result = draft.remove_player(self.conn, pool, user(2))
+
+        self.assertTrue(result["seat_deleted"])
+        self.assertEqual(result["players_left"], 3)
+        self.assertIsNone(draft.get_player(self.conn, pool["id"], user(2)))
+
+        # The order closes up, so seats stay 1..N with no gaps.
+        seats = draft.get_players(self.conn, pool["id"])
+        self.assertEqual([p["draft_position"] for p in seats], [1, 2, 3])
+        self.assertEqual([p["display_name"] for p in seats],
+                         ["Player1", "Player3", "Player4"])
+        self.assertEqual([p["coach_number"] for p in seats], [1, 2, 3],
+                         "roster blocks close up too")
+
+    def test_after_the_draft_starts_the_seat_is_kept_and_passed_over(self):
+        pool = make_draft(self.conn, channel_id=1001, players=3, budget=100,
+                          min_picks=1, max_picks=3)
+        draft.make_pick(self.conn, pool, user(1), 1, "Garchomp", 12)
+        live = draft.get_pool(self.conn, pool["id"])
+
+        result = draft.remove_player(self.conn, live, user(2))
+        self.assertFalse(result["seat_deleted"], "removing a seat mid-draft would "
+                                                 "move everybody else's turn")
+        self.assertEqual(result["players_left"], 3)
+
+        gone = draft.get_player(self.conn, pool["id"], user(2))
+        self.assertEqual(gone["status"], "withdrawn")
+        self.assertFalse(draft.player_can_pick(self.conn, live, gone))
+
+        # Player2 was on the clock; the draft moves past them on its own.
+        events = draft.begin_turn(self.conn, pool["id"])
+        passed = [e for e in events if e["type"] == "passed"]
+        self.assertTrue(passed)
+        self.assertEqual(passed[0]["display_name"], "Player2")
+        live = draft.get_pool(self.conn, pool["id"])
+        self.assertEqual(draft.current_player(self.conn, live)["display_name"], "Player3")
+
+    def test_their_pokemon_go_back_in_the_pool(self):
+        pool = make_draft(self.conn, channel_id=1002, players=2, budget=100,
+                          min_picks=1, max_picks=3)
+        draft.make_pick(self.conn, pool, user(1), 1, "Garchomp", 12)
+        live = draft.get_pool(self.conn, pool["id"])
+
+        draft.remove_player(self.conn, live, user(1))
+        self.assertIsNone(draft.find_owner(self.conn, pool["id"], "garchomp"),
+                          "Garchomp should be draftable again")
+        # History still records that they drafted it.
+        picks = draft.round_picks(self.conn, pool["id"], 1)
+        self.assertEqual([p["pokemon"] for p in picks], ["Garchomp"])
+
+    def test_their_pokemon_can_be_kept_out_of_the_pool(self):
+        pool = make_draft(self.conn, channel_id=1003, players=2, budget=100,
+                          min_picks=1, max_picks=3)
+        draft.make_pick(self.conn, pool, user(1), 1, "Garchomp", 12)
+        live = draft.get_pool(self.conn, pool["id"])
+
+        draft.remove_player(self.conn, live, user(1), release_roster=False)
+        self.assertIsNotNone(draft.find_owner(self.conn, pool["id"], "garchomp"))
+
+    def test_pending_makeups_and_queues_are_cleared(self):
+        pool = make_draft(self.conn, channel_id=1004, players=3, budget=100,
+                          min_picks=1, max_picks=3)
+        draft.queue_picks(self.conn, pool, user(2), 2, ["Heatran"], [10])
+        draft.skip_current_player(self.conn, pool["id"])        # Player1 misses round 1
+        live = draft.get_pool(self.conn, pool["id"])
+
+        player1 = draft.get_player(self.conn, pool["id"], user(1))
+        self.assertEqual(draft.pending_makeup_rounds(self.conn, pool["id"], player1["id"]), [1])
+
+        draft.remove_player(self.conn, live, user(1))
+        self.assertEqual(
+            draft.pending_makeup_rounds(self.conn, pool["id"], player1["id"]), [])
+
+        player2 = draft.get_player(self.conn, pool["id"], user(2))
+        draft.remove_player(self.conn, live, user(2))
+        self.assertEqual(draft.get_queue(self.conn, pool["id"], player2["id"], 2), [])
+
+    def test_removing_somebody_twice_is_refused(self):
+        pool = make_draft(self.conn, channel_id=1005, players=3, min_picks=1, max_picks=2)
+        live = draft.get_pool(self.conn, pool["id"])
+        draft.remove_player(self.conn, live, user(2))
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.remove_player(self.conn, live, user(2))
+        self.assertIn("already been removed", str(caught.exception))
+
+    def test_removing_somebody_who_is_not_playing_is_refused(self):
+        pool = make_draft(self.conn, channel_id=1006, players=2)
+        with self.assertRaises(draft.DraftError):
+            draft.remove_player(self.conn, pool, 999999)
+
+    def test_the_draft_ends_when_everybody_left_has_withdrawn(self):
+        pool = make_draft(self.conn, channel_id=1007, players=2, budget=100,
+                          min_picks=1, max_picks=4)
+        live = draft.get_pool(self.conn, pool["id"])
+        draft.remove_player(self.conn, live, user(1))
+        live = draft.get_pool(self.conn, pool["id"])
+        draft.remove_player(self.conn, live, user(2))
+
+        draft.begin_turn(self.conn, pool["id"])
+        self.assertEqual(draft.get_pool(self.conn, pool["id"])["status"], "complete")
+
+
+class LeagueModeTests(unittest.TestCase):
+    def test_all_three_modes_are_accepted(self):
+        conn = database.connect(":memory:")
+        for index, mode in enumerate(config.LEAGUE_MODES):
+            pool = make_draft(conn, channel_id=1100 + index, players=2,
+                              min_picks=1, max_picks=2, mode=mode,
+                              name=f"League {mode}")
+            self.assertEqual(pool["mode"], mode)
+
+    def test_an_unknown_mode_is_refused(self):
+        conn = database.connect(":memory:")
+        with self.assertRaises(draft.DraftError):
+            make_draft(conn, channel_id=1110, players=2, mode="whatever")
+
+    def test_draft_schedule_completes_rather_than_archiving(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=1111, players=2, budget=50, min_picks=1,
+                          max_picks=2, mode="draft_schedule")
+        for _ in range(4):
+            live = draft.get_pool(conn, pool["id"])
+            player = draft.current_player(conn, live)
+            draft.make_pick(conn, live, player["user_id"], live["current_round"],
+                            f"M{player['id']}{live['current_round']}", 1)
+
+        league = draft.get_league(conn, pool["league_id"])
+        self.assertEqual(league["status"], "complete",
+                         "it still has a season to run, so it is not archived")
 
 
 

@@ -80,22 +80,33 @@ class ExtrasCog(commands.Cog):
         drops="Up to 5 Pokémon you are giving up, separated by commas",
         gets="Up to 5 Pokémon you want, separated by commas",
         partner="The player you are trading with. Leave blank for the undrafted pool.",
+        for_player="Moderators only: file this trade on somebody else's behalf",
     )
     async def trade(self, interaction: discord.Interaction, drops: str, gets: str,
-                    partner: discord.Member = None):
+                    partner: discord.Member = None, for_player: discord.Member = None):
         pool = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         if pool["mode"] != "full_season":
             raise rules.DraftError(
-                f"❌ **{pool['league_name']}** is a draft-only league, so it does not "
-                f"handle trades."
+                f"❌ **{pool['league_name']}** does not handle trades — it is a "
+                f"`{pool['mode']}` league."
             )
+
+        # A moderator can enter a trade for somebody who cannot manage the
+        # command themselves. It still needs approving afterwards.
+        proposer_id = interaction.user.id
+        on_behalf = False
+        if for_player is not None and for_player.id != interaction.user.id:
+            ui.require_moderator(self.bot, interaction)
+            proposer_id = for_player.id
+            on_behalf = True
+
         await interaction.response.defer(ephemeral=True)
 
         drop_list = rules.parse_pokemon_list(drops, config.MAX_TRADE_SIZE)
         get_list = rules.parse_pokemon_list(gets, config.MAX_TRADE_SIZE)
 
         record, warnings = rules.propose_trade(
-            self.bot.conn, pool, interaction.user.id, drop_list, get_list,
+            self.bot.conn, pool, proposer_id, drop_list, get_list,
             partner_user_id=partner.id if partner else None,
         )
 
@@ -110,13 +121,16 @@ class ExtrasCog(commands.Cog):
             used = rules.trades_used(self.bot.conn, pool["id"], record["proposer_id"])
             allowance = f"\n• Trades used by proposer: {used} / {pool['max_trades']}"
 
+        entered_by = f" *(entered by <@{interaction.user.id}>)*" if on_behalf else ""
+        partner_text = partner.mention if partner else "*undrafted pool (free agency)*"
+
         league = rules.get_league(self.bot.conn, pool["league_id"])
         summary = (
             f"📨 **Trade #{record['trade_number']}** — *pending*\n"
             f"• Draft: **{league['name']}** — Pool {pool['label']} "
             f"(<#{pool['channel_id']}>)\n"
-            f"• Proposed by: <@{interaction.user.id}>\n"
-            f"• Partner: {partner.mention if partner else '*undrafted pool (free agency)*'}\n"
+            f"• Proposed by: <@{proposer_id}>{entered_by}\n"
+            f"• Partner: {partner_text}\n"
             f"• Giving up: {', '.join(drop_list)}\n"
             f"• Receiving: {', '.join(get_list)}\n"
             f"• Proposed at: {record['created_at']} UTC"
@@ -128,8 +142,9 @@ class ExtrasCog(commands.Cog):
         if not await self.post_to_admins(league, summary, interaction):
             return
 
+        whose = f" for {for_player.mention}" if on_behalf else ""
         await interaction.followup.send(
-            f"✅ Trade **#{record['trade_number']}** submitted for approval. "
+            f"✅ Trade **#{record['trade_number']}** submitted{whose} for approval. "
             f"Nothing changes until a moderator approves it.",
             ephemeral=True,
         )

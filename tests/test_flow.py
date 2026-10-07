@@ -589,3 +589,65 @@ class SheetWritePathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.recorder.picks, [])
         self.assertEqual(self.recorder.syncs, [])
         self.bot.timers.cancel_all()
+
+
+class FakeMember:
+    def __init__(self, user_id, name, bot=False):
+        self.id = user_id
+        self.display_name = name
+        self.bot = bot
+
+
+class FakeRole:
+    def __init__(self, members):
+        self.members = members
+        self.mention = "@TestRole"
+
+
+class RosterFromRoleTests(unittest.IsolatedAsyncioTestCase):
+    """Players can be given as a role, which the bot shuffles itself."""
+
+    def test_a_role_becomes_a_shuffled_player_list(self):
+        import random
+        members = [FakeMember(i, f"P{i}") for i in range(1, 9)]
+        role = FakeRole(members)
+
+        first = ui.players_from_role(role, rng=random.Random(1))
+        second = ui.players_from_role(role, rng=random.Random(2))
+
+        self.assertEqual(len(first), 8)
+        self.assertEqual({user_id for user_id, _ in first}, set(range(1, 9)))
+        self.assertNotEqual(first, second, "the order should be random")
+
+    def test_bots_in_the_role_are_skipped(self):
+        role = FakeRole([FakeMember(1, "Larry"), FakeMember(2, "Helper", bot=True)])
+        names = [name for _, name in ui.players_from_role(role)]
+        self.assertEqual(names, ["Larry"])
+
+    def test_an_empty_role_explains_the_members_intent(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            ui.players_from_role(FakeRole([]))
+        self.assertIn("Server Members Intent", str(caught.exception))
+
+    async def test_mentions_keep_the_order_they_were_typed(self):
+        rosters, shuffled = await ui.roster_from_options(
+            None, "<@11> <@22> <@33>", None, "A")
+        self.assertEqual([user_id for user_id, _ in rosters], [11, 22, 33])
+        self.assertFalse(shuffled)
+
+    async def test_a_role_reports_that_it_was_shuffled(self):
+        role = FakeRole([FakeMember(i, f"P{i}") for i in range(1, 5)])
+        rosters, shuffled = await ui.roster_from_options(None, None, role, "A")
+        self.assertEqual(len(rosters), 4)
+        self.assertTrue(shuffled)
+
+    async def test_giving_both_is_refused(self):
+        role = FakeRole([FakeMember(1, "Larry")])
+        with self.assertRaises(rules.DraftError) as caught:
+            await ui.roster_from_options(None, "<@11>", role, "A")
+        self.assertIn("not both", str(caught.exception))
+
+    async def test_giving_neither_is_refused(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await ui.roster_from_options(None, None, None, "B")
+        self.assertIn("needs players", str(caught.exception))

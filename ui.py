@@ -8,6 +8,7 @@ it separate means the rules stay testable and the cogs stay short.
 
 import asyncio
 import logging
+import random
 import re
 
 import discord
@@ -65,6 +66,48 @@ def is_administrator(interaction):
     if permissions is not None and permissions.administrator:
         return True
     return bool(interaction.guild and interaction.guild.owner_id == interaction.user.id)
+
+
+def players_from_role(role, rng=None):
+    """Everyone holding a role, in a randomly shuffled draft order.
+
+    Used when a league host would rather hand the bot a role than type out
+    the order themselves. Bots are skipped.
+    """
+    members = [member for member in getattr(role, "members", []) if not member.bot]
+    if not members:
+        raise rules.DraftError(
+            f"❌ I cannot see anybody with the {role.mention} role.\n"
+            f"Either nobody has it, or the **Server Members Intent** is switched off "
+            f"for this bot — without it Discord does not tell me who holds a role. "
+            f"Turn it on in the Developer Portal under **Bot → Privileged Gateway "
+            f"Intents**, restart the bot, and try again. You can always list players "
+            f"by @mention instead."
+        )
+
+    rng = rng or random.Random()
+    rng.shuffle(members)
+    return [(member.id, member.display_name) for member in members]
+
+
+async def roster_from_options(guild, mentions, role, label):
+    """Build one pool's player list from either @mentions or a role.
+
+    Mentions keep the order they were typed, which is the draft order. A
+    role is shuffled, so the bot picks the order for you.
+    """
+    if mentions and role is not None:
+        raise rules.DraftError(
+            f"❌ For pool {label}, give either a list of players **or** a role, not both."
+        )
+    if role is not None:
+        return players_from_role(role), True
+    if mentions:
+        return await parse_players(guild, mentions), False
+    raise rules.DraftError(
+        f"❌ Pool {label} needs players: either @mention them in draft order, or give "
+        f"a role for the bot to shuffle."
+    )
 
 
 async def parse_players(guild, text):

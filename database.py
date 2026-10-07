@@ -42,8 +42,9 @@ CREATE TABLE IF NOT EXISTS leagues (
     name              TEXT NOT NULL,
     -- The channel /setup was run in. Trades are sent here for approval.
     admin_channel_id  INTEGER NOT NULL,
-    -- 'draft_only'  : run the draft, then archive it
-    -- 'full_season' : also handle trades and schedule posting
+    -- 'draft_only'     : run the draft, then archive it
+    -- 'draft_schedule' : draft plus schedule posting, no trades
+    -- 'full_season'    : draft, trades and schedule posting
     mode              TEXT NOT NULL DEFAULT 'full_season',
     -- 'none' | 'tiering' | 'template'
     doc_kind          TEXT NOT NULL DEFAULT 'none',
@@ -55,6 +56,9 @@ CREATE TABLE IF NOT EXISTS leagues (
     max_picks         INTEGER NOT NULL,
     base_timer        INTEGER NOT NULL,
     max_trades        INTEGER NOT NULL DEFAULT 0,
+    -- Weeks in the generated season. Only used when the bot makes its own
+    -- schedule; with a template the sheet's own SeasonWeeks applies.
+    season_weeks      INTEGER NOT NULL DEFAULT 0,
     -- 'setup' | 'active' | 'complete' | 'archived' | 'cancelled'
     status            TEXT NOT NULL DEFAULT 'setup',
     created_at        TEXT NOT NULL,
@@ -104,6 +108,9 @@ CREATE TABLE IF NOT EXISTS players (
     tera_budget_remaining  INTEGER NOT NULL DEFAULT 0,
     current_timer          INTEGER NOT NULL,   -- personal, halved on skips
     skip_count             INTEGER NOT NULL DEFAULT 0,
+    -- 'active' or 'withdrawn'. A withdrawn player keeps their seat so the
+    -- snake order and turn pointer stay valid, but is passed over.
+    status                 TEXT NOT NULL DEFAULT 'active',
     UNIQUE (pool_id, user_id),
     UNIQUE (pool_id, draft_position)
 );
@@ -193,6 +200,20 @@ CREATE TABLE IF NOT EXISTS skips (
     created_at  TEXT NOT NULL
 );
 
+-- The season schedule, when the bot generates one itself. With a template
+-- the fixtures live on the spreadsheet instead and this stays empty.
+-- Fixtures may pair coaches from different pools: only drafting is split.
+CREATE TABLE IF NOT EXISTS fixtures (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    league_id      INTEGER NOT NULL REFERENCES leagues(id) ON DELETE CASCADE,
+    week           INTEGER NOT NULL,
+    match_number   INTEGER NOT NULL,
+    home_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    away_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    created_at     TEXT NOT NULL,
+    UNIQUE (league_id, week, match_number)
+);
+
 -- Substitution requests, posted to the admin channel for a human to act on.
 -- A player already in the draft asks to sub OUT; anybody else asks to sub IN.
 -- Approving one is a moderator running /substitute, which is what actually
@@ -247,6 +268,7 @@ SELECT pools.id               AS id,
        leagues.max_picks        AS max_picks,
        leagues.base_timer       AS base_timer,
        leagues.max_trades       AS max_trades,
+       leagues.season_weeks     AS season_weeks,
        leagues.status           AS league_status
 FROM pools JOIN leagues ON leagues.id = pools.league_id;
 """

@@ -54,10 +54,17 @@ COGS = ["cogs.admin", "cogs.drafting", "cogs.extras"]
 
 
 class DraftBot(commands.Bot):
-    def __init__(self):
-        # Only the default intents are needed. Slash commands do not require
-        # the privileged "message content" or "server members" intents.
-        super().__init__(command_prefix="!", intents=discord.Intents.default())
+    def __init__(self, members_intent=None):
+        # Slash commands need no privileged intents. The members intent is
+        # only asked for so that players can be listed by role; if it has
+        # not been enabled in the Developer Portal, main() retries without
+        # it rather than refusing to start.
+        intents = discord.Intents.default()
+        if members_intent is None:
+            members_intent = config.REQUEST_MEMBERS_INTENT
+        intents.members = bool(members_intent)
+        self.members_intent = bool(members_intent)
+        super().__init__(command_prefix="!", intents=intents)
 
         self.conn = database.connect()
         self.sheets = sheets.SheetSync()
@@ -210,13 +217,28 @@ def main():
               "or set the DISCORD_TOKEN environment variable.")
         sys.exit(1)
 
-    bot = DraftBot()
-    if bot.sheets.enabled:
-        log.info("Google Sheets is available (writing enabled: %s)", config.SHEETS_WRITE_ENABLED)
-    else:
-        log.info("Google Sheets is disabled: %s", bot.sheets.reason)
+    def start(members_intent):
+        bot = DraftBot(members_intent=members_intent)
+        if bot.sheets.enabled:
+            log.info("Google Sheets is available (writing enabled: %s)",
+                     config.SHEETS_WRITE_ENABLED)
+        else:
+            log.info("Google Sheets is disabled: %s", bot.sheets.reason)
+        bot.run(token, log_handler=None)
 
-    bot.run(token, log_handler=None)
+    try:
+        start(config.REQUEST_MEMBERS_INTENT)
+    except discord.PrivilegedIntentsRequired:
+        # Asking for the members intent without enabling it in the Developer
+        # Portal is refused at login. Carry on without it rather than
+        # refusing to start - only listing players by role needs it.
+        log.warning(
+            "The Server Members Intent is not enabled for this bot, so players cannot "
+            "be listed by role - @mention them instead. To enable it, go to "
+            "https://discord.com/developers/applications -> your app -> Bot -> "
+            "Privileged Gateway Intents -> Server Members Intent. Starting without it."
+        )
+        start(False)
 
 
 if __name__ == "__main__":
