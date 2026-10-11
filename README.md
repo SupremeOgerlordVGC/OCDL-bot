@@ -13,9 +13,9 @@ requirement.
 2. [Project layout](#project-layout)
 3. [Running it on your own machine](#running-it-on-your-own-machine)
 4. [Getting a bot token](#getting-a-bot-token)
-5. [Hosting on an Oracle Cloud VM](#hosting-on-an-oracle-cloud-vm)
+5. [Hosting on a Hetzner VPS](#hosting-on-a-hetzner-vps)
 6. [Backups](#backups)
-7. [Command reference](#command-reference)
+7. [Command reference](#command-reference) · [player-only version](PLAYERS.md)
 8. [Documents](#documents)
 9. [Design decisions](#design-decisions)
 10. [Tests](#tests)
@@ -137,108 +137,142 @@ works normally.
 
 ---
 
-## Hosting on an Oracle Cloud VM
+## Hosting on a Hetzner VPS
 
-These steps assume an Oracle Cloud **Ubuntu 22.04** ARM or x86 instance, which is
-what the Always Free tier gives you. Any Linux VM works the same way.
+These steps assume a **Hetzner Cloud** server running **Ubuntu 24.04**. Any
+Ubuntu VPS works the same way — only step 1 is Hetzner-specific.
 
-### 1. Create the instance
+The one thing to watch: Hetzner's Ubuntu images log you in as **root**. Running
+a Discord bot as root is poor practice, so step 3 creates a normal user for it,
+and `draftbot.service` expects that user.
 
-In the Oracle Cloud console: **Compute → Instances → Create Instance**, pick an
-Always Free eligible shape and the Ubuntu image, and **download the SSH private
-key** when prompted. The bot only makes outbound connections, so you do **not**
-need to open any inbound ports beyond SSH.
+### 1. Create the server
 
-### 2. Connect and install Python
+In the [Hetzner Cloud Console](https://console.hetzner.cloud): **New Project** →
+**Add Server**.
+
+* **Location** — pick the one nearest your players; it only affects latency.
+* **Image** — **Ubuntu 24.04**.
+* **Type** — the smallest shared-vCPU box is plenty. A `CAX11` (Arm) or `CX22`
+  (x86) handles this bot without noticing it. Arm is cheaper and Python runs
+  fine on it.
+* **SSH keys** — **add your public key here.** Without one, Hetzner emails you a
+  root password, which is worse in every way. If you do not have a key yet, run
+  `ssh-keygen -t ed25519` on your Mac and paste the contents of
+  `~/.ssh/id_ed25519.pub`.
+* **Firewall** — optional but worth it. The bot makes only *outbound*
+  connections, so you never need to open a port for it. Allow inbound **TCP 22**
+  (SSH) and nothing else.
+
+Everything else can stay at its default. Create the server and note its IPv4
+address.
+
+### 2. Connect
 
 ```bash
-ssh -i /path/to/your-key.key ubuntu@YOUR_INSTANCE_IP
+ssh root@YOUR_SERVER_IP
 ```
 
 ```bash
-sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
+apt update && apt upgrade -y
+apt install -y python3 python3-venv git
 ```
 
-### 3. Copy the bot across
-
-Either clone it from your own git repository:
+### 3. Create a user for the bot
 
 ```bash
-git clone https://github.com/YOUR_NAME/OCDL-Bot.git ~/OCDL-Bot
+adduser --disabled-password --gecos "" draftbot
 ```
 
-or copy the folder up from your own machine:
+### 4. Install the bot as that user
 
 ```bash
-scp -i /path/to/your-key.key -r ./OCDL-Bot ubuntu@YOUR_INSTANCE_IP:~/
+sudo -u draftbot -H bash
 ```
 
-### 4. Install dependencies
+Then, as `draftbot`:
 
 ```bash
-cd ~/OCDL-Bot
+cd ~
+git clone https://github.com/YOUR_NAME/OCDL-Bot.git
+cd OCDL-Bot
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
 
-### 5. Add your token on the VM
+### 5. Add your token on the server
 
-Create the `.env` file directly on the server so the token never sits in your
-git history:
+Still as `draftbot`, create the file by hand so the token never goes near git:
 
 ```bash
 nano ~/OCDL-Bot/.env
 ```
 
-Put this in it, save with `Ctrl+O`, `Enter`, then exit with `Ctrl+X`:
-
 ```
 DISCORD_TOKEN=your.token.goes.here
 DEV_GUILD_ID=
-GOOGLE_CREDENTIALS_FILE=/home/ubuntu/OCDL-Bot/credentials.json
+GOOGLE_CREDENTIALS_FILE=/home/draftbot/OCDL-Bot/credentials.json
 ```
 
-Lock the file down so only your user can read it:
+Save with `Ctrl+O`, `Enter`, exit with `Ctrl+X`, then lock it down:
 
 ```bash
 chmod 600 ~/OCDL-Bot/.env
 ```
 
-> Prefer not to keep a token in a file at all? Put it in the systemd unit
-> instead, with `Environment="DISCORD_TOKEN=..."` under `[Service]`, and run
+> Prefer not to keep a token in a file? Put it in the systemd unit instead, with
+> `Environment="DISCORD_TOKEN=..."` under `[Service]`, and
 > `sudo chmod 600 /etc/systemd/system/draftbot.service`. The bot reads the
-> environment variable first and the `.env` file second.
+> environment variable first and `.env` second.
+
+Using a Google document? Copy the key up from your Mac — it is gitignored, so it
+does not travel with the repository:
+
+```bash
+scp credentials.json root@YOUR_SERVER_IP:/home/draftbot/OCDL-Bot/
+ssh root@YOUR_SERVER_IP "chown draftbot:draftbot /home/draftbot/OCDL-Bot/credentials.json && chmod 600 /home/draftbot/OCDL-Bot/credentials.json"
+```
 
 ### 6. Check it starts
+
+As `draftbot`:
 
 ```bash
 cd ~/OCDL-Bot && ./.venv/bin/python bot.py
 ```
 
-You should see `logged in as YourBot#1234`. Stop it with `Ctrl+C`.
+You should see `logged in as YourBot#1234`. Stop it with `Ctrl+C`, then leave the
+`draftbot` shell with `exit`.
 
-### 7. Run it as a service so it survives reboots
+### 7. Run it as a service
 
-```bash
-sudo cp ~/OCDL-Bot/draftbot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now draftbot
-```
-
-Useful commands from then on:
+Back as root:
 
 ```bash
-sudo systemctl status draftbot     # is it running?
-journalctl -u draftbot -f          # live logs
-sudo systemctl restart draftbot    # after changing the code
+cp /home/draftbot/OCDL-Bot/draftbot.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now draftbot
 ```
 
-`Restart=always` in the unit file means systemd restarts the bot if it crashes,
-and `enable` means it starts again automatically when the VM reboots. On startup
-the bot reloads every active draft from SQLite and puts the current player back
-on the clock, so a reboot costs you nothing.
+Useful from then on:
 
----
+```bash
+systemctl status draftbot      # is it running?
+journalctl -u draftbot -f      # live logs
+systemctl restart draftbot     # after changing the code
+```
+
+`Restart=always` means systemd restarts the bot if it crashes, and `enable` means
+it starts again when the server reboots. On startup the bot reloads every active
+draft from SQLite and puts the current player back on the clock, so a reboot
+costs you nothing.
+
+### Updating later
+
+```bash
+sudo -u draftbot -H git -C /home/draftbot/OCDL-Bot pull
+sudo systemctl restart draftbot
+```
 
 ## Backups
 
@@ -249,19 +283,24 @@ on the clock, so a reboot costs you nothing.
 * Backups use SQLite's own backup API, which is safe to run while a draft is
   live — unlike copying the file with `cp`.
 
-Copy them off the VM now and then:
+Copy them off the server now and then, from your Mac:
 
 ```bash
-scp -i /path/to/your-key.key -r ubuntu@YOUR_INSTANCE_IP:~/OCDL-Bot/backups ./
+scp -r root@YOUR_SERVER_IP:/home/draftbot/OCDL-Bot/backups ./
 ```
 
-To restore, stop the bot, replace `draft.db` with a backup, and start it again:
+To restore, stop the bot, put a backup in place of `draft.db`, and start again:
 
 ```bash
-sudo systemctl stop draftbot
-cp ~/OCDL-Bot/backups/draft-2026-08-21_09-00-00.db ~/OCDL-Bot/draft.db
-sudo systemctl start draftbot
+systemctl stop draftbot
+cp /home/draftbot/OCDL-Bot/backups/draft-2026-10-11_09-00-00.db /home/draftbot/OCDL-Bot/draft.db
+chown draftbot:draftbot /home/draftbot/OCDL-Bot/draft.db
+systemctl start draftbot
 ```
+
+Hetzner also sells automatic snapshots and backups of the whole server, which is
+worth enabling for a league you care about — it covers the case where the server
+itself is the thing that breaks.
 
 ---
 
@@ -273,6 +312,7 @@ sudo systemctl start draftbot
 |---|---|---|
 | `/setup` | Moderator | Creates a league **in the admin channel you run it from**. Takes a name, mode, pool channel(s) with their players, budgets, pick limits, timer, trade cap and an optional document. Does **not** start the draft. |
 | `/removeplayer player [keep_roster]` | Moderator | Takes a player out of this pool's draft. |
+| `/setskips player skips [timer]` | Moderator | Corrects a player's skip count, and recalculates their timer to match. |
 | `/reschedule name [weeks]` | Moderator | Rolls a fresh random schedule, when the bot is the one generating it. |
 | `/edit` | Moderator | Changes budgets, pick limits, trade cap or the document link. Locked once `/draft` runs. |
 | `/draft` | Moderator | Run in a pool's channel: starts that pool, pings the first player and begins their timer. |
@@ -306,6 +346,10 @@ Nobody can use the moderator commands until an Administrator has run
 | `/queuepick round pokemon [costs] [tera]` | Any player | Queues up to 5 Pokémon in priority order for one of your upcoming turns. `tera` is a matching yes/no list. |
 | `/makeuppick round pokemon cost [tera_captain]` | Any player | Resolves a round you were skipped in. Does not change whose turn it is. |
 | `/editpick round pokemon cost [tera_captain] [player]` | Own picks; moderators for anyone | Replaces a pick, correcting roster, budgets, availability and history. A moderator can also use it to *add* a pick for a round with nothing recorded. |
+
+> **Sending the commands to your players:** [`PLAYERS.md`](PLAYERS.md) has a
+> player-only version of this list, in blocks sized to paste straight into
+> Discord. It leaves the moderator commands out and explains the timer rules.
 
 ### Looking things up
 
@@ -556,6 +600,13 @@ trade on their behalf — useful when somebody cannot manage the command — and
 still goes through the normal approval. `/editpick ... player:@someone` fixes or
 adds a pick, and `/substitute` hands a seat over.
 
+**A skip count and its timer move together.** `/setskips player:@someone skips:0`
+restores their full base timer, because the timer is recalculated from the count
+using the same halving the draft applies — so skips of 2 gives the timer they
+would have had after two skips. Pass `timer:` to set the clock to an exact value
+instead. Either way it applies from their next turn; a clock already running is
+not cut short.
+
 **Moderator roles are per server, not per league.** One set of people can look
 after every league running on it. Administrators and the server owner always
 have access.
@@ -582,7 +633,7 @@ turn opens again and the player is pinged.
 python3 -m unittest discover -s tests -v
 ```
 
-172 tests, no Discord connection and no network needed. They cover snake order
+181 tests, no Discord connection and no network needed. They cover snake order
 for every player count, round transitions, channel and pool isolation, timer
 halving and the makeup cascade, the snake-boundary case (one halving for two
 lost rounds, none if the queue was sniped), queued picks and the
@@ -594,7 +645,8 @@ blocks after trades, price-list name resolution, behaviour during a Google
 outage, behaviour when the bot is refused permission to post, restart recovery,
 the spreadsheet cell mapping, the arguments actually sent to the sheet, and a
 round-robin schedule generation for every player count, player removal before
-and during a draft, role-based player lists, and a randomised full-draft
+and during a draft, role-based player lists, skip-count corrections, and a
+randomised full-draft
 simulation that checks the invariants that matter —
 nobody owns the same Pokémon twice, budgets never go negative, spent +
 remaining always equals the starting budget, and pick order has no gaps.

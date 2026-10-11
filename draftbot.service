@@ -4,7 +4,8 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now draftbot
 #
-# Adjust User= and the two paths if you did not follow the README exactly.
+# This assumes the README's setup: a non-root user called "draftbot" with the
+# bot in its home directory. Change User= and the two paths if yours differs.
 
 [Unit]
 Description=Pokemon Draft League Discord Bot
@@ -13,18 +14,25 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/OCDL-Bot
-ExecStart=/home/ubuntu/OCDL-Bot/.venv/bin/python bot.py
+User=draftbot
+WorkingDirectory=/home/draftbot/OCDL-Bot
+ExecStart=/home/draftbot/OCDL-Bot/.venv/bin/python bot.py
 
-# Restart on any exit, including a crash or a VM reboot. This plus the
-# SQLite database is what stops a reboot losing a draft.
+# Restart on any exit, including a crash or a reboot. This plus the SQLite
+# database is what stops a reboot losing a draft.
 Restart=always
 RestartSec=10
 
 # Logs go to the journal: view them with `journalctl -u draftbot -f`
 StandardOutput=journal
 StandardError=journal
+
+# Modest hardening: the bot only needs its own directory and outbound network.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/draftbot/OCDL-Bot
 
 [Install]
 WantedBy=multi-user.target

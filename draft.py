@@ -1574,6 +1574,71 @@ def substitute_player(conn, draft, out_user_id, in_user_id, in_display_name):
 
 
 # --------------------------------------------------------------------------
+# Adjusting a player's clock
+# --------------------------------------------------------------------------
+
+
+def timer_for_skips(base_timer, skips):
+    """The timer a player should have after this many reductions.
+
+    Applies the same halving the draft does, so setting somebody's skip
+    count back to 0 restores their full timer, and setting it to 2 gives
+    them the timer they would have had after two skips.
+    """
+    timer = base_timer
+    for _ in range(max(0, int(skips))):
+        timer = max(config.MINIMUM_TIMER_SECONDS, timer // config.TIMER_DIVISOR)
+    return timer
+
+
+def set_skip_count(conn, draft, user_id, skips, timer=None):
+    """Correct a player's skip count, and their timer along with it.
+
+    Skips and the personal timer normally move together, so changing one
+    without the other would leave a player with a shrunken clock and no
+    reason for it. By default the timer is recalculated from the new count -
+    set it back to 0 and they get their full timer again. Pass `timer` to
+    override that exactly.
+    """
+    player = require_player(conn, draft["id"], user_id)
+
+    skips = int(skips)
+    if skips < 0:
+        raise DraftError("❌ A skip count cannot be negative.")
+    if skips > 100:
+        raise DraftError("❌ That skip count is implausibly high.")
+
+    if timer is None:
+        new_timer = timer_for_skips(draft["base_timer"], skips)
+    else:
+        new_timer = int(timer)
+        if new_timer < config.MINIMUM_TIMER_SECONDS:
+            raise DraftError(
+                f"❌ A timer cannot be shorter than {config.MINIMUM_TIMER_SECONDS} "
+                f"seconds (`MINIMUM_TIMER_SECONDS` in config.py)."
+            )
+        if new_timer > config.MAX_BASE_TIMER_SECONDS:
+            raise DraftError(
+                f"❌ A timer cannot be longer than {config.MAX_BASE_TIMER_SECONDS} seconds."
+            )
+
+    before = {"skips": player["skip_count"], "timer": player["current_timer"]}
+    conn.execute("UPDATE players SET skip_count = ?, current_timer = ? WHERE id = ?",
+                 (skips, new_timer, player["id"]))
+    conn.commit()
+
+    return {
+        "display_name": player["display_name"],
+        "user_id": user_id,
+        "pool": draft["label"],
+        "before": before,
+        "skips": skips,
+        "timer": new_timer,
+        "recalculated": timer is None,
+    }
+
+
+# --------------------------------------------------------------------------
 # Removing a player
 # --------------------------------------------------------------------------
 

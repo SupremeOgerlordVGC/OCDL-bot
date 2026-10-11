@@ -1730,5 +1730,83 @@ class LeagueModeTests(unittest.TestCase):
 
 
 
+class SkipCountTests(unittest.TestCase):
+    """Moderators can correct a skip count, and the timer follows it."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=1200, players=3, budget=100,
+                                min_picks=1, max_picks=4, base_timer=120)
+
+    def p1(self):
+        return draft.get_player(self.conn, self.draft["id"], user(1))
+
+    def test_timer_for_skips_matches_the_real_progression(self):
+        self.assertEqual([draft.timer_for_skips(120, n) for n in range(5)],
+                         [120, 60, 30, 15, 15])
+        self.assertGreaterEqual(draft.timer_for_skips(120, 99),
+                                config.MINIMUM_TIMER_SECONDS)
+
+    def test_resetting_to_zero_restores_the_full_timer(self):
+        draft.skip_current_player(self.conn, self.draft["id"])
+        self.assertEqual(self.p1()["current_timer"], 60)
+        self.assertEqual(self.p1()["skip_count"], 1)
+
+        live = draft.get_pool(self.conn, self.draft["id"])
+        result = draft.set_skip_count(self.conn, live, user(1), 0)
+
+        self.assertEqual(result["before"], {"skips": 1, "timer": 60})
+        self.assertEqual(self.p1()["skip_count"], 0)
+        self.assertEqual(self.p1()["current_timer"], 120)
+        self.assertTrue(result["recalculated"])
+
+    def test_raising_the_count_shrinks_the_timer_to_match(self):
+        live = draft.get_pool(self.conn, self.draft["id"])
+        draft.set_skip_count(self.conn, live, user(1), 2)
+        self.assertEqual(self.p1()["current_timer"], 30)
+
+    def test_an_explicit_timer_overrides_the_calculation(self):
+        live = draft.get_pool(self.conn, self.draft["id"])
+        result = draft.set_skip_count(self.conn, live, user(1), 1, timer=90)
+        self.assertEqual(self.p1()["current_timer"], 90)
+        self.assertEqual(self.p1()["skip_count"], 1)
+        self.assertFalse(result["recalculated"])
+
+    def test_the_floor_still_applies(self):
+        live = draft.get_pool(self.conn, self.draft["id"])
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.set_skip_count(self.conn, live, user(1), 0, timer=1)
+        self.assertIn(str(config.MINIMUM_TIMER_SECONDS), str(caught.exception))
+
+    def test_negative_counts_are_refused(self):
+        live = draft.get_pool(self.conn, self.draft["id"])
+        with self.assertRaises(draft.DraftError):
+            draft.set_skip_count(self.conn, live, user(1), -1)
+
+    def test_only_that_player_is_affected(self):
+        live = draft.get_pool(self.conn, self.draft["id"])
+        draft.set_skip_count(self.conn, live, user(1), 3)
+        self.assertEqual(self.p1()["current_timer"], 15)
+        self.assertEqual(
+            draft.get_player(self.conn, self.draft["id"], user(2))["current_timer"], 120)
+
+    def test_a_corrected_player_keeps_drafting_normally(self):
+        draft.skip_current_player(self.conn, self.draft["id"])      # Player1 skipped
+        live = draft.get_pool(self.conn, self.draft["id"])
+        draft.set_skip_count(self.conn, live, user(1), 0)
+
+        # Their makeup pick is untouched - only the clock was corrected.
+        player = self.p1()
+        self.assertEqual(
+            draft.pending_makeup_rounds(self.conn, self.draft["id"], player["id"]), [1])
+        pick = draft.make_makeup_pick(self.conn, live, user(1), 1, "Garchomp", 12)
+        self.assertEqual(pick["round"], 1)
+
+    def test_an_unknown_player_is_refused(self):
+        with self.assertRaises(draft.DraftError):
+            draft.set_skip_count(self.conn, self.draft, 999999, 0)
+
+
+
 if __name__ == "__main__":
     unittest.main()

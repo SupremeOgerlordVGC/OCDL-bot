@@ -463,6 +463,42 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    # ---- /setskips ------------------------------------------------------
+
+    @app_commands.command(
+        name="setskips",
+        description="Moderator only: correct a player's skip count and timer.",
+    )
+    @app_commands.describe(
+        player="The player to adjust",
+        skips="Their new skip count. 0 restores their full base timer.",
+        timer="Optional: set their timer to exactly this many seconds instead",
+    )
+    async def setskips(self, interaction: discord.Interaction, player: discord.Member,
+                       skips: int, timer: int = None):
+        pool = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
+        ui.require_moderator(self.bot, interaction)
+
+        result = rules.set_skip_count(self.bot.conn, pool, player.id, skips, timer)
+        before = result["before"]
+
+        how = ("recalculated from the new skip count"
+               if result["recalculated"] else "set explicitly")
+        await interaction.response.send_message(
+            f"✅ **{result['display_name']}**: skips "
+            f"{before['skips']} → **{result['skips']}**, timer "
+            f"{ui.format_seconds(before['timer'])} → "
+            f"**{ui.format_seconds(result['timer'])}** *({how})*.\n"
+            f"It takes effect on their next turn — a clock already running is "
+            f"not cut short.",
+            ephemeral=True,
+        )
+        await ui.safe_send(
+            interaction.channel,
+            f"⏱️ A moderator adjusted <@{result['user_id']}>: skip count "
+            f"**{result['skips']}**, timer **{ui.format_seconds(result['timer'])}**.",
+        )
+
     # ---- /removeplayer --------------------------------------------------
 
     @app_commands.command(
