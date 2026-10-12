@@ -161,7 +161,7 @@ class DraftingCog(commands.Cog):
         draft = rules.require_active_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
-        is_admin = ui.has_admin_rights(interaction, draft)
+        is_admin = ui.is_moderator(self.bot, interaction)
         pokemon = await self.resolve_pokemon(draft, pokemon, cost)
 
         pick, events = rules.make_pick(self.bot.conn, draft, interaction.user.id,
@@ -324,7 +324,7 @@ class DraftingCog(commands.Cog):
         draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
-        is_admin = ui.has_admin_rights(interaction, draft)
+        is_admin = ui.is_moderator(self.bot, interaction)
         pokemon = await self.resolve_pokemon(draft, pokemon, cost)
 
         result = rules.edit_pick(
