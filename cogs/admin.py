@@ -88,10 +88,12 @@ class AdminCog(commands.Cog):
         doc_url = template_link or tiering_link
 
         has_pool_b_players = bool(players_b) or players_role_b is not None
-        if (draft_channel_b is None) != has_pool_b_players:
+        if not rules.second_pool_is_consistent(draft_channel_b is not None,
+                                               has_pool_b_players):
             raise rules.DraftError(
                 "❌ A second pool needs both a channel and its players — give "
-                "`draft_channel_b` plus either `players_b` or `players_role_b`."
+                "`draft_channel_b` plus either `players_b` or `players_role_b`. "
+                "Leave all three out for a single-pool draft."
             )
 
         # A template declares the league's own budget, so the sheet wins.

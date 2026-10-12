@@ -1808,6 +1808,26 @@ class SkipCountTests(unittest.TestCase):
 
 
 
+class SecondPoolOptionTests(unittest.TestCase):
+    """The optional second pool needs a channel and players, or neither.
+
+    This shipped inverted - a one-pool /setup was rejected while a
+    half-specified pool B was accepted - so all four cases are pinned.
+    """
+
+    def test_neither_is_a_single_pool_draft(self):
+        self.assertTrue(draft.second_pool_is_consistent(False, False))
+
+    def test_both_is_a_two_pool_draft(self):
+        self.assertTrue(draft.second_pool_is_consistent(True, True))
+
+    def test_a_channel_with_no_players_is_incomplete(self):
+        self.assertFalse(draft.second_pool_is_consistent(True, False))
+
+    def test_players_with_no_channel_are_incomplete(self):
+        self.assertFalse(draft.second_pool_is_consistent(False, True))
+
+
 class CoachMatchingTests(unittest.TestCase):
     """Only ticked Coaches rows take part, and players go to the row that
     names them - so the spreadsheet decides the blocks, not mention order."""

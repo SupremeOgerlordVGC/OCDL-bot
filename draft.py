@@ -430,6 +430,16 @@ def coach_numbers_for(label, count):
     return list(range(first, first + count))
 
 
+def second_pool_is_consistent(has_channel, has_players):
+    """Whether the optional second pool was specified completely.
+
+    A second pool needs a channel AND players, or neither. Having one
+    without the other is the mistake worth catching - it is a half-finished
+    command, not a one-pool league.
+    """
+    return bool(has_channel) == bool(has_players)
+
+
 def max_players_per_pool(doc_kind, pool_count):
     """How many coaches a pool may hold.
 
