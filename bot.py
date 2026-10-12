@@ -9,7 +9,10 @@ three cogs that hold the slash commands.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
+import os
 import sys
 import time
 
@@ -86,16 +89,65 @@ class DraftBot(commands.Bot):
         # Syncing to one guild makes commands appear instantly while you are
         # testing. A global sync can take up to an hour to show up.
         dev_guild = config.get_dev_guild_id()
-        if dev_guild:
-            guild = discord.Object(id=dev_guild)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            log.info("commands synced to test guild %s", dev_guild)
+        target = discord.Object(id=dev_guild) if dev_guild else None
+
+        # Registering commands is heavily rate limited - a global sync can
+        # take the best part of a minute - and the result does not change
+        # unless the commands themselves do. So it is skipped when nothing
+        # has changed, which keeps restarts quick and stays well clear of
+        # Discord's limits even if the service restarts repeatedly.
+        signature = self._command_signature(dev_guild)
+        if signature == self._last_sync_signature():
+            log.info("commands unchanged since the last sync, skipping it")
         else:
-            await self.tree.sync()
-            log.info("commands synced globally (may take up to an hour to appear)")
+            if target is not None:
+                self.tree.copy_global_to(guild=target)
+                await self.tree.sync(guild=target)
+                log.info("commands synced to test guild %s", dev_guild)
+            else:
+                await self.tree.sync()
+                log.info("commands synced globally (may take up to an hour to appear)")
+            self._remember_sync(signature)
 
         self.automatic_backup.start()
+
+    # ---- command sync bookkeeping ---------------------------------------
+
+    def _command_signature(self, dev_guild):
+        """A short fingerprint of the commands as Discord would see them.
+
+        Covers the sync target too, so switching DEV_GUILD_ID on or off
+        forces a fresh sync rather than being mistaken for "no change".
+        """
+        shape = [dev_guild or 0]
+        for command in sorted(self.tree.get_commands(), key=lambda c: c.name):
+            shape.append([
+                command.name,
+                command.description,
+                [[p.name, p.description, str(p.type), p.required]
+                 for p in command.parameters],
+            ])
+        digest = hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()
+        return digest[:32]
+
+    @property
+    def _sync_marker(self):
+        return os.path.join(config.BASE_DIR, ".command-sync")
+
+    def _last_sync_signature(self):
+        try:
+            with open(self._sync_marker, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
+        except OSError:
+            return None
+
+    def _remember_sync(self, signature):
+        try:
+            with open(self._sync_marker, "w", encoding="utf-8") as handle:
+                handle.write(signature)
+        except OSError:
+            # Not being able to remember just means syncing again next time.
+            log.warning("could not record the command sync marker")
 
     async def on_ready(self):
         log.info("logged in as %s", self.user)
