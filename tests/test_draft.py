@@ -2098,6 +2098,124 @@ class QueueBeforeTheDraftTests(unittest.TestCase):
 
 
 
+class CancelQueueTests(unittest.TestCase):
+    """Throwing a queue away must be free: no pick undone, no clock touched."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=1500, players=3, budget=100,
+                                min_picks=1, max_picks=3, base_timer=120)
+
+    def queued(self, seat, round_number=None):
+        player = draft.get_player(self.conn, self.draft["id"], user(seat))
+        rows = draft.queued_entries(self.conn, self.draft["id"], player["id"],
+                                    round_number)
+        return [row["pokemon"] for row in rows]
+
+    def test_one_round_is_cleared_and_the_others_are_left_alone(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 1, ["Garchomp"], [12])
+        draft.queue_picks(self.conn, self.draft, user(2), 2, ["Heatran"], [10])
+
+        result = draft.cancel_queue(self.conn, self.draft, user(2), 1)
+
+        self.assertEqual([row["pokemon"] for row in result["removed"]], ["Garchomp"])
+        self.assertEqual(self.queued(2), ["Heatran"], "round 2 must survive")
+
+    def test_no_round_clears_every_round(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 1, ["Garchomp"], [12])
+        draft.queue_picks(self.conn, self.draft, user(2), 2, ["Heatran", "Rotom"], [10, 8])
+
+        result = draft.cancel_queue(self.conn, self.draft, user(2))
+
+        self.assertEqual([row["pokemon"] for row in result["removed"]],
+                         ["Garchomp", "Heatran", "Rotom"])
+        self.assertEqual(self.queued(2), [])
+
+    def test_only_the_asker_is_touched(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 1, ["Garchomp"], [12])
+        draft.queue_picks(self.conn, self.draft, user(3), 1, ["Heatran"], [10])
+
+        draft.cancel_queue(self.conn, self.draft, user(2))
+
+        self.assertEqual(self.queued(3), ["Heatran"])
+
+    def test_a_cancelled_queue_does_not_fire(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 1, ["Garchomp"], [12])
+        draft.cancel_queue(self.conn, self.draft, user(2), 1)
+
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Landorus", 15)
+
+        # Player2 is on the clock themselves instead of having been auto-picked.
+        self.assertEqual(on_clock(self.conn, self.draft), "Player2")
+        self.assertEqual([p["pokemon"] for p in
+                          draft.round_picks(self.conn, self.draft["id"], 1)],
+                         ["Landorus"])
+
+    def test_cancelling_costs_nothing(self):
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Landorus", 15)
+        draft.queue_picks(self.conn, self.draft, user(2), 2, ["Garchomp"], [12])
+        before = draft.get_player(self.conn, self.draft["id"], user(2))
+        pool_before = draft.get_pool(self.conn, self.draft["id"])
+
+        draft.cancel_queue(self.conn, self.draft, user(2))
+
+        after = draft.get_player(self.conn, self.draft["id"], user(2))
+        pool_after = draft.get_pool(self.conn, self.draft["id"])
+        self.assertEqual(after["current_timer"], before["current_timer"])
+        self.assertEqual(after["skip_count"], before["skip_count"])
+        self.assertEqual(after["budget_remaining"], before["budget_remaining"])
+        self.assertEqual(pool_after["turn_deadline"], pool_before["turn_deadline"])
+        self.assertEqual(pool_after["current_turn_index"],
+                         pool_before["current_turn_index"])
+
+    def test_the_player_can_still_pick_for_that_round(self):
+        # Cancelling while on the clock must leave a normal turn behind.
+        draft.queue_picks(self.conn, self.draft, user(1), 1, ["Garchomp"], [12])
+        live = draft.get_pool(self.conn, self.draft["id"])
+        draft.cancel_queue(self.conn, live, user(1), 1)
+        draft.make_pick(self.conn, live, user(1), 1, "Heatran", 10)
+
+        self.assertEqual([p["pokemon"] for p in
+                          draft.round_picks(self.conn, self.draft["id"], 1)],
+                         ["Heatran"])
+
+    def test_moderators_can_cancel_for_a_player_but_players_cannot(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 1, ["Garchomp"], [12])
+
+        with self.assertRaises(draft.DraftError):
+            draft.cancel_queue(self.conn, self.draft, user(3), 1,
+                               target_user_id=user(2))
+        self.assertEqual(self.queued(2), ["Garchomp"], "a refusal must change nothing")
+
+        result = draft.cancel_queue(self.conn, self.draft, user(3), 1,
+                                    target_user_id=user(2), acting_as_admin=True)
+        self.assertEqual(result["player"]["display_name"], "Player2")
+        self.assertEqual(self.queued(2), [])
+
+    def test_nothing_queued_is_an_error_not_a_silent_success(self):
+        with self.assertRaises(draft.DraftError):
+            draft.cancel_queue(self.conn, self.draft, user(2))
+        with self.assertRaises(draft.DraftError):
+            draft.cancel_queue(self.conn, self.draft, user(2), 1)
+
+    def test_a_round_outside_the_draft_is_refused(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 1, ["Garchomp"], [12])
+        with self.assertRaises(draft.DraftError):
+            draft.cancel_queue(self.conn, self.draft, user(2), 9)
+        self.assertEqual(self.queued(2), ["Garchomp"])
+
+    def test_works_before_the_draft_starts(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=1501, players=2, budget=50,
+                          min_picks=1, max_picks=2, start=False)
+        draft.queue_picks(conn, pool, user(1), 1, ["Garchomp"], [12])
+        draft.cancel_queue(conn, pool, user(1), 1)
+
+        live = draft.get_pool(conn, pool["id"])
+        events = draft.start_pool(conn, live)
+        self.assertEqual([e for e in events if e["type"] == "auto_pick"], [])
+
+
 class MigrationTests(unittest.TestCase):
     """An upgrade must not break an existing database.
 

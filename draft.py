@@ -1338,6 +1338,62 @@ def get_queue(conn, pool_id, player_id, round_number):
     ).fetchall()
 
 
+def queued_entries(conn, pool_id, player_id, round_number=None):
+    """Every queue entry a player has stored, or just one round's worth."""
+    if round_number is None:
+        return conn.execute(
+            "SELECT * FROM queued_picks WHERE pool_id = ? AND player_id = ? "
+            "ORDER BY round, priority",
+            (pool_id, player_id),
+        ).fetchall()
+    return get_queue(conn, pool_id, player_id, round_number)
+
+
+def cancel_queue(conn, draft, actor_user_id, round_number=None,
+                 target_user_id=None, acting_as_admin=False):
+    """/cancelqueue - throw away stored fallbacks.
+
+    With no round, every round the player has queued is cleared; with one,
+    only that round. Deleting a queue cannot cost anybody anything: the
+    clock, the skip counter, the budget and any pick already made are all
+    left exactly as they are, which is why this is safe to run at any
+    point, including while the player is on the clock.
+
+    A queue that has already fired is gone from this table, so there is
+    never a pick to undo here - only a plan for a turn still to come.
+    """
+    target_user_id = target_user_id or actor_user_id
+    if target_user_id != actor_user_id and not acting_as_admin:
+        raise DraftError("❌ Only a moderator can cancel somebody else's queue.")
+    if draft["status"] not in ("setup", "active"):
+        raise DraftError("❌ This draft is not running.")
+
+    player = require_player(conn, draft["id"], target_user_id)
+    if round_number is not None and not 1 <= round_number <= draft["max_picks"]:
+        raise DraftError(f"❌ This draft only has rounds 1–{draft['max_picks']}.")
+
+    removed = queued_entries(conn, draft["id"], player["id"], round_number)
+    if not removed:
+        where = f" for Round {round_number}" if round_number is not None else ""
+        raise DraftError(
+            f"❌ Nothing is queued{where}. `/queuepick` stores a queue; "
+            f"this command throws one away."
+        )
+
+    if round_number is None:
+        conn.execute(
+            "DELETE FROM queued_picks WHERE pool_id = ? AND player_id = ?",
+            (draft["id"], player["id"]),
+        )
+    else:
+        conn.execute(
+            "DELETE FROM queued_picks WHERE pool_id = ? AND player_id = ? AND round = ?",
+            (draft["id"], player["id"], round_number),
+        )
+    conn.commit()
+    return {"player": player, "removed": removed}
+
+
 def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
               tera_captain=False, target_user_id=None, acting_as_admin=False):
     """/editpick - replace a pick that has already been made."""

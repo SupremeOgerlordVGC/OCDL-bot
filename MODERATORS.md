@@ -88,6 +88,8 @@ A scheduled start survives a bot restart. `/draft` with no time starts it early 
 
 **`/editpick round:3 pokemon:Garchomp cost:12 player:@Someone`** — change a pick. You can also use it to **add** a pick for a round where they have nothing recorded, which settles any makeup pick they owed.
 
+**`/cancelqueue player:@Someone`** — deletes somebody's queued picks before they fire. Add `round:3` for just one round. Nothing else changes: no pick is undone and the clock is not touched. The channel is told, so the player knows their queue is gone.
+
 **`/setskips player:@Someone skips:0`** — corrects their skip count and recalculates their timer from it, so `skips:0` restores their full base timer. Add `timer:300` to set the clock to an exact value. Use this when somebody was skipped unfairly.
 
 **`/substitute out:@Leaving into:@Joining`** — hands over the seat. Roster, budgets and any makeup picks all stay; only the person changes. Their timer resets to the base.

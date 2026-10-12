@@ -107,6 +107,7 @@ class CommandOptionTests(unittest.TestCase):
         "makeuppick": {"round", "pokemon", "cost", "tera_captain"},
         "editpick": {"round", "pokemon", "cost", "tera_captain", "player"},
         "queuepick": {"round", "pokemon", "costs", "tera"},
+        "cancelqueue": {"round", "player"},
         "draft": {"at"},
         "setup": {"name", "draft_channel", "players", "players_role", "min_picks",
                   "max_picks", "timer", "mode", "budget", "tera_budget", "max_trades",

@@ -401,6 +401,103 @@ class PriceListRuleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not a Tera format", str(caught.exception))
 
 
+class QueuePricingTests(unittest.IsolatedAsyncioTestCase):
+    """A queue is priced as strictly as a typed pick.
+
+    Written after a live draft auto-drafted Tyranitar for 7 points when the
+    list said 12: /queuepick used to store whatever cost the player typed,
+    and the pick then fired unattended at that price.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(4343)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.bot.sheets = StubPriceList()
+        self.draft_id = make_pool(
+            self.conn, 4343, [(11, "Larry"), (22, "Alex")],
+            budget=100, min_picks=1, max_picks=3, base_timer=120,
+            tera_budget=30,
+            doc_url="https://docs.google.com/spreadsheets/d/TEST/edit")
+        self.draft = rules.get_pool(self.conn, self.draft_id)
+        self.cog = DraftingCog(self.bot)
+
+    async def price(self, names, given=None, captains=None):
+        names = list(names)
+        costs = await self.cog.resolve_queue(
+            self.draft, names, given, captains or [False] * len(names))
+        return names, costs
+
+    async def test_a_wrong_cost_is_refused(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.price(["Garchomp"], [7])
+        message = str(caught.exception)
+        self.assertIn("12", message, "must name the real price")
+        self.assertIn("7", message)
+
+    async def test_a_correct_cost_is_accepted(self):
+        names, costs = await self.price(["Garchomp"], [12])
+        self.assertEqual((names, costs), (["Garchomp"], [12]))
+
+    async def test_no_costs_given_uses_the_list(self):
+        names, costs = await self.price(["Garchomp", "Rotom-Wash"])
+        self.assertEqual(costs, [12, 8])
+
+    async def test_the_lists_spelling_and_price_are_what_get_stored(self):
+        names, costs = await self.price(["  garCHOMP "], [12])
+        self.assertEqual((names, costs), (["Garchomp"], [12]))
+
+    async def test_only_the_wrong_entry_is_named(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.price(["Garchomp", "Rotom-Wash"], [12, 3])
+        message = str(caught.exception)
+        self.assertIn("Rotom-Wash", message)
+        self.assertNotIn("Garchomp", message)
+
+    async def test_a_captain_is_priced_at_its_tera_cost(self):
+        names, costs = await self.price(["Garchomp"], [11], [True])
+        self.assertEqual(costs, [11])
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.price(["Garchomp"], [12], [True])
+        self.assertIn("11", str(caught.exception))
+
+    async def test_banned_pokemon_cannot_be_queued(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.price(["Bulbasaur"], [5])
+        self.assertIn("draftable", str(caught.exception))
+
+    async def test_an_unknown_pokemon_is_refused(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.price(["Missingno"], [5])
+        self.assertIn("not in this league's tiering list", str(caught.exception))
+
+    async def test_a_sheet_outage_still_trusts_the_player(self):
+        # No list to check against, so the queue must not be blocked: the
+        # same trade-off /pick makes when Google is unreachable.
+        class BrokenSheets(StubPriceList):
+            def lookup(self, doc_url, pokemon, tab=None):
+                raise RuntimeError("Google is down")
+
+        self.bot.sheets = BrokenSheets()
+        self.bot.tiering_tabs.clear()
+        names, costs = await self.price(["Garchomp"], [7])
+        self.assertEqual(costs, [7])
+
+    async def test_a_queue_stored_through_the_rules_layer_fires_at_the_list_price(self):
+        # The whole point: what resolve_queue returns is what gets drafted.
+        names, costs = await self.price(["Garchomp"], [12])
+        rules.start_pool(self.conn, self.draft)
+        live = rules.get_pool(self.conn, self.draft_id)
+        rules.queue_picks(self.conn, live, 22, 1, names, costs, [False])
+        rules.make_pick(self.conn, live, 11, 1, "Rotom-Wash", 8)
+
+        picks = rules.round_picks(self.conn, self.draft_id, 1)
+        auto = [p for p in picks if p["is_auto"]][0]
+        self.assertEqual((auto["pokemon"], auto["cost"]), ("Garchomp", 12))
+        self.assertEqual(rules.get_player(self.conn, self.draft_id, 22)["budget_remaining"],
+                         88)
+
+
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
     """A channel the bot cannot post in must not break the draft.
 

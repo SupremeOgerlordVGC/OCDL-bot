@@ -1,6 +1,7 @@
 """
 The commands players use during a draft:
-/pick, /queuepick, /makeuppick, /editpick, /status, /progress, /roster.
+/pick, /queuepick, /cancelqueue, /makeuppick, /editpick, /status,
+/progress, /roster.
 
 Every command finds its draft from `interaction.channel_id`, which is what
 keeps parallel drafts in different channels completely separate.
@@ -176,6 +177,67 @@ class DraftingCog(commands.Cog):
         )
         await ui.announce(self.bot, draft["id"], events, channel=interaction.channel)
 
+    async def resolve_queue(self, draft, names, given, captains):
+        """Price a whole queue against the list, as resolve_pokemon does
+        for a single pick.
+
+        Returns the costs to store, in the same order. A cost the player
+        typed is only trusted when the list cannot price that Pokémon at
+        all: where the list has a price and the two disagree the queue is
+        refused, because a queued pick fires with nobody watching and
+        would otherwise draft at the wrong price. `names` is rewritten in
+        place to the list's own spelling.
+        """
+        resolved = []
+        unknown = []
+        banned = []
+        mispriced = []
+        for index, name in enumerate(names):
+            status, entry = await self.sheet_entry(draft, name)
+            if status == "missing":
+                raise rules.DraftError(
+                    f"❌ **{name}** is not in this league's tiering list."
+                )
+            if status == "ok":
+                if entry["banned"]:
+                    banned.append(f"{entry['name']} (banned)")
+                    continue
+                if captains[index] and entry["tera_banned"]:
+                    banned.append(f"{entry['name']} (Tera banned)")
+                    continue
+                # Store the list's spelling so an automatic pick writes a
+                # name the spreadsheet can actually look up.
+                names[index] = entry["name"]
+                official = entry["tera_cost"] if captains[index] else entry["cost"]
+                # The list is the authority, exactly as it is for /pick. A
+                # queued pick fires with nobody watching, so a wrong cost
+                # here would quietly draft at the wrong price and leave the
+                # player's budget richer than it should be.
+                if given and given[index] != official:
+                    mispriced.append(f"**{entry['name']}** costs **{official}**, not {given[index]}")
+                resolved.append(official)
+            elif given:
+                resolved.append(given[index])
+            else:
+                resolved.append(None)
+                unknown.append(name)
+
+        if banned:
+            raise rules.DraftError(f"❌ Not draftable: {', '.join(banned)}.")
+        if mispriced:
+            raise rules.DraftError(
+                "❌ Incorrect cost. The tiering list says:\n"
+                + "\n".join(f"• {line}" for line in mispriced)
+                + "\nFix those costs, or leave `costs` out and the bot will "
+                  "use the list's own prices."
+            )
+        if unknown:
+            raise rules.DraftError(
+                f"❌ No cost known for: {', '.join(unknown)}. "
+                f"Add them with `costs: 12, 10, 8`."
+            )
+        return resolved
+
     # ---- /queuepick -----------------------------------------------------
 
     @app_commands.command(
@@ -225,40 +287,7 @@ class DraftingCog(commands.Cog):
                 elif flag not in ("no", "n", "false", "0", ""):
                     raise rules.DraftError(f"❌ `{flag}` is not yes or no.")
 
-        resolved = []
-        unknown = []
-        banned = []
-        for index, name in enumerate(names):
-            status, entry = await self.sheet_entry(draft, name)
-            if status == "missing":
-                raise rules.DraftError(
-                    f"❌ **{name}** is not in this league's tiering list."
-                )
-            if status == "ok":
-                if entry["banned"]:
-                    banned.append(f"{entry['name']} (banned)")
-                    continue
-                if captains[index] and entry["tera_banned"]:
-                    banned.append(f"{entry['name']} (Tera banned)")
-                    continue
-                # Store the list's spelling so an automatic pick writes a
-                # name the spreadsheet can actually look up.
-                names[index] = entry["name"]
-                official = entry["tera_cost"] if captains[index] else entry["cost"]
-                resolved.append(given[index] if given else official)
-            elif given:
-                resolved.append(given[index])
-            else:
-                resolved.append(None)
-                unknown.append(name)
-
-        if banned:
-            raise rules.DraftError(f"❌ Not draftable: {', '.join(banned)}.")
-        if unknown:
-            raise rules.DraftError(
-                f"❌ No cost known for: {', '.join(unknown)}. "
-                f"Add them with `costs: 12, 10, 8`."
-            )
+        resolved = await self.resolve_queue(draft, names, given, captains)
 
         rules.queue_picks(self.bot.conn, draft, interaction.user.id, round, names,
                           resolved, captains)
@@ -274,6 +303,53 @@ class DraftingCog(commands.Cog):
                if draft["status"] == "setup" else ""),
             ephemeral=True,
         )
+
+    # ---- /cancelqueue ---------------------------------------------------
+
+    @app_commands.command(
+        name="cancelqueue",
+        description="Throw away a queue you stored with /queuepick.",
+    )
+    @app_commands.describe(
+        round="The round to clear. Leave empty to clear every round you have queued.",
+        player="Moderators only: whose queue to cancel",
+    )
+    async def cancelqueue(self, interaction: discord.Interaction, round: int = None,
+                          player: discord.Member = None):
+        # Matches /queuepick: usable before the draft starts as well as during it.
+        draft = rules.require_live_pool(self.bot.conn, interaction.channel_id)
+        await interaction.response.defer(ephemeral=True)
+
+        result = rules.cancel_queue(
+            self.bot.conn, draft, interaction.user.id, round,
+            target_user_id=player.id if player else None,
+            acting_as_admin=ui.is_moderator(self.bot, interaction),
+        )
+
+        listing = "\n".join(
+            f"Round {entry['round']}: **{entry['pokemon']}**"
+            + (" ⭐ Tera Captain" if entry["tera_captain"] else "")
+            for entry in result["removed"]
+        )
+        target = result["player"]
+        mine = target["user_id"] == interaction.user.id
+        whose = "" if mine else f" for **{target['display_name']}**"
+        await interaction.followup.send(
+            f"🗑️ Queue cancelled{whose}. Removed:\n{listing}\n\n"
+            f"No pick was undone and the clock was not touched — those turns "
+            f"now need a real `/pick`.",
+            ephemeral=True,
+        )
+
+        # A queue is only ever shown to its owner, so somebody whose queue a
+        # moderator clears would otherwise have no way of knowing.
+        if not mine:
+            which = f"Round {round} queue" if round else "queued picks"
+            await ui.safe_send(
+                interaction.channel,
+                f"🗑️ A moderator cancelled **{target['display_name']}**'s "
+                f"{which}. No pick was changed.",
+            )
 
     # ---- /makeuppick ----------------------------------------------------
 
