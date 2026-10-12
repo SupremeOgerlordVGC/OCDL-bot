@@ -269,11 +269,18 @@ Then, as `draftbot`:
 
 ```bash
 cd ~
-git clone https://github.com/YOUR_NAME/OCDL-Bot.git
+git clone https://github.com/YOUR_NAME/YOUR_REPO.git OCDL-Bot
 cd OCDL-Bot
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
+
+> The `OCDL-Bot` on the end of the clone command is deliberate: it names the
+> directory, rather than letting git name it after the repository. GitHub
+> repository names are case-sensitive, so a repo called `OCDL-bot` would
+> otherwise produce a `~/OCDL-bot` directory and `draftbot.service` — which
+> looks for `/home/draftbot/OCDL-Bot` — would silently fail to start. Pinning
+> the name means the paths always line up.
 
 ### 6. Add your token on the server
 
