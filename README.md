@@ -143,31 +143,106 @@ These steps assume a **Hetzner Cloud** server running **Ubuntu 24.04**. Any
 Ubuntu VPS works the same way — only step 1 is Hetzner-specific.
 
 The one thing to watch: Hetzner's Ubuntu images log you in as **root**. Running
-a Discord bot as root is poor practice, so step 3 creates a normal user for it,
+a Discord bot as root is poor practice, so step 4 creates a normal user for it,
 and `draftbot.service` expects that user.
 
-### 1. Create the server
+### 1. Make an SSH key
 
-In the [Hetzner Cloud Console](https://console.hetzner.cloud): **New Project** →
-**Add Server**.
+Do this on your Mac **before** creating the server, because Hetzner asks for the
+key while you set the server up. Without a key it emails you a root password
+instead, which is worse in every way.
 
-* **Location** — pick the one nearest your players; it only affects latency.
-* **Image** — **Ubuntu 24.04**.
-* **Type** — the smallest shared-vCPU box is plenty. A `CAX11` (Arm) or `CX22`
-  (x86) handles this bot without noticing it. Arm is cheaper and Python runs
-  fine on it.
-* **SSH keys** — **add your public key here.** Without one, Hetzner emails you a
-  root password, which is worse in every way. If you do not have a key yet, run
-  `ssh-keygen -t ed25519` on your Mac and paste the contents of
-  `~/.ssh/id_ed25519.pub`.
-* **Firewall** — optional but worth it. The bot makes only *outbound*
-  connections, so you never need to open a port for it. Allow inbound **TCP 22**
-  (SSH) and nothing else.
+Check whether you already have one:
 
-Everything else can stay at its default. Create the server and note its IPv4
-address.
+```bash
+ls ~/.ssh/*.pub
+```
 
-### 2. Connect
+If that lists a `.pub` file you already have a key — skip to copying it below.
+If it says *no such file*, make one:
+
+```bash
+ssh-keygen -t ed25519 -C "ocdl-bot"
+```
+
+It asks three things:
+
+1. **"Enter file in which to save the key"** — press **Enter** to accept the
+   default (`/Users/Larry/.ssh/id_ed25519`). Do not type a path unless you have
+   a reason to.
+2. **"Enter passphrase"** — type one. This encrypts the key *on your Mac*, so a
+   stolen laptop does not hand somebody your server. You will not have to type
+   it every time; see below. Pressing Enter for no passphrase also works and is
+   what many guides do, but a passphrase costs you nothing here.
+3. **"Enter same passphrase again"** — repeat it.
+
+Nothing is echoed as you type a passphrase — no dots, no stars. That is normal.
+
+You now have two files:
+
+| File | What it is |
+|---|---|
+| `~/.ssh/id_ed25519` | Your **private** key. Never share it, never upload it, never paste it anywhere. |
+| `~/.ssh/id_ed25519.pub` | Your **public** key. This is the one you give to Hetzner. It is safe to share. |
+
+If you set a passphrase, have macOS remember it so you are not asked on every
+connection:
+
+```bash
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+```
+
+Now copy the **public** key to your clipboard:
+
+```bash
+pbcopy < ~/.ssh/id_ed25519.pub
+```
+
+That is what you paste into Hetzner in the next step. It is one long line
+starting `ssh-ed25519 AAAA...` and ending with the `ocdl-bot` comment. If you
+ever want to look at it:
+
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
+> Losing the private key means losing access to the server — you would have to
+> use Hetzner's web console to add a new key. If you back your Mac up with Time
+> Machine, `~/.ssh` is included.
+
+### 2. Create the server
+
+In the [Hetzner Cloud Console](https://console.hetzner.cloud): **New Project**
+(call it anything, e.g. `OCDL`) → **Add Server**.
+
+| Option | What to choose |
+|---|---|
+| **Location** | Whichever is nearest your players. It only affects latency. |
+| **Image** | **Ubuntu 24.04** |
+| **Type** | Smallest shared vCPU is plenty — `CAX11` (Arm) or `CX22` (x86). Arm is cheaper and Python runs fine on it. |
+| **Networking** | Leave **Public IPv4** and **IPv6** ticked. |
+| **Private networks** | **Leave this off.** See below. |
+| **SSH keys** | **Add SSH key** → paste the public key you just copied → give it a name like `Larry MacBook` → Add. Make sure the resulting key is **ticked**. |
+| **Volumes, Placement groups, Labels, Cloud config** | Skip all of them. |
+| **Firewalls** | Optional but worth it — see below. |
+| **Backups** | Optional, around +20% of the server price. Worth it for a league you care about: it covers the server itself breaking, which the bot's own `backups/` folder cannot. |
+| **Name** | Just a label, and the server's hostname. Something like `ocdl-bot`. Lowercase letters, digits and hyphens. |
+
+**Why not Private networks?** They exist so several of your own servers can talk
+to each other over a private link — an app server and a separate database, for
+instance. You have one server, so there is nothing to talk to. More importantly,
+that same feature can **disable the public network**, and this bot needs outbound
+internet to reach Discord and Google. Turning it on would stop the bot working
+and lock you out of SSH. Leave it alone.
+
+**The firewall**, if you want one: create it with a single inbound rule allowing
+**TCP 22** (SSH) from anywhere, and leave outbound unrestricted. The bot only
+ever makes outbound connections, so it never needs a port opened for it. This is
+free and means nothing but SSH is reachable.
+
+Create the server, then note its **IPv4 address** from the console.
+
+### 3. Connect
 
 ```bash
 ssh root@YOUR_SERVER_IP
@@ -178,13 +253,13 @@ apt update && apt upgrade -y
 apt install -y python3 python3-venv git
 ```
 
-### 3. Create a user for the bot
+### 4. Create a user for the bot
 
 ```bash
 adduser --disabled-password --gecos "" draftbot
 ```
 
-### 4. Install the bot as that user
+### 5. Install the bot as that user
 
 ```bash
 sudo -u draftbot -H bash
@@ -200,7 +275,7 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
 
-### 5. Add your token on the server
+### 6. Add your token on the server
 
 Still as `draftbot`, create the file by hand so the token never goes near git:
 
@@ -233,7 +308,7 @@ scp credentials.json root@YOUR_SERVER_IP:/home/draftbot/OCDL-Bot/
 ssh root@YOUR_SERVER_IP "chown draftbot:draftbot /home/draftbot/OCDL-Bot/credentials.json && chmod 600 /home/draftbot/OCDL-Bot/credentials.json"
 ```
 
-### 6. Check it starts
+### 7. Check it starts
 
 As `draftbot`:
 
@@ -244,7 +319,7 @@ cd ~/OCDL-Bot && ./.venv/bin/python bot.py
 You should see `logged in as YourBot#1234`. Stop it with `Ctrl+C`, then leave the
 `draftbot` shell with `exit`.
 
-### 7. Run it as a service
+### 8. Run it as a service
 
 Back as root:
 
