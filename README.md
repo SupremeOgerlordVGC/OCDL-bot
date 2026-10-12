@@ -441,12 +441,35 @@ and refuses an option that contradicts the sheet, so the two can never drift.
 `TieringSheet` means a league can re-price simply by pointing at a different
 tiering tab.
 
+### Who is in the draft
+
+The **`Coaches`** tab decides this, and the bot reads it rather than assuming:
+
+* **`AC` ("In schedule")** — only **ticked** rows take part. A tick is what
+  reserves that coach's roster block, so **gaps are respected**: with rows 5 and
+  10 unticked, eight pool A players go into blocks 1–4 and 6–9, not 1–8.
+* **`Y` ("Pool")** — which pool the row belongs to. Anything that is not `B`
+  counts as pool A, matching the sheet's own `Active Pool` formula.
+* **`B` ("Username")** — if a ticked row already names somebody, the bot
+  **matches** a listed player to it by their Discord username or display name,
+  case-insensitively. So the order you @mention people in does **not** have to
+  match the spreadsheet.
+
+A row still holding a template placeholder (`Coach 7`) or nothing at all is
+treated as free, and the bot writes the next unmatched player into it. A row
+naming a real person is **never** given to somebody else — that would put one
+player's roster in another player's block, so `/setup` refuses instead and tells
+you who it could not place.
+
+`/setup` reports what it did: how many it matched, how many blank rows it
+filled, and any ticked row whose named coach you forgot to list.
+
 The bot **writes only two things**; everything else in the document is formulas
 that react to them:
 
 | Where | What |
 |---|---|
-| `Coaches!B` and `Coaches!Y` | Usernames and pool letters. Every other tab refers back to these cells, so writing here updates coach names everywhere. |
+| `Coaches!B` and `Coaches!Y` | Usernames and pool letters — **only for rows it owns**, never an unticked row. A matched row is written back exactly as you typed it. |
 | The leftmost column of each roster block | One Pokémon name per round — plus the Tera Captain tick box in a Tera format. |
 
 The 20 roster blocks are listed in `config.SHEET_LAYOUT["roster_blocks"]` in
@@ -456,6 +479,7 @@ never the image formula to the left or the cost formula to the right.
 
 Because each block is 12 rows tall, **a template-linked draft can have at most
 12 rounds**, and `/setup` refuses more rather than silently losing picks.
+Likewise a pool can hold no more players than it has ticked coach rows.
 
 ### Tera Captains
 
@@ -607,6 +631,15 @@ would have had after two skips. Pass `timer:` to set the clock to an exact value
 instead. Either way it applies from their next turn; a clock already running is
 not cut short.
 
+**The spreadsheet decides the roster blocks, not the mention order.** With a
+template, `/setup` reads the ticked `In schedule` rows and matches each player to
+the row that names them. Matched players then **adopt the spreadsheet's spelling**
+of their name, so writing the roster back leaves the Coaches tab byte-for-byte as
+the host typed it, rather than replacing a league username with a Discord
+nickname — and it is what lets `/postschedule` tie the sheet's fixtures back to
+Discord accounts. Unticked rows are never touched at all: somebody the host is
+keeping off the schedule is none of the bot's business.
+
 **Moderator roles are per server, not per league.** One set of people can look
 after every league running on it. Administrators and the server owner always
 have access.
@@ -633,7 +666,7 @@ turn opens again and the player is pinged.
 python3 -m unittest discover -s tests -v
 ```
 
-181 tests, no Discord connection and no network needed. They cover snake order
+194 tests, no Discord connection and no network needed. They cover snake order
 for every player count, round transitions, channel and pool isolation, timer
 halving and the makeup cascade, the snake-boundary case (one halving for two
 lost rounds, none if the queue was sniped), queued picks and the
@@ -645,8 +678,8 @@ blocks after trades, price-list name resolution, behaviour during a Google
 outage, behaviour when the bot is refused permission to post, restart recovery,
 the spreadsheet cell mapping, the arguments actually sent to the sheet, and a
 round-robin schedule generation for every player count, player removal before
-and during a draft, role-based player lists, skip-count corrections, and a
-randomised full-draft
+and during a draft, role-based player lists, skip-count corrections, matching players to ticked
+Coaches rows with gaps, and a randomised full-draft
 simulation that checks the invariants that matter —
 nobody owns the same Pokémon twice, budgets never go negative, spent +
 remaining always equals the starting budget, and pick order has no gaps.

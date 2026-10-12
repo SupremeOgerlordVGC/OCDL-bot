@@ -1808,5 +1808,146 @@ class SkipCountTests(unittest.TestCase):
 
 
 
+class CoachMatchingTests(unittest.TestCase):
+    """Only ticked Coaches rows take part, and players go to the row that
+    names them - so the spreadsheet decides the blocks, not mention order."""
+
+    def entries(self, *pairs):
+        return [{"user_id": 100 + i, "display_name": display, "username": username}
+                for i, (display, username) in enumerate(pairs)]
+
+    def test_placeholder_rows_are_free_but_named_rows_are_not(self):
+        for name in ("Coach 1", "coach 20", "", "   ", None):
+            self.assertTrue(draft.is_placeholder_coach(name), name)
+        for name in ("bottledducky", "Coach", "Coach Larry", "itsbug"):
+            self.assertFalse(draft.is_placeholder_coach(name), name)
+
+    def test_players_are_matched_by_username(self):
+        players = self.entries(("Larry", "bottledducky"), ("Alex", "itsbug"))
+        slots = [1, 2, 3, 4]
+        names = {1: "itsbug", 2: "Coach 2", 3: "bottledducky", 4: "Coach 4"}
+
+        assignment, to_write, unclaimed, leftover = draft.match_coaches(
+            players, slots, names)
+
+        # Mention order was Larry then Alex, but the sheet says otherwise.
+        self.assertEqual(assignment[1]["display_name"], "Alex")
+        self.assertEqual(assignment[3]["display_name"], "Larry")
+        self.assertEqual(to_write, [])
+        self.assertEqual(unclaimed, [])
+        self.assertEqual(leftover, [])
+
+    def test_matching_falls_back_to_the_display_name(self):
+        players = self.entries(("Zupho", "some_other_handle"))
+        assignment, _, _, leftover = draft.match_coaches(players, [1, 2], {1: "Zupho"})
+        self.assertEqual(assignment[1]["display_name"], "Zupho")
+        self.assertEqual(leftover, [])
+
+    def test_matching_ignores_case_and_spacing(self):
+        players = self.entries(("Larry", "BottledDucky"))
+        assignment, _, _, _ = draft.match_coaches(
+            players, [1], {1: "  bottledducky "})
+        self.assertIn(1, assignment)
+
+    def test_unnamed_rows_are_filled_in_order(self):
+        players = self.entries(("Larry", "larry"), ("Alex", "alex"))
+        assignment, to_write, _, _ = draft.match_coaches(
+            players, [2, 5, 7], {2: "Coach 2", 5: "Coach 5", 7: "Coach 7"})
+        self.assertEqual([assignment[n]["display_name"] for n in sorted(assignment)],
+                         ["Larry", "Alex"])
+        self.assertEqual(to_write, [2, 5], "the bot writes the names it filled in")
+
+    def test_a_ticked_row_nobody_listed_is_reported(self):
+        players = self.entries(("Larry", "bottledducky"))
+        _, _, unclaimed, _ = draft.match_coaches(
+            players, [1, 2], {1: "bottledducky", 2: "nozzermat"})
+        self.assertEqual(unclaimed, [2])
+
+    def test_a_player_with_nowhere_to_go_is_reported(self):
+        players = self.entries(("Larry", "larry"), ("Ghost", "ghost"))
+        _, _, _, leftover = draft.match_coaches(
+            players, [1], {1: "someone-else"})
+        self.assertEqual([p["display_name"] for p in leftover], ["Larry", "Ghost"])
+
+    def test_a_named_row_is_never_given_to_the_wrong_player(self):
+        # Row 2 belongs to nozzermat, who was not listed. An unmatched player
+        # must not be dropped into it - their roster would end up in somebody
+        # else's block on the spreadsheet.
+        players = self.entries(("Larry", "bottledducky"), ("Newcomer", "newcomer"))
+        assignment, to_write, unclaimed, leftover = draft.match_coaches(
+            players, [1, 2], {1: "bottledducky", 2: "nozzermat"})
+
+        self.assertEqual(assignment[1]["display_name"], "Larry")
+        self.assertNotIn(2, assignment)
+        self.assertEqual(to_write, [])
+        self.assertEqual(unclaimed, [2])
+        self.assertEqual([p["display_name"] for p in leftover], ["Newcomer"])
+
+    def test_matched_names_can_be_adopted_so_the_sheet_is_left_alone(self):
+        # The cog adopts the sheet's spelling for matched rows, so writing
+        # the roster back does not replace a league username with a Discord
+        # nickname. This checks the data that makes that possible.
+        players = self.entries(("Larry", "bottledducky"))
+        assignment, to_write, _, _ = draft.match_coaches(
+            players, [1, 2], {1: "bottledducky", 2: "Coach 2"})
+
+        self.assertEqual(sorted(assignment), [1])
+        self.assertNotIn(1, to_write, "row 1 already had a name, so leave it")
+        # The caller can tell matched rows from filled ones, which is exactly
+        # what it needs to know which names are safe to overwrite.
+        self.assertEqual(to_write, [])
+
+    def test_coach_slots_keep_the_gaps_from_unticked_rows(self):
+        conn = database.connect(":memory:")
+        # Rows 5 and 10 unticked, so eight players go to 1-4 and 6-9.
+        slots = {"A": [1, 2, 3, 4, 6, 7, 8, 9]}
+        roster = [{"user_id": 500 + i, "display_name": f"P{i}", "username": f"p{i}"}
+                  for i in range(1, 9)]
+        draft.create_league(
+            conn, guild_id=1, admin_channel_id=99, name="Ticked",
+            pools=[("A", 1300, roster)], budget=115, min_picks=1, max_picks=3,
+            base_timer=120, doc_kind="template", doc_url="https://example/x",
+            coach_slots=slots)
+
+        pool = draft.get_live_pool(conn, 1300)
+        assigned = [p["coach_number"] for p in draft.get_players(conn, pool["id"])]
+        self.assertEqual(assigned, [1, 2, 3, 4, 6, 7, 8, 9],
+                         "block 5 is skipped because its box is unticked")
+        self.assertEqual([p["draft_position"] for p in draft.get_players(conn, pool["id"])],
+                         list(range(1, 9)))
+
+    def test_more_players_than_ticked_rows_is_refused(self):
+        conn = database.connect(":memory:")
+        roster = [{"user_id": 600 + i, "display_name": f"P{i}", "username": f"p{i}"}
+                  for i in range(1, 5)]
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.create_league(
+                conn, guild_id=1, admin_channel_id=99, name="Too Many",
+                pools=[("A", 1301, roster)], budget=115, min_picks=1, max_picks=3,
+                base_timer=120, doc_kind="template", doc_url="https://example/x",
+                coach_slots={"A": [1, 2]})
+        self.assertIn("only has 2 ticked coach row", str(caught.exception))
+
+    def test_removal_shuffles_players_up_through_the_gaps(self):
+        conn = database.connect(":memory:")
+        roster = [{"user_id": 700 + i, "display_name": f"P{i}", "username": f"p{i}"}
+                  for i in range(1, 5)]
+        draft.create_league(
+            conn, guild_id=1, admin_channel_id=99, name="Gaps",
+            pools=[("A", 1302, roster)], budget=115, min_picks=1, max_picks=3,
+            base_timer=120, doc_kind="template", doc_url="https://example/x",
+            coach_slots={"A": [1, 3, 6, 9]})
+        pool = draft.get_live_pool(conn, 1302)
+        self.assertEqual([p["coach_number"] for p in draft.get_players(conn, pool["id"])],
+                         [1, 3, 6, 9])
+
+        draft.remove_player(conn, pool, 702)        # P2, who held block 3
+        left = draft.get_players(conn, pool["id"])
+        self.assertEqual([p["display_name"] for p in left], ["P1", "P3", "P4"])
+        self.assertEqual([p["coach_number"] for p in left], [1, 3, 6],
+                         "they move up into the earliest blocks the pool owns")
+
+
+
 if __name__ == "__main__":
     unittest.main()

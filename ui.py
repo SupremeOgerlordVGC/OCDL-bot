@@ -68,6 +68,22 @@ def is_administrator(interaction):
     return bool(interaction.guild and interaction.guild.owner_id == interaction.user.id)
 
 
+def _player_entry(member, user_id=None):
+    """One player as the bot records them.
+
+    `username` is the account name, which is what a league host is most
+    likely to have typed on the spreadsheet's Coaches tab; `display_name`
+    is their nickname on the server. Both are kept so either can be matched.
+    """
+    if member is None:
+        return {"user_id": user_id, "display_name": f"User {user_id}", "username": ""}
+    return {
+        "user_id": member.id,
+        "display_name": member.display_name,
+        "username": getattr(member, "name", "") or "",
+    }
+
+
 def players_from_role(role, rng=None):
     """Everyone holding a role, in a randomly shuffled draft order.
 
@@ -87,7 +103,7 @@ def players_from_role(role, rng=None):
 
     rng = rng or random.Random()
     rng.shuffle(members)
-    return [(member.id, member.display_name) for member in members]
+    return [_player_entry(member) for member in members]
 
 
 async def roster_from_options(guild, mentions, role, label):
@@ -133,7 +149,7 @@ async def parse_players(guild, text):
                 member = await guild.fetch_member(user_id)
             except discord.DiscordException:
                 member = None
-        players.append((user_id, member.display_name if member else f"User {user_id}"))
+        players.append(_player_entry(member, user_id))
     return players
 
 

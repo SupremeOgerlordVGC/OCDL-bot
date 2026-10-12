@@ -75,6 +75,13 @@ def normalize(name):
 COST_NOISE = str.maketrans("", "", "$£€¥, \t")
 
 
+def _is_ticked(value):
+    """Whether a spreadsheet tick box counts as checked."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().upper() in ("TRUE", "YES", "Y", "1", "✓", "X")
+
+
 def parse_cost(raw):
     """Cost as an int, or None when the Pokémon is banned or unpriced.
 
@@ -253,6 +260,58 @@ class SheetSync:
             values = block.get("values") or [[]]
             settings[key] = values[0][0] if values[0] else None
         return settings
+
+    def read_coach_slots(self, doc_url):
+        """Which coach rows are actually in the draft, grouped by pool.
+
+        A coach counts only when their "In schedule" box is ticked, so the
+        ticked rows are exactly the roster blocks the bot should fill. Gaps
+        are normal and must be respected: with rows 5 and 10 unticked, eight
+        pool A players belong in blocks 1-4 and 6-9, not 1-8.
+
+        Returns {"A": [coach numbers], "B": [...]} plus the names currently
+        in those rows, so /setup can report what it is about to overwrite.
+        """
+        layout = config.SHEET_LAYOUT
+        first, last = layout["coaches_first_row"], layout["coaches_last_row"]
+        tab = self._tab(doc_url, layout["coaches_tab"])
+
+        name_col = layout["coaches_name_column"]
+        pool_col = layout["coaches_pool_column"]
+        flag_col = layout["coaches_in_draft_column"]
+
+        try:
+            names, pools, flags = tab.batch_get(
+                [f"{name_col}{first}:{name_col}{last}",
+                 f"{pool_col}{first}:{pool_col}{last}",
+                 f"{flag_col}{first}:{flag_col}{last}"],
+                value_render_option="UNFORMATTED_VALUE",
+            )
+        except Exception as error:
+            raise SheetError(f"Could not read the {layout['coaches_tab']} tab: {error}") from error
+
+        def cell(block, index):
+            return block[index][0] if index < len(block) and block[index] else ""
+
+        slots = {"A": [], "B": []}
+        current = {}
+        for offset in range(last - first + 1):
+            coach_number = offset + 1
+            if not _is_ticked(cell(flags, offset)):
+                continue
+            label = str(cell(pools, offset)).strip().upper()
+            # Coaches!Z treats anything that is not "B" as pool A, so the bot
+            # matches that rather than inventing a third pool.
+            slots["B" if label == "B" else "A"].append(coach_number)
+            current[coach_number] = str(cell(names, offset)).strip()
+
+        if not slots["A"] and not slots["B"]:
+            raise SheetError(
+                f"No coach is marked as taking part. Tick the "
+                f"**{flag_col}** (\"In schedule\") boxes on the "
+                f"{layout['coaches_tab']} tab for the coaches who are drafting."
+            )
+        return slots, current
 
     def tiering_tab(self, doc_url):
         """Which tab of a template holds the price list, per its Settings."""
@@ -434,33 +493,40 @@ class SheetSync:
         return shift_column(SheetSync._roster_cell(draft_position, round_number),
                             config.SHEET_LAYOUT["tera_flag_offset"])
 
-    def write_coaches(self, doc_url, coaches):
+    def write_coaches(self, doc_url, coaches, manage_rows=None):
         """Write usernames and pool letters to the Coaches tab.
 
-        `coaches` is {coach_number: (display_name, pool_label)}. Every row is
-        written, blank where there is no coach, so removing somebody clears
-        their old name rather than leaving it behind.
+        `coaches` is {coach_number: (display_name, pool_label)}.
+
+        Only rows the bot is responsible for are touched. `manage_rows` is
+        the set of coach numbers it may write - normally the ticked rows of
+        the pools in this league. A managed row with no player is cleared, so
+        removing somebody does not leave their name behind; every other row,
+        including every unticked one, is left exactly as it is. That matters:
+        an unticked row is somebody the league host is keeping for their own
+        reasons, and is none of the bot's business.
         """
         layout = config.SHEET_LAYOUT
-        first, last = layout["coaches_first_row"], layout["coaches_last_row"]
-
-        names, pools = [], []
-        for row in range(first, last + 1):
-            name, pool_label = coaches.get(row - first + 1, ("", ""))
-            names.append([name])
-            pools.append([pool_label])
-
-        tab = self._tab(doc_url, layout["coaches_tab"])
+        first = layout["coaches_first_row"]
         name_col = layout["coaches_name_column"]
         pool_col = layout["coaches_pool_column"]
-        tab.batch_update(
-            [{"range": f"{name_col}{first}:{name_col}{last}", "values": names},
-             {"range": f"{pool_col}{first}:{pool_col}{last}", "values": pools}],
-            value_input_option="USER_ENTERED",
-        )
-        return len([1 for row in names if row[0]])
 
-    def full_sync(self, doc_url, tera_format, coaches, blocks):
+        rows = sorted(set(manage_rows) if manage_rows else set(coaches))
+        if not rows:
+            return 0
+
+        updates = []
+        for coach_number in rows:
+            name, pool_label = coaches.get(coach_number, ("", ""))
+            row = first + coach_number - 1
+            updates.append({"range": f"{name_col}{row}", "values": [[name]]})
+            updates.append({"range": f"{pool_col}{row}", "values": [[pool_label]]})
+
+        tab = self._tab(doc_url, layout["coaches_tab"])
+        tab.batch_update(updates, value_input_option="USER_ENTERED")
+        return sum(1 for number in rows if coaches.get(number, ("", ""))[0])
+
+    def full_sync(self, doc_url, tera_format, coaches, blocks, manage_rows=None):
         """Rewrite the coach list and every roster block from local data.
 
         `coaches` is {coach_number: (name, pool)} and `blocks` is
@@ -482,10 +548,16 @@ class SheetSync:
         rows = layout["roster_rows"]
         block_count = len(layout["roster_blocks"])
 
-        written_coaches = self.write_coaches(doc_url, coaches)
+        written_coaches = self.write_coaches(doc_url, coaches, manage_rows)
 
+        # Only rewrite the roster blocks the bot is responsible for, for the
+        # same reason: an untouched block may be somebody else's business.
+        managed = sorted(set(manage_rows) if manage_rows else set(blocks))
         updates = []
-        for coach_number in range(1, block_count + 1):
+        for coach_number in managed:
+            if not 1 <= coach_number <= block_count:
+                raise SheetError(
+                    f"Coach number {coach_number} has no roster block on the sheet.")
             entries = blocks.get(coach_number) or []
             padded = (list(entries) + [("", False)] * rows)[:rows]
 
@@ -507,7 +579,7 @@ class SheetSync:
         tab.batch_update(updates, value_input_option="USER_ENTERED")
 
         self.forget_cache(doc_url)
-        return {"coaches": written_coaches, "rosters": len(blocks),
+        return {"coaches": written_coaches, "rosters": len(managed),
                 "tab": self.roster_tab_name(tera_format)}
 
     # ---- the schedule ---------------------------------------------------

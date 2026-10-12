@@ -13,6 +13,7 @@ can never leave a half-finished change in the database.
 
 import json
 import random
+import re
 
 import config
 import database
@@ -350,6 +351,74 @@ def validate_pick(conn, draft, player, round_number, pokemon, cost,
 # --------------------------------------------------------------------------
 
 
+PLACEHOLDER_COACH = re.compile(r"^coach\s*\d+$")
+
+
+def is_placeholder_coach(name):
+    """True for a name the template ships with, like "Coach 7", or a blank.
+
+    Those rows are unclaimed, so the bot may write a player into them. A row
+    with a real username belongs to that person and is matched, never
+    overwritten.
+    """
+    if name is None:
+        return True
+    text = normalize(name)
+    return not text or bool(PLACEHOLDER_COACH.match(text))
+
+
+def match_coaches(players, slots, sheet_names):
+    """Match players to the Coaches rows that name them.
+
+    `players` is [{user_id, display_name, username}, ...]; `slots` is the
+    ticked coach numbers for this pool, in order; `sheet_names` maps a coach
+    number to the name currently in that row.
+
+    Two passes. First, any row holding a real username is given to the
+    player whose Discord username or display name matches it - so the order
+    somebody was @mentioned in does not have to match the spreadsheet.
+    Then any player still unmatched fills the leftover rows in order, which
+    is what happens with a fresh template full of "Coach 1" placeholders.
+
+    Returns (assignment, to_write, unclaimed):
+      assignment - {coach number: player}
+      to_write   - coach numbers whose name the bot should fill in, because
+                   the row was a placeholder
+      unclaimed  - rows holding a real name that no listed player matched
+    """
+    remaining = list(players)
+    assignment = {}
+
+    for slot in slots:
+        wanted = normalize(sheet_names.get(slot, ""))
+        if is_placeholder_coach(wanted):
+            continue
+        for player in remaining:
+            if wanted in (normalize(player.get("username")),
+                          normalize(player.get("display_name"))):
+                assignment[slot] = player
+                remaining.remove(player)
+                break
+
+    # Only unclaimed rows may be filled. A row naming a real person who was
+    # simply not listed must never be handed to somebody else - that would
+    # put one player's roster in another player's block.
+    to_write = []
+    free = [slot for slot in slots
+            if slot not in assignment
+            and is_placeholder_coach(sheet_names.get(slot, ""))]
+    for slot, player in zip(free, list(remaining)):
+        assignment[slot] = player
+        remaining.remove(player)
+        to_write.append(slot)
+
+    unclaimed = [slot for slot in slots
+                 if slot not in assignment
+                 and not is_placeholder_coach(sheet_names.get(slot, ""))]
+
+    return assignment, to_write, unclaimed, remaining
+
+
 def coach_numbers_for(label, count):
     """Which Coaches rows / roster blocks a pool's seats occupy.
 
@@ -372,10 +441,26 @@ def max_players_per_pool(doc_kind, pool_count):
     return config.MAX_PLAYERS
 
 
+def _roster_entries(entries):
+    """Normalise a pool's player list to [(user_id, display_name), ...].
+
+    Accepts plain tuples or the richer dicts the Discord layer builds, which
+    also carry the account's username for matching against the sheet.
+    """
+    rows = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            rows.append((entry["user_id"], entry["display_name"]))
+        else:
+            rows.append((entry[0], entry[1]))
+    return rows
+
+
 def create_league(conn, guild_id, admin_channel_id, name, pools,
                   budget, min_picks, max_picks, base_timer,
                   mode="full_season", doc_kind="none", doc_url=None,
-                  tera_budget=0, max_trades=0, season_weeks=0):
+                  tera_budget=0, max_trades=0, season_weeks=0,
+                  coach_slots=None):
     """Create a league in `setup` state, with one or two pools.
 
     `pools` is [(label, channel_id, [(user_id, display_name), ...]), ...],
@@ -437,6 +522,10 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
     seen_channels = {admin_channel_id}
     everyone = []
     limit = max_players_per_pool(doc_kind, len(pools))
+    coach_slots = coach_slots or {}
+
+    pools = [(label, channel_id, _roster_entries(roster))
+             for label, channel_id, roster in pools]
 
     for label, channel_id, roster in pools:
         if channel_id in seen_channels:
@@ -450,9 +539,17 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
             raise DraftError(
                 f"❌ <#{channel_id}> already has a draft running. Finish or cancel it first."
             )
-        if not config.MIN_PLAYERS <= len(roster) <= limit:
+        seats = coach_slots.get(label)
+        pool_limit = len(seats) if seats else limit
+        if len(roster) > pool_limit:
+            where = (f"the template only has {pool_limit} ticked coach row(s) for it"
+                     if seats else f"a pool holds at most {pool_limit} players")
             raise DraftError(
-                f"❌ Pool {label} needs between {config.MIN_PLAYERS} and {limit} players "
+                f"❌ Pool {label} has {len(roster)} players but {where}."
+            )
+        if len(roster) < config.MIN_PLAYERS:
+            raise DraftError(
+                f"❌ Pool {label} needs at least {config.MIN_PLAYERS} players "
                 f"(you listed {len(roster)})."
             )
         everyone += [user_id for user_id, _ in roster]
@@ -477,7 +574,10 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
             (league_id, label, channel_id),
         )
         pool_id = pool_cursor.lastrowid
-        coaches = coach_numbers_for(label, len(roster))
+        # Which Coaches rows / roster blocks this pool owns. With a template
+        # these come from its ticked "In schedule" boxes, so gaps are kept.
+        coaches = coach_slots.get(label) or coach_numbers_for(label, len(roster))
+        coaches = list(coaches)[:len(roster)]
 
         for seat, ((user_id, display_name), coach_number) in enumerate(
                 zip(roster, coaches), start=1):
@@ -1682,14 +1782,20 @@ def remove_player(conn, draft, user_id, release_roster=True):
 
     if draft["status"] == "setup":
         seat = player["draft_position"]
-        coach = player["coach_number"]
+        # The roster blocks this pool owns, including the one being freed.
+        # They are not necessarily contiguous - a template with unticked
+        # coaches leaves gaps - so the remaining players are shuffled up into
+        # the earliest of those blocks rather than simply decremented.
+        slots = sorted(row["coach_number"] for row in get_players(conn, draft["id"]))
         conn.execute("DELETE FROM players WHERE id = ?", (player["id"],))
-        # Close the gap so seats stay 1..N and coach numbers stay contiguous.
         conn.execute(
-            """UPDATE players SET draft_position = draft_position - 1,
-                                  coach_number = coach_number - 1
-               WHERE pool_id = ? AND draft_position > ?""",
+            "UPDATE players SET draft_position = draft_position - 1 "
+            "WHERE pool_id = ? AND draft_position > ?",
             (draft["id"], seat))
+
+        for index, row in enumerate(get_players(conn, draft["id"])):
+            conn.execute("UPDATE players SET coach_number = ? WHERE id = ?",
+                         (slots[index], row["id"]))
         removed_seat = True
     else:
         conn.execute("UPDATE players SET status = 'withdrawn' WHERE id = ?",
@@ -1919,6 +2025,14 @@ def export_for_sheet(conn, league_id):
     for pool in get_league_pools(conn, league_id):
         for player in get_players(conn, pool["id"]):
             coaches[player["coach_number"]] = (player["display_name"], pool["label"])
+
+            if player["status"] != "active":
+                # Somebody removed mid-draft keeps their row - they were in
+                # the league - but their block is cleared, which matches
+                # their Pokemon having gone back into the pool.
+                blocks[player["coach_number"]] = [("", False)] * rows
+                continue
+
             block = roster_block(conn, pool, player, rows)
             blocks[player["coach_number"]] = block
 

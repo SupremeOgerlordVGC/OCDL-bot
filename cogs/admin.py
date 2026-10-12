@@ -132,14 +132,80 @@ class AdminCog(commands.Cog):
 
         roster_a, shuffled_a = await ui.roster_from_options(
             interaction.guild, players, players_role, "A")
-        pools = [("A", draft_channel.id, roster_a)]
+        rosters = {"A": roster_a}
         shuffled = {"A": shuffled_a}
 
         if draft_channel_b is not None:
             roster_b, shuffled_b = await ui.roster_from_options(
                 interaction.guild, players_b, players_role_b, "B")
-            pools.append(("B", draft_channel_b.id, roster_b))
+            rosters["B"] = roster_b
             shuffled["B"] = shuffled_b
+
+        # With a template, the Coaches tab decides which roster blocks exist
+        # and who owns them. Only ticked "In schedule" rows take part, and a
+        # row already naming somebody belongs to them - so players are
+        # matched to their row rather than filled in mention order.
+        coach_slots = None
+        write_rows = set()
+        if doc_kind == "template":
+            slots, sheet_names = await asyncio.to_thread(
+                self.bot.sheets.read_coach_slots, doc_url)
+            coach_slots = {}
+
+            for label, roster in rosters.items():
+                available = slots.get(label, [])
+                if not available:
+                    raise rules.DraftError(
+                        f"❌ No coach on the template is marked as pool {label} with "
+                        f"its **In schedule** box ticked, so there is nowhere to put "
+                        f"those players."
+                    )
+                if len(roster) > len(available):
+                    raise rules.DraftError(
+                        f"❌ Pool {label} has {len(roster)} players but only "
+                        f"{len(available)} ticked coach rows on the template "
+                        f"(rows {', '.join(str(n) for n in available)}). Tick more "
+                        f"**In schedule** boxes, or list fewer players."
+                    )
+
+                assignment, to_write, unclaimed, leftover = rules.match_coaches(
+                    roster, available, sheet_names)
+                if leftover:
+                    raise rules.DraftError(
+                        f"❌ Could not place these pool {label} players: "
+                        f"{', '.join(p['display_name'] for p in leftover)}. "
+                        f"Every ticked row is already taken by somebody named on the "
+                        f"sheet."
+                    )
+
+                # Adopt the spreadsheet's spelling for anybody it already
+                # named. The bot then writes that same value back, so the
+                # Coaches tab is left exactly as the host typed it - and the
+                # names the bot shows match the ones on the sheet, which is
+                # what lets /postschedule tie fixtures back to accounts.
+                for number, entry in assignment.items():
+                    if number not in to_write:
+                        entry["display_name"] = sheet_names[number]
+
+                # Re-order the roster so seat order follows the sheet's rows.
+                ordered = [assignment[number] for number in sorted(assignment)]
+                rosters[label] = ordered
+                coach_slots[label] = sorted(assignment)
+                write_rows.update(to_write)
+
+                matched = len(ordered) - len(to_write)
+                if matched:
+                    notes.append(f"Pool {label}: matched {matched} player(s) to their "
+                                 f"row on the Coaches tab")
+                if to_write:
+                    notes.append(f"Pool {label}: filled {len(to_write)} unnamed row(s)")
+                if unclaimed:
+                    named = ", ".join(f"{sheet_names[n]} (row {n})" for n in unclaimed)
+                    notes.append(f"⚠️ Pool {label}: ticked but nobody listed them — {named}")
+
+        pools = [("A", draft_channel.id, rosters["A"])]
+        if draft_channel_b is not None:
+            pools.append(("B", draft_channel_b.id, rosters["B"]))
 
         league_id = rules.create_league(
             self.bot.conn,
@@ -157,6 +223,7 @@ class AdminCog(commands.Cog):
             tera_budget=tera_budget,
             max_trades=max_trades,
             season_weeks=weeks or 0,
+            coach_slots=coach_slots,
         )
         league = rules.get_league(self.bot.conn, league_id)
 
@@ -195,8 +262,12 @@ class AdminCog(commands.Cog):
         for pool in pool_rows:
             seats = rules.get_players(self.bot.conn, pool["id"])
             order = "\n".join(f"{p['draft_position']}. <@{p['user_id']}>" for p in seats)
-            how = (" *(order randomised by the bot)*"
-                   if shuffled.get(pool["label"]) else " *(order as listed)*")
+            if coach_slots:
+                how = " *(seat order follows the Coaches tab)*"
+            elif shuffled.get(pool["label"]):
+                how = " *(order randomised by the bot)*"
+            else:
+                how = " *(order as listed)*"
             summary += (f"\n**Pool {pool['label']}** — <#{pool['channel_id']}> "
                         f"({len(seats)} players){how}\n{order}\n")
 

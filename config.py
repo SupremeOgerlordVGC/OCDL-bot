@@ -162,6 +162,9 @@ SHEET_LAYOUT = {
     "coaches_tab": "Coaches",
     "coaches_name_column": "B",
     "coaches_pool_column": "Y",
+    # "In schedule" tick boxes. Only ticked rows take part in the draft, so
+    # these decide which roster blocks the bot fills. READ ONLY.
+    "coaches_in_draft_column": "AC",
     "coaches_first_row": 2,
     "coaches_last_row": 21,
 

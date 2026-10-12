@@ -592,9 +592,10 @@ class SheetWritePathTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FakeMember:
-    def __init__(self, user_id, name, bot=False):
+    def __init__(self, user_id, display_name, username=None, bot=False):
         self.id = user_id
-        self.display_name = name
+        self.display_name = display_name
+        self.name = username or display_name.lower()
         self.bot = bot
 
 
@@ -607,6 +608,13 @@ class FakeRole:
 class RosterFromRoleTests(unittest.IsolatedAsyncioTestCase):
     """Players can be given as a role, which the bot shuffles itself."""
 
+    def test_entries_carry_both_names_for_matching(self):
+        role = FakeRole([FakeMember(7, "Larry", username="bottledducky")])
+        entry = ui.players_from_role(role)[0]
+        self.assertEqual(entry["user_id"], 7)
+        self.assertEqual(entry["display_name"], "Larry")
+        self.assertEqual(entry["username"], "bottledducky")
+
     def test_a_role_becomes_a_shuffled_player_list(self):
         import random
         members = [FakeMember(i, f"P{i}") for i in range(1, 9)]
@@ -616,12 +624,12 @@ class RosterFromRoleTests(unittest.IsolatedAsyncioTestCase):
         second = ui.players_from_role(role, rng=random.Random(2))
 
         self.assertEqual(len(first), 8)
-        self.assertEqual({user_id for user_id, _ in first}, set(range(1, 9)))
+        self.assertEqual({entry["user_id"] for entry in first}, set(range(1, 9)))
         self.assertNotEqual(first, second, "the order should be random")
 
     def test_bots_in_the_role_are_skipped(self):
         role = FakeRole([FakeMember(1, "Larry"), FakeMember(2, "Helper", bot=True)])
-        names = [name for _, name in ui.players_from_role(role)]
+        names = [entry["display_name"] for entry in ui.players_from_role(role)]
         self.assertEqual(names, ["Larry"])
 
     def test_an_empty_role_explains_the_members_intent(self):
@@ -632,7 +640,7 @@ class RosterFromRoleTests(unittest.IsolatedAsyncioTestCase):
     async def test_mentions_keep_the_order_they_were_typed(self):
         rosters, shuffled = await ui.roster_from_options(
             None, "<@11> <@22> <@33>", None, "A")
-        self.assertEqual([user_id for user_id, _ in rosters], [11, 22, 33])
+        self.assertEqual([entry["user_id"] for entry in rosters], [11, 22, 33])
         self.assertFalse(shuffled)
 
     async def test_a_role_reports_that_it_was_shuffled(self):
