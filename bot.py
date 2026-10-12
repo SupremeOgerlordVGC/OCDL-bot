@@ -64,7 +64,7 @@ class DraftBot(commands.Bot):
         # it rather than refusing to start.
         intents = discord.Intents.default()
         if members_intent is None:
-            members_intent = config.REQUEST_MEMBERS_INTENT
+            members_intent = config.wants_members_intent()
         intents.members = bool(members_intent)
         self.members_intent = bool(members_intent)
         super().__init__(command_prefix="!", intents=intents)
@@ -278,17 +278,23 @@ def main():
             log.info("Google Sheets is disabled: %s", bot.sheets.reason)
         bot.run(token, log_handler=None)
 
+    wants_members = config.wants_members_intent()
+    if not wants_members:
+        log.info("members intent not requested, so players cannot be listed by role "
+                 "- @mention them instead (see REQUEST_MEMBERS_INTENT in config.py)")
+
     try:
-        start(config.REQUEST_MEMBERS_INTENT)
+        start(wants_members)
     except discord.PrivilegedIntentsRequired:
-        # Asking for the members intent without enabling it in the Developer
-        # Portal is refused at login. Carry on without it rather than
-        # refusing to start - only listing players by role needs it.
+        # Asking for an intent the Developer Portal has not approved makes
+        # Discord refuse the gateway, and it refuses it on every retry - so
+        # there is no point trying again with it. Carry on without.
         log.warning(
-            "The Server Members Intent is not enabled for this bot, so players cannot "
-            "be listed by role - @mention them instead. To enable it, go to "
-            "https://discord.com/developers/applications -> your app -> Bot -> "
-            "Privileged Gateway Intents -> Server Members Intent. Starting without it."
+            "The Server Members Intent is NOT enabled for this bot, so it was refused. "
+            "Starting without it: players must be @mentioned rather than given as a "
+            "role. To enable it, go to https://discord.com/developers/applications -> "
+            "your app -> Bot -> Privileged Gateway Intents -> Server Members Intent, "
+            "then set REQUEST_MEMBERS_INTENT=true in .env."
         )
         start(False)
 

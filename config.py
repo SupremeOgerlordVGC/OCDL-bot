@@ -24,14 +24,19 @@ BACKUP_INTERVAL_HOURS = 6
 BACKUPS_TO_KEEP = 40
 
 # Listing players by role needs Discord's privileged "Server Members
-# Intent", because otherwise the bot cannot see who holds a role. Switch it
-# on at https://discord.com/developers/applications -> your app -> Bot ->
-# Privileged Gateway Intents -> Server Members Intent.
+# Intent", because otherwise the bot cannot see who holds a role.
 #
-# If it is not switched on there, the bot notices at login, carries on
-# without it, and tells you - so nothing breaks, you just have to list
-# players by @mention instead of by role.
-REQUEST_MEMBERS_INTENT = True
+# This is OFF by default, and must stay off until you have enabled the
+# intent in the Developer Portal: asking for an intent Discord has not
+# approved makes it refuse the gateway connection over and over, so the bot
+# never finishes starting. Everything except `players_role` works without it.
+#
+# To turn it on:
+#   1. https://discord.com/developers/applications -> your app -> Bot ->
+#      Privileged Gateway Intents -> enable "Server Members Intent" -> Save
+#   2. put REQUEST_MEMBERS_INTENT=true in your .env
+#   3. restart the bot
+REQUEST_MEMBERS_INTENT = False
 
 # --------------------------------------------------------------------------
 # Draft rules
@@ -238,6 +243,19 @@ def get_dev_guild_id():
     """Return the optional development guild id as an int, or None."""
     raw = os.environ.get("DEV_GUILD_ID", "").strip()
     return int(raw) if raw.isdigit() else None
+
+
+def wants_members_intent():
+    """Whether to ask Discord for the privileged members intent.
+
+    The .env setting wins, so a server can turn it on without editing code.
+    """
+    raw = os.environ.get("REQUEST_MEMBERS_INTENT", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return REQUEST_MEMBERS_INTENT
 
 
 def get_credentials_file():

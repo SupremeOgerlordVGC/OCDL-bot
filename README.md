@@ -118,13 +118,20 @@ works normally.
    Never commit `.env`. It is already listed in `.gitignore`. If the token ever
    leaks, press **Reset Token** and paste the new one in.
 
-4. Still on the Bot tab, under **Privileged Gateway Intents**, switch on
-   **Server Members Intent** if you want to hand `/setup` a role instead of
-   typing the player list — Discord will not otherwise tell the bot who holds a
-   role. Leave *Message Content Intent* off; slash commands do not need it.
+4. **Privileged intents are off by default and should stay that way** unless you
+   want to hand `/setup` a role instead of a list of @mentions. Leave *Message
+   Content Intent* off — slash commands do not need it.
 
-   If you skip this the bot still starts normally, logs a one-line warning, and
-   simply asks you to @mention players instead.
+   To enable role lists, both halves are required, in this order:
+
+   1. On the **Bot** tab, under **Privileged Gateway Intents**, enable
+      **Server Members Intent** and save.
+   2. Put `REQUEST_MEMBERS_INTENT=true` in your `.env` and restart.
+
+   Doing step 2 without step 1 makes Discord refuse the gateway connection on
+   every attempt, so the bot logs in over HTTP, syncs its commands, and then
+   never finishes starting — it just repeats `session has been invalidated`.
+   That is why it is opt-in rather than tried hopefully.
 
 5. Open **OAuth2 → URL Generator**:
    - Scopes: `bot` and `applications.commands`
@@ -413,9 +420,10 @@ itself is the thing that breaks.
 A second pool uses `draft_channel_b` with either `players_b` or
 `players_role_b`, and needs a template.
 
-Listing by role needs Discord's privileged **Server Members Intent** — see
-[Getting a bot token](#getting-a-bot-token). Without it the bot still runs, and
-tells you to @mention players instead.
+Listing by role needs Discord's privileged **Server Members Intent**, which is
+**off by default** — see [Getting a bot token](#getting-a-bot-token) for the two
+steps to enable it. Without it everything else works; you just @mention players
+instead.
 
 Nobody can use the moderator commands until an Administrator has run
 `/draft-moderator`. Administrators and the server owner always have access.
@@ -796,6 +804,16 @@ turn clock stays paused, so nobody is skipped — fix it and restart the bot.
 **A pick worked but the sheet did not update.** That is by design — the pick is
 already saved locally. Check `journalctl -u draftbot -f` for the Google error,
 then run `/sync` once it is fixed.
+
+**It syncs commands, then never says "logged in", just repeating
+`session has been invalidated`.** You have `REQUEST_MEMBERS_INTENT=true` without
+having enabled **Server Members Intent** in the Developer Portal. Discord refuses
+the gateway every time. Either enable it there, or set it back to `false`.
+
+**New commands do not appear in Discord.** A global sync can take up to an hour.
+Set `DEV_GUILD_ID` to your server's ID and they register instantly. The bot also
+skips the sync entirely when the commands have not changed, so restarts are fast
+— change `DEV_GUILD_ID` and it syncs again automatically.
 
 **Nothing happens when a timer runs out.** Check the bot is actually running
 (`sudo systemctl status draftbot`). Timers only run while the process is alive;
