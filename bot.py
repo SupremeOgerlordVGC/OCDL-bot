@@ -103,7 +103,15 @@ class DraftBot(commands.Bot):
             if target is not None:
                 self.tree.copy_global_to(guild=target)
                 await self.tree.sync(guild=target)
-                log.info("commands synced to test guild %s", dev_guild)
+
+                # Also clear any global registrations. Without this, a bot
+                # that once synced globally and later synced to a guild
+                # shows every command TWICE in the menu - once from each
+                # registration - and Discord gives no hint why.
+                self.tree.clear_commands(guild=None)
+                await self.tree.sync()
+
+                log.info("commands synced to guild %s (global copies cleared)", dev_guild)
             else:
                 await self.tree.sync()
                 log.info("commands synced globally (may take up to an hour to appear)")
