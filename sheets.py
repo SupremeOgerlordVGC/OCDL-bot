@@ -56,6 +56,39 @@ class SheetError(Exception):
     """Something is wrong with the sheet, its layout, or the connection."""
 
 
+def _as_sheet_error(error, doing):
+    """Turn a Google API failure into advice, not a traceback.
+
+    Most of these are things the league host can fix in thirty seconds -
+    a protected range, a sheet not shared with the bot - so they deserve a
+    message saying which, rather than surfacing as "something went wrong".
+    """
+    if isinstance(error, SheetError):
+        return error
+
+    text = str(error)
+    if "protected cell" in text or "protected range" in text:
+        return SheetError(
+            f"those cells are **protected**, so I am not allowed to change them "
+            f"({doing}).\n"
+            f"On the sheet: right-click the tab → **Protect sheet**, or "
+            f"**Data → Protected sheets and ranges**, and either remove the "
+            f"protection or add this bot's service-account email as an editor of "
+            f"that range."
+        )
+    if "PERMISSION_DENIED" in text or "[403]" in text:
+        return SheetError(
+            f"I do not have permission ({doing}). Share the document with the "
+            f"bot's service-account email as an **Editor**."
+        )
+    if "[429]" in text or "RESOURCE_EXHAUSTED" in text or "Quota" in text:
+        return SheetError(
+            f"Google is rate limiting us ({doing}). Wait a minute and try again - "
+            f"nothing local was changed."
+        )
+    return SheetError(f"Google refused the request while {doing}: {text}")
+
+
 def extract_key(url_or_key):
     """Pull the spreadsheet id out of a full Google Sheets URL."""
     if not url_or_key:
@@ -498,16 +531,20 @@ class SheetSync:
 
         `coaches` is {coach_number: (display_name, pool_label)}.
 
-        Only rows the bot is responsible for are touched. `manage_rows` is
-        the set of coach numbers it may write - normally the ticked rows of
-        the pools in this league. A managed row with no player is cleared, so
-        removing somebody does not leave their name behind; every other row,
-        including every unticked one, is left exactly as it is. That matters:
-        an unticked row is somebody the league host is keeping for their own
-        reasons, and is none of the bot's business.
+        Only rows the bot is responsible for are touched, and only cells
+        whose value would actually change. That matters for two reasons: a
+        matched player has already adopted the sheet's own spelling, so
+        writing it back is a no-op, and league hosts often protect the
+        Coaches tab - so a pointless write is the difference between /sync
+        working and failing outright.
+
+        `manage_rows` is the set of coach numbers it may write, normally the
+        ticked rows of the pools in this league. A managed row with no player
+        is cleared, so removing somebody does not leave their name behind.
+        Every other row, including every unticked one, is left alone.
         """
         layout = config.SHEET_LAYOUT
-        first = layout["coaches_first_row"]
+        first, last = layout["coaches_first_row"], layout["coaches_last_row"]
         name_col = layout["coaches_name_column"]
         pool_col = layout["coaches_pool_column"]
 
@@ -515,15 +552,37 @@ class SheetSync:
         if not rows:
             return 0
 
+        tab = self._tab(doc_url, layout["coaches_tab"])
+        try:
+            current_names, current_pools = tab.batch_get(
+                [f"{name_col}{first}:{name_col}{last}",
+                 f"{pool_col}{first}:{pool_col}{last}"],
+                value_render_option="UNFORMATTED_VALUE",
+            )
+        except Exception as error:
+            raise _as_sheet_error(error, f"reading the {layout['coaches_tab']} tab")
+
+        def existing(block, coach_number):
+            index = coach_number - 1
+            if index < len(block) and block[index]:
+                return str(block[index][0]).strip()
+            return ""
+
         updates = []
         for coach_number in rows:
             name, pool_label = coaches.get(coach_number, ("", ""))
             row = first + coach_number - 1
-            updates.append({"range": f"{name_col}{row}", "values": [[name]]})
-            updates.append({"range": f"{pool_col}{row}", "values": [[pool_label]]})
+            if existing(current_names, coach_number) != str(name).strip():
+                updates.append({"range": f"{name_col}{row}", "values": [[name]]})
+            if existing(current_pools, coach_number) != str(pool_label).strip():
+                updates.append({"range": f"{pool_col}{row}", "values": [[pool_label]]})
 
-        tab = self._tab(doc_url, layout["coaches_tab"])
-        tab.batch_update(updates, value_input_option="USER_ENTERED")
+        if updates:
+            try:
+                tab.batch_update(updates, value_input_option="USER_ENTERED")
+            except Exception as error:
+                raise _as_sheet_error(error, f"writing to the {layout['coaches_tab']} tab")
+
         return sum(1 for number in rows if coaches.get(number, ("", ""))[0])
 
     def full_sync(self, doc_url, tera_format, coaches, blocks, manage_rows=None):
@@ -576,7 +635,11 @@ class SheetSync:
                 })
 
         tab = self._tab(doc_url, self.roster_tab_name(tera_format))
-        tab.batch_update(updates, value_input_option="USER_ENTERED")
+        try:
+            tab.batch_update(updates, value_input_option="USER_ENTERED")
+        except Exception as error:
+            raise _as_sheet_error(
+                error, f"writing to the {self.roster_tab_name(tera_format)} tab")
 
         self.forget_cache(doc_url)
         return {"coaches": written_coaches, "rosters": len(managed),
