@@ -2098,5 +2098,102 @@ class QueueBeforeTheDraftTests(unittest.TestCase):
 
 
 
+class MigrationTests(unittest.TestCase):
+    """An upgrade must not break an existing database.
+
+    CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,
+    so adding a column used to leave a deployed bot throwing "no such
+    column" on every command that touched it. This happened twice.
+    """
+
+    def build_old_database(self):
+        import sqlite3
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        old = sqlite3.connect(path)
+        old.executescript("""
+            CREATE TABLE leagues (id INTEGER PRIMARY KEY, guild_id INTEGER, name TEXT,
+              admin_channel_id INTEGER, mode TEXT, doc_kind TEXT, doc_url TEXT,
+              budget INTEGER, tera_budget INTEGER, min_picks INTEGER, max_picks INTEGER,
+              base_timer INTEGER, max_trades INTEGER, status TEXT, created_at TEXT,
+              started_at TEXT, finished_at TEXT);
+            CREATE TABLE pools (id INTEGER PRIMARY KEY, league_id INTEGER, label TEXT,
+              channel_id INTEGER, status TEXT, current_round INTEGER,
+              current_turn_index INTEGER, turn_deadline REAL, queue_exhausted INTEGER,
+              halved_this_turn INTEGER, started_at TEXT, finished_at TEXT);
+            CREATE VIEW pool_view AS SELECT pools.*, leagues.name AS league_name
+              FROM pools JOIN leagues ON leagues.id = pools.league_id;
+            INSERT INTO leagues (id, name, status, budget, min_picks, max_picks,
+              base_timer, mode, doc_kind) VALUES
+              (1, 'Old League', 'setup', 115, 1, 3, 120, 'full_season', 'none');
+            INSERT INTO pools (id, league_id, label, channel_id, status)
+              VALUES (1, 1, 'A', 4242, 'setup');
+        """)
+        old.commit()
+        old.close()
+        return path
+
+    def test_missing_columns_are_added_and_data_survives(self):
+        path = self.build_old_database()
+        try:
+            conn = database.connect(path)
+
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(pools)")}
+            self.assertIn("scheduled_start", columns)
+
+            league = conn.execute("SELECT name FROM leagues").fetchone()
+            self.assertEqual(league["name"], "Old League", "existing data must survive")
+            conn.close()
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(path + suffix):
+                    os.remove(path + suffix)
+
+    def test_stale_views_are_rebuilt(self):
+        path = self.build_old_database()
+        try:
+            conn = database.connect(path)
+            columns = [d[0] for d in
+                       conn.execute("SELECT * FROM pool_view LIMIT 0").description]
+            # The old view had almost none of these.
+            for needed in ("scheduled_start", "tera_budget", "max_picks", "doc_kind"):
+                self.assertIn(needed, columns)
+
+            # And the queries that use it actually run.
+            self.assertEqual(draft.due_scheduled_pools(conn), [])
+            self.assertIsNotNone(draft.get_live_pool(conn, 4242))
+            conn.close()
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(path + suffix):
+                    os.remove(path + suffix)
+
+    def test_migrating_twice_is_harmless(self):
+        path = self.build_old_database()
+        try:
+            database.connect(path).close()
+            conn = database.connect(path)
+            self.assertEqual(database.migrate(conn), [],
+                             "a second run should have nothing to add")
+            conn.close()
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(path + suffix):
+                    os.remove(path + suffix)
+
+    def test_every_added_column_names_a_real_table(self):
+        conn = database.connect(":memory:")
+        tables = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        for table, column, _ in database.ADDED_COLUMNS:
+            with self.subTest(column=f"{table}.{column}"):
+                self.assertIn(table, tables)
+                columns = {row["name"] for row in conn.execute(
+                    f"PRAGMA table_info({table})")}
+                self.assertIn(column, columns,
+                              "ADDED_COLUMNS must match the current schema")
+
+
+
 if __name__ == "__main__":
     unittest.main()

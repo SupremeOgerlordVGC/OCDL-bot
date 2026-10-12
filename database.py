@@ -29,6 +29,7 @@ Two tables deserve a note:
   Pokemon dropped in a trade correctly becomes available again.
 """
 
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -278,8 +279,52 @@ FROM pools JOIN leagues ON leagues.id = pools.league_id;
 """
 
 
+# Columns added after the first release. `CREATE TABLE IF NOT EXISTS` does
+# nothing to a table that already exists, so an existing database needs them
+# adding by hand - otherwise an upgrade breaks every command that touches
+# the new column. Append to this list whenever you add one; it is applied on
+# every connect and is safe to run repeatedly.
+ADDED_COLUMNS = [
+    ("leagues", "season_weeks", "INTEGER NOT NULL DEFAULT 0"),
+    ("players", "status", "TEXT NOT NULL DEFAULT 'active'"),
+    ("players", "tera_budget_remaining", "INTEGER NOT NULL DEFAULT 0"),
+    ("pools", "scheduled_start", "REAL"),
+    ("picks", "tera_captain", "INTEGER NOT NULL DEFAULT 0"),
+    ("rosters", "tera_captain", "INTEGER NOT NULL DEFAULT 0"),
+    ("queued_picks", "tera_captain", "INTEGER NOT NULL DEFAULT 0"),
+    ("makeups", "created_turn", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+# Views are rebuilt from scratch on every connect. `CREATE VIEW IF NOT
+# EXISTS` would keep a stale definition that is missing newly added columns.
+VIEWS = ["pool_view"]
+
+
+def migrate(conn):
+    """Bring an existing database up to the current schema.
+
+    Deliberately simple: add any missing columns, then rebuild the views.
+    Both steps are safe to repeat, so this just runs on every start rather
+    than tracking version numbers.
+    """
+    added = []
+    for table, column, definition in ADDED_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue                    # the table itself is new; SCHEMA made it
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            added.append(f"{table}.{column}")
+
+    for view in VIEWS:
+        conn.execute(f"DROP VIEW IF EXISTS {view}")
+
+    conn.commit()
+    return added
+
+
 def connect(path=None):
-    """Open the database and make sure the schema exists."""
+    """Open the database, bring the schema up to date, and return it."""
     path = path or config.DB_PATH
 
     conn = sqlite3.connect(path, check_same_thread=False)
@@ -291,8 +336,16 @@ def connect(path=None):
     # default journal mode, which matters on a cloud box that may reboot.
     if path != ":memory:":
         conn.execute("PRAGMA journal_mode = WAL")
+    # Create anything missing, add columns an older database lacks, then
+    # create the views again now that every column exists.
+    conn.executescript(SCHEMA)
+    added = migrate(conn)
     conn.executescript(SCHEMA)
     conn.commit()
+
+    if added:
+        logging.getLogger("draftbot.database").info(
+            "database upgraded, added: %s", ", ".join(added))
     return conn
 
 
