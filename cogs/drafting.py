@@ -186,7 +186,9 @@ class DraftingCog(commands.Cog):
     )
     async def queuepick(self, interaction: discord.Interaction, round: int,
                         pokemon: str, costs: str = None, tera: str = None):
-        draft = rules.require_active_pool(self.bot.conn, interaction.channel_id)
+        # Deliberately not require_active_pool: queueing before the draft
+        # starts is the point, so a round 1 pick can fire automatically.
+        draft = rules.require_live_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         names = rules.parse_pokemon_list(pokemon, config.MAX_QUEUE_LENGTH)
@@ -263,7 +265,9 @@ class DraftingCog(commands.Cog):
         await interaction.followup.send(
             f"📝 Queue saved for **Round {round}**:\n{listing}\n\n"
             f"When your turn arrives the bot drafts the first one that is still "
-            f"available and affordable.",
+            f"available and affordable."
+            + ("\nThe draft has not started yet, so this will fire as soon as it does."
+               if draft["status"] == "setup" else ""),
             ephemeral=True,
         )
 

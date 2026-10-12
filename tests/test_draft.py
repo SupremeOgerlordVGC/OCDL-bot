@@ -1969,5 +1969,134 @@ class CoachMatchingTests(unittest.TestCase):
 
 
 
+class ScheduledStartTests(unittest.TestCase):
+    """A draft can be set to begin by itself at a Discord timestamp."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.pool = make_draft(self.conn, channel_id=1400, players=3, budget=100,
+                               min_picks=1, max_picks=3, start=False)
+
+    def test_discord_timestamps_in_every_style(self):
+        now = 1760000000
+        for raw in ["<t:1760000100:F>", "<t:1760000100:R>", "<t:1760000100:t>",
+                    "<t:1760000100>", "1760000100",
+                    "starts at <t:1760000100:F> sharp"]:
+            with self.subTest(raw=raw):
+                self.assertEqual(draft.parse_start_time(raw, now=now), 1760000100.0)
+
+    def test_unreadable_times_are_refused(self):
+        for raw in ["tomorrow", "8pm", "", None, "<t:abc>"]:
+            with self.subTest(raw=raw):
+                with self.assertRaises(draft.DraftError):
+                    draft.parse_start_time(raw, now=1760000000)
+
+    def test_a_time_in_the_past_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.parse_start_time("<t:1759999999:F>", now=1760000000)
+        self.assertIn("already passed", str(caught.exception))
+
+    def test_scheduling_stores_the_time_and_does_not_start(self):
+        when = 1760000100.0
+        updated = draft.schedule_pool_start(self.conn, self.pool, when)
+        self.assertEqual(updated["scheduled_start"], when)
+        self.assertEqual(updated["status"], "setup", "it must not start yet")
+
+    def test_a_pool_becomes_due_only_at_its_time(self):
+        when = 1760000100.0
+        draft.schedule_pool_start(self.conn, self.pool, when)
+
+        self.assertEqual(draft.due_scheduled_pools(self.conn, now=when - 1), [])
+        due = draft.due_scheduled_pools(self.conn, now=when)
+        self.assertEqual([row["id"] for row in due], [self.pool["id"]])
+
+    def test_starting_clears_the_schedule(self):
+        draft.schedule_pool_start(self.conn, self.pool, 1760000100.0)
+        live = draft.get_pool(self.conn, self.pool["id"])
+        draft.start_pool(self.conn, live)
+
+        started = draft.get_pool(self.conn, self.pool["id"])
+        self.assertEqual(started["status"], "active")
+        self.assertIsNone(started["scheduled_start"],
+                          "a started pool must not be picked up again")
+        self.assertEqual(draft.due_scheduled_pools(self.conn, now=2000000000), [])
+
+    def test_a_schedule_can_be_cancelled(self):
+        draft.schedule_pool_start(self.conn, self.pool, 1760000100.0)
+        live = draft.get_pool(self.conn, self.pool["id"])
+        draft.cancel_scheduled_start(self.conn, live)
+        self.assertIsNone(draft.get_pool(self.conn, self.pool["id"])["scheduled_start"])
+
+    def test_an_already_started_pool_cannot_be_scheduled(self):
+        live = draft.get_pool(self.conn, self.pool["id"])
+        draft.start_pool(self.conn, live)
+        live = draft.get_pool(self.conn, self.pool["id"])
+        with self.assertRaises(draft.DraftError):
+            draft.schedule_pool_start(self.conn, live, 1760000100.0)
+
+
+class QueueBeforeTheDraftTests(unittest.TestCase):
+    """Queueing before the draft starts is what makes an unattended round 1
+    pick possible."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.pool = make_draft(self.conn, channel_id=1401, players=3, budget=100,
+                               min_picks=1, max_picks=3, start=False)
+
+    def test_a_queue_can_be_set_before_the_draft_starts(self):
+        self.assertEqual(self.pool["status"], "setup")
+        draft.queue_picks(self.conn, self.pool, user(1), 1,
+                          ["Garchomp", "Heatran"], [12, 10])
+
+        player = draft.get_player(self.conn, self.pool["id"], user(1))
+        queued = draft.get_queue(self.conn, self.pool["id"], player["id"], 1)
+        self.assertEqual([row["pokemon"] for row in queued], ["Garchomp", "Heatran"])
+
+    def test_round_one_fires_the_moment_the_draft_starts(self):
+        draft.queue_picks(self.conn, self.pool, user(1), 1, ["Garchomp"], [12])
+        draft.queue_picks(self.conn, self.pool, user(2), 1, ["Heatran"], [10])
+
+        live = draft.get_pool(self.conn, self.pool["id"])
+        events = draft.start_pool(self.conn, live)
+
+        auto = [e for e in events if e["type"] == "auto_pick"]
+        self.assertEqual([(e["display_name"], e["pokemon"]) for e in auto],
+                         [("Player1", "Garchomp"), ("Player2", "Heatran")])
+
+        # Play rolls straight on to the first player who did not queue.
+        after = draft.get_pool(self.conn, self.pool["id"])
+        self.assertEqual(draft.current_player(self.conn, after)["display_name"], "Player3")
+        self.assertEqual(draft.get_player(self.conn, self.pool["id"],
+                                          user(1))["budget_remaining"], 88)
+
+    def test_everybody_queueing_plays_the_whole_first_round(self):
+        for seat in (1, 2, 3):
+            draft.queue_picks(self.conn, self.pool, user(seat), 1, [f"Mon{seat}"], [5])
+
+        live = draft.get_pool(self.conn, self.pool["id"])
+        draft.start_pool(self.conn, live)
+
+        picks = draft.round_picks(self.conn, self.pool["id"], 1)
+        self.assertEqual([p["pokemon"] for p in picks], ["Mon1", "Mon2", "Mon3"])
+        after = draft.get_pool(self.conn, self.pool["id"])
+        self.assertEqual(after["current_round"], 2, "round 1 completed on its own")
+
+    def test_a_queue_still_cannot_be_set_for_a_finished_draft(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=1402, players=2, budget=50,
+                          min_picks=1, max_picks=1)
+        for _ in range(2):
+            live = draft.get_pool(conn, pool["id"])
+            player = draft.current_player(conn, live)
+            draft.make_pick(conn, live, player["user_id"], 1, f"M{player['id']}", 1)
+
+        finished = draft.get_pool(conn, pool["id"])
+        self.assertEqual(finished["status"], "complete")
+        with self.assertRaises(draft.DraftError):
+            draft.queue_picks(conn, finished, user(1), 1, ["Late"], [5])
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -331,24 +331,39 @@ class AdminCog(commands.Cog):
 
     # ---- /draft ---------------------------------------------------------
 
-    @app_commands.command(name="draft", description="Start the draft in this pool's channel.")
-    async def start_draft(self, interaction: discord.Interaction):
+    @app_commands.command(
+        name="draft",
+        description="Start this pool's draft, now or at a scheduled time.",
+    )
+    @app_commands.describe(
+        at="Optional: a Discord timestamp like <t:1760000000:F> to start automatically",
+    )
+    async def start_draft(self, interaction: discord.Interaction, at: str = None):
         pool = rules.require_live_pool(self.bot.conn, interaction.channel_id)
         ui.require_moderator(self.bot, interaction)
 
-        events = rules.start_pool(self.bot.conn, pool)
+        if at:
+            when = rules.parse_start_time(at)
+            rules.schedule_pool_start(self.bot.conn, pool, when)
 
-        tera = ""
-        if pool["tera_budget"]:
-            tera = (f" · **{pool['tera_budget']}** Tera points, up to "
-                    f"{config.MAX_TERA_CAPTAINS} Tera Captains")
-        posted = await ui.safe_send(
-            interaction.channel,
-            f"🚨 **{pool['league_name']} — Pool {pool['label']} HAS BEGUN!** 🚨\n"
-            f"{rules.player_count(self.bot.conn, pool['id'])} players · "
-            f"{pool['max_picks']} rounds · **{pool['budget']}** points each{tera}.\n"
-            f"`/edit` is now locked. `/pick` and `/queuepick` are open.",
-        )
+            stamp = int(when)
+            await interaction.response.send_message(
+                f"🗓️ **{pool['league_name']} — Pool {pool['label']}** will start "
+                f"automatically at <t:{stamp}:F> (<t:{stamp}:R>).\n"
+                f"Run `/draft` with no time to start it sooner.",
+                ephemeral=True,
+            )
+            await ui.safe_send(
+                interaction.channel,
+                f"🗓️ **{pool['league_name']} — Pool {pool['label']}** starts "
+                f"<t:{stamp}:R>, at <t:{stamp}:F>.\n"
+                f"`/queuepick round:1 pokemon:...` now and the bot will make your "
+                f"first pick for you if you cannot be here.",
+            )
+            return
+
+        events = rules.start_pool(self.bot.conn, pool)
+        posted = await self.announce_start(interaction.channel, pool)
         # announce() starts the first timer whether or not it can post, so
         # the draft is never left active with nobody on the clock.
         await ui.announce(self.bot, pool["id"], events, channel=interaction.channel)
@@ -357,6 +372,20 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(
             f"✅ Pool {pool['label']} of **{pool['league_name']}** has started.{note}",
             ephemeral=True)
+
+    async def announce_start(self, channel, pool):
+        """The public "we have begun" message. Shared with the scheduler."""
+        tera = ""
+        if pool["tera_budget"]:
+            tera = (f" · **{pool['tera_budget']}** Tera points, up to "
+                    f"{config.MAX_TERA_CAPTAINS} Tera Captains")
+        return await ui.safe_send(
+            channel,
+            f"🚨 **{pool['league_name']} — Pool {pool['label']} HAS BEGUN!** 🚨\n"
+            f"{rules.player_count(self.bot.conn, pool['id'])} players · "
+            f"{pool['max_picks']} rounds · **{pool['budget']}** points each{tera}.\n"
+            f"`/edit` is now locked. `/pick` and `/queuepick` are open.",
+        )
 
     # ---- /canceldraft and /archive --------------------------------------
 

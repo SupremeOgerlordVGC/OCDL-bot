@@ -118,6 +118,7 @@ class DraftBot(commands.Bot):
             self._remember_sync(signature)
 
         self.automatic_backup.start()
+        self.start_scheduled_drafts.start()
 
     # ---- command sync bookkeeping ---------------------------------------
 
@@ -228,6 +229,44 @@ class DraftBot(commands.Bot):
         await ui.announce(self, draft_id, events)
 
     # ---- housekeeping ---------------------------------------------------
+
+    @tasks.loop(seconds=20)
+    async def start_scheduled_drafts(self):
+        """Begin any draft whose scheduled time has arrived.
+
+        The schedule lives in the database rather than in memory, so this
+        picks it up again after a restart - a draft set to begin overnight
+        still begins even if the bot was redeployed in between.
+        """
+        try:
+            due = rules.due_scheduled_pools(self.conn)
+        except Exception:
+            log.exception("could not look up scheduled drafts")
+            return
+
+        for pool in due:
+            try:
+                events = rules.start_pool(self.conn, pool)
+            except rules.DraftError as error:
+                log.warning("scheduled start for pool %s refused: %s", pool["id"], error)
+                rules.cancel_scheduled_start(self.conn, pool)
+                continue
+            except Exception:
+                log.exception("scheduled start failed for pool %s", pool["id"])
+                continue
+
+            log.info("pool %s (%s pool %s) started on schedule",
+                     pool["id"], pool["league_name"], pool["label"])
+
+            channel = self.get_channel(pool["channel_id"])
+            cog = self.get_cog("AdminCog")
+            if cog is not None and channel is not None:
+                await cog.announce_start(channel, pool)
+            await ui.announce(self, pool["id"], events, channel=channel)
+
+    @start_scheduled_drafts.before_loop
+    async def before_scheduled_drafts(self):
+        await self.wait_until_ready()
 
     @tasks.loop(hours=config.BACKUP_INTERVAL_HOURS)
     async def automatic_backup(self):

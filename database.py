@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS pools (
     -- 0-based seat index inside the current round's order
     current_turn_index  INTEGER NOT NULL DEFAULT 0,
     turn_deadline       REAL,
+    -- Unix time this pool should start drafting by itself, or NULL for
+    -- "whenever a moderator runs /draft".
+    scheduled_start     REAL,
     -- 1 when the current player's queue was checked and nothing was usable
     queue_exhausted     INTEGER NOT NULL DEFAULT 0,
     -- 1 once the current player's timer has been reduced during this turn.
@@ -254,6 +257,7 @@ SELECT pools.id               AS id,
        pools.current_round    AS current_round,
        pools.current_turn_index AS current_turn_index,
        pools.turn_deadline    AS turn_deadline,
+       pools.scheduled_start  AS scheduled_start,
        pools.queue_exhausted  AS queue_exhausted,
        pools.halved_this_turn AS halved_this_turn,
        leagues.guild_id         AS guild_id,

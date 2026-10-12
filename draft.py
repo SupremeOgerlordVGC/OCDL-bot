@@ -14,6 +14,7 @@ can never leave a half-finished change in the database.
 import json
 import random
 import re
+import time
 
 import config
 import database
@@ -45,6 +46,46 @@ def snake_order(player_count, round_number):
     """
     seats = list(range(1, player_count + 1))
     return seats if round_number % 2 == 1 else seats[::-1]
+
+
+# <t:1760000000:F> and friends - what Discord inserts when you paste a
+# timestamp. The trailing style letter is optional.
+DISCORD_TIMESTAMP = re.compile(r"<t:(-?\d+)(?::[tTdDfFR])?>")
+
+
+def parse_start_time(raw, now=None):
+    """Read a Discord timestamp (or a bare unix time) as a unix timestamp.
+
+    Discord timestamps are the easiest way for a host to name an exact
+    moment without any timezone confusion: type `<t:1760000000:F>` and
+    everybody sees it in their own local time.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise DraftError("❌ Give a time to start at.")
+
+    match = DISCORD_TIMESTAMP.search(text)
+    if match:
+        when = int(match.group(1))
+    elif re.fullmatch(r"-?\d{9,11}", text):
+        when = int(text)            # a bare unix timestamp
+    else:
+        raise DraftError(
+            "❌ I could not read that as a time. Paste a Discord timestamp like "
+            "`<t:1760000000:F>` — in Discord, type `/` then use a timestamp, or "
+            "generate one at <https://hammertime.cyou>. A plain unix timestamp "
+            "works too."
+        )
+
+    now = now if now is not None else time.time()
+    if when <= now:
+        raise DraftError(
+            "❌ That time has already passed. Pick a time in the future, or run "
+            "`/draft` with no time to start right away."
+        )
+    if when > now + 365 * 24 * 3600:
+        raise DraftError("❌ That is more than a year away.")
+    return float(when)
 
 
 def parse_pokemon_list(raw, limit):
@@ -784,7 +825,8 @@ def start_pool(conn, draft):
     stamp = database.now()
     conn.execute(
         """UPDATE pools SET status = 'active', current_round = 1, current_turn_index = 0,
-                            queue_exhausted = 0, halved_this_turn = 0, started_at = ?
+                            queue_exhausted = 0, halved_this_turn = 0,
+                            scheduled_start = NULL, started_at = ?
            WHERE id = ?""",
         (stamp, draft["id"]),
     )
@@ -795,6 +837,36 @@ def start_pool(conn, draft):
     )
     conn.commit()
     return begin_turn(conn, draft["id"])
+
+
+def schedule_pool_start(conn, pool, when):
+    """Arrange for a pool to begin drafting on its own at `when`.
+
+    Stored on the pool rather than held in memory, so a restart picks the
+    schedule back up instead of quietly forgetting it.
+    """
+    if pool["status"] != "setup":
+        raise DraftError("❌ This pool has already started.")
+
+    conn.execute("UPDATE pools SET scheduled_start = ? WHERE id = ?", (when, pool["id"]))
+    conn.commit()
+    return get_pool(conn, pool["id"])
+
+
+def cancel_scheduled_start(conn, pool):
+    conn.execute("UPDATE pools SET scheduled_start = NULL WHERE id = ?", (pool["id"],))
+    conn.commit()
+    return get_pool(conn, pool["id"])
+
+
+def due_scheduled_pools(conn, now=None):
+    """Pools whose scheduled start time has arrived."""
+    now = now if now is not None else time.time()
+    return conn.execute(
+        "SELECT * FROM pool_view WHERE status = 'setup' AND scheduled_start IS NOT NULL "
+        "AND scheduled_start <= ? ORDER BY scheduled_start",
+        (now,),
+    ).fetchall()
 
 
 def advance_turn(conn, pool_id):
@@ -1221,8 +1293,13 @@ def make_makeup_pick(conn, draft, user_id, round_number, pokemon, cost, tera_cap
 
 
 def queue_picks(conn, draft, user_id, round_number, pokemon_names, costs=None, teras=None):
-    """/queuepick - store up to five fallbacks for one of your own turns."""
-    if draft["status"] != "active":
+    """/queuepick - store up to five fallbacks for one of your own turns.
+
+    Allowed before the draft starts as well as during it, so a player who
+    cannot attend the opening can have their round 1 pick made for them the
+    moment it begins.
+    """
+    if draft["status"] not in ("setup", "active"):
         raise DraftError("❌ This draft is not running.")
 
     player = require_player(conn, draft["id"], user_id)
