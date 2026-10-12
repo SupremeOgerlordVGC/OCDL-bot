@@ -15,7 +15,7 @@ requirement.
 4. [Getting a bot token](#getting-a-bot-token)
 5. [Hosting on a Hetzner VPS](#hosting-on-a-hetzner-vps)
 6. [Backups](#backups)
-7. [Command reference](#command-reference) · [player-only version](PLAYERS.md)
+7. [Command reference](#command-reference) · to paste into Discord: [players](PLAYERS.md) · [moderators](MODERATORS.md)
 8. [Documents](#documents)
 9. [Design decisions](#design-decisions)
 10. [Tests](#tests)
@@ -437,9 +437,12 @@ Nobody can use the moderator commands until an Administrator has run
 | `/makeuppick round pokemon cost [tera_captain]` | Any player | Resolves a round you were skipped in. Does not change whose turn it is. |
 | `/editpick round pokemon cost [tera_captain] [player]` | Own picks; moderators for anyone | Replaces a pick, correcting roster, budgets, availability and history. A moderator can also use it to *add* a pick for a round with nothing recorded. |
 
-> **Sending the commands to your players:** [`PLAYERS.md`](PLAYERS.md) has a
-> player-only version of this list, in blocks sized to paste straight into
-> Discord. It leaves the moderator commands out and explains the timer rules.
+> **Guides to paste into Discord**, both in blocks sized for Discord's message
+> limit:
+> [`PLAYERS.md`](PLAYERS.md) for players — the pick commands and the timer
+> rules, with the moderator commands deliberately left out.
+> [`MODERATORS.md`](MODERATORS.md) for the people running drafts — setup,
+> starting, fixing things mid-draft, trades and the spreadsheet.
 
 ### Looking things up
 
@@ -756,7 +759,7 @@ turn opens again and the player is pinged.
 python3 -m unittest discover -s tests -v
 ```
 
-194 tests, no Discord connection and no network needed. They cover snake order
+218 tests, no Discord connection and no network needed. They cover snake order
 for every player count, round transitions, channel and pool isolation, timer
 halving and the makeup cascade, the snake-boundary case (one halving for two
 lost rounds, none if the queue was sniped), queued picks and the
@@ -769,7 +772,9 @@ outage, behaviour when the bot is refused permission to post, restart recovery,
 the spreadsheet cell mapping, the arguments actually sent to the sheet, and a
 round-robin schedule generation for every player count, player removal before
 and during a draft, role-based player lists, skip-count corrections, matching players to ticked
-Coaches rows with gaps, and a randomised full-draft
+Coaches rows with gaps, scheduled starts, queueing before the draft begins,
+upgrading an out-of-date database, every command's exact option set, and a
+randomised full-draft
 simulation that checks the invariants that matter —
 nobody owns the same Pokémon twice, budgets never go negative, spent +
 remaining always equals the starting budget, and pick order has no gaps.
