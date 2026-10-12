@@ -154,21 +154,25 @@ class DraftingCog(commands.Cog):
     @app_commands.describe(
         round="The round you are picking in",
         pokemon="The Pokémon you want",
-        cost="Its draft cost in points",
+        cost="Its draft cost in points (the Tera price if it is a Tera Captain)",
+        tera_captain="Tera formats only: make this one of your Tera Captains",
     )
     @app_commands.autocomplete(pokemon=pokemon_autocomplete)
-    async def pick(self, interaction: discord.Interaction, round: int, pokemon: str, cost: int):
+    async def pick(self, interaction: discord.Interaction, round: int, pokemon: str,
+                   cost: int, tera_captain: bool = False):
         draft = rules.require_active_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         is_admin = ui.is_moderator(self.bot, interaction)
-        pokemon = await self.resolve_pokemon(draft, pokemon, cost)
+        pokemon = await self.resolve_pokemon(draft, pokemon, cost, tera_captain)
 
         pick, events = rules.make_pick(self.bot.conn, draft, interaction.user.id,
-                                       round, pokemon, cost, acting_as_admin=is_admin)
+                                       round, pokemon, cost, tera_captain=tera_captain,
+                                       acting_as_admin=is_admin)
 
         await interaction.followup.send(
-            f"✅ **{pick['pokemon']}** drafted for **{cost}** points.", ephemeral=True
+            f"✅ **{pick['pokemon']}** drafted for **{cost}** points"
+            + (" as a **Tera Captain**." if tera_captain else "."), ephemeral=True
         )
         await ui.announce(self.bot, draft["id"], events, channel=interaction.channel)
 
@@ -319,20 +323,23 @@ class DraftingCog(commands.Cog):
     @app_commands.describe(
         round="The round of the pick to change",
         pokemon="The Pokémon it should be instead",
-        cost="Its draft cost in points",
-        player="Admins only: whose pick to edit",
+        cost="Its draft cost in points (the Tera price if it is a Tera Captain)",
+        tera_captain="Tera formats only: whether this should be a Tera Captain",
+        player="Moderators only: whose pick to edit",
     )
     @app_commands.autocomplete(pokemon=pokemon_autocomplete)
     async def editpick(self, interaction: discord.Interaction, round: int, pokemon: str,
-                       cost: int, player: discord.Member = None):
+                       cost: int, tera_captain: bool = False,
+                       player: discord.Member = None):
         draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         await interaction.response.defer(ephemeral=True)
 
         is_admin = ui.is_moderator(self.bot, interaction)
-        pokemon = await self.resolve_pokemon(draft, pokemon, cost)
+        pokemon = await self.resolve_pokemon(draft, pokemon, cost, tera_captain)
 
         result = rules.edit_pick(
             self.bot.conn, draft, interaction.user.id, round, pokemon, cost,
+            tera_captain=tera_captain,
             target_user_id=player.id if player else None, acting_as_admin=is_admin,
         )
 

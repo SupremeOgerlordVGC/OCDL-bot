@@ -93,5 +93,75 @@ class ModuleReferenceTests(unittest.TestCase):
         self.assertEqual(sorted(set(missing)), [])
 
 
+class CommandOptionTests(unittest.TestCase):
+    """What each command actually offers in Discord.
+
+    A missing optional parameter is invisible: the cog imports, the bot
+    starts, and the option simply is not there. /pick and /editpick shipped
+    without tera_captain this way, which made Tera Captains unusable even
+    though the rules supported them and were tested.
+    """
+
+    EXPECTED = {
+        "pick": {"round", "pokemon", "cost", "tera_captain"},
+        "makeuppick": {"round", "pokemon", "cost", "tera_captain"},
+        "editpick": {"round", "pokemon", "cost", "tera_captain", "player"},
+        "queuepick": {"round", "pokemon", "costs", "tera"},
+        "draft": {"at"},
+        "setup": {"name", "draft_channel", "players", "players_role", "min_picks",
+                  "max_picks", "timer", "mode", "budget", "tera_budget", "max_trades",
+                  "template_link", "tiering_link", "draft_channel_b", "players_b",
+                  "players_role_b", "weeks"},
+        "removeplayer": {"player", "keep_roster"},
+        "setskips": {"player", "skips", "timer"},
+        "substitute": {"out", "into"},
+        "trade": {"drops", "gets", "partner", "for_player"},
+        "approvetrade": {"trade_id", "name"},
+        "postschedule": {"week", "name"},
+        "roster": {"player"},
+        "progress": {"round"},
+        "available": {"cost", "tera"},
+        "search": {"pokemon"},
+    }
+
+    def setUp(self):
+        import asyncio, tempfile, os as _os
+        import config as _config
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        _os.close(handle)
+        _config.DB_PATH = self.path
+
+        import bot as botmod
+        self.bot = botmod.DraftBot(members_intent=False)
+
+        async def load():
+            for extension in botmod.COGS:
+                await self.bot.load_extension(extension)
+        asyncio.run(load())
+        self.commands = {c.name: c for c in self.bot.tree.get_commands()}
+
+    def tearDown(self):
+        import asyncio, os as _os
+        asyncio.run(self.bot.close())
+        for suffix in ("", "-wal", "-shm"):
+            if _os.path.exists(self.path + suffix):
+                _os.remove(self.path + suffix)
+
+    def test_every_command_offers_the_options_it_should(self):
+        for name, expected in self.EXPECTED.items():
+            with self.subTest(command=name):
+                self.assertIn(name, self.commands, f"/{name} is not registered")
+                actual = {p.name for p in self.commands[name].parameters}
+                self.assertEqual(actual, expected,
+                                 f"/{name} options do not match what the bot intends")
+
+    def test_everything_is_documented(self):
+        for command in self.commands.values():
+            self.assertTrue(command.description, f"/{command.name} has no description")
+            for param in command.parameters:
+                self.assertTrue(param.description,
+                                f"/{command.name} {param.name} has no description")
+
+
 if __name__ == "__main__":
     unittest.main()
