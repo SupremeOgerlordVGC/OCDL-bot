@@ -36,6 +36,8 @@ Nothing here lists the moderator commands. Those are in the README.
 `/makeuppick round:3 pokemon:Garchomp cost:12`
 • You get one chance: it must be used **before your next turn**.
 
+**`/finishdrafting`** — stop early and keep the team you have, once you are past the league's minimum. It shows what you would give up and asks you to confirm. Only a moderator can put you back on the clock.
+
 **`/editpick`** — fix your own pick, **until the next pick is made**.
 `/editpick round:2 pokemon:Heatran cost:10`
 • After somebody else has picked it is too late — ask a moderator, who can fix it any time.

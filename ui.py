@@ -188,6 +188,23 @@ def render_event(event, draft):
                 f"for **{event['cost']}** points.{captain} *(Round {event['round']}, "
                 f"pick #{event['pick_order']})*")
 
+    if kind == "player_finished":
+        text = (f"🎉 **{event['display_name']}** has **finished drafting** with "
+                f"{event['picks']} Pokémon")
+        if event["budget_left"]:
+            text += f", leaving {event['budget_left']} points unspent"
+        text += "."
+        if event["giving_up"]:
+            text += (f" They are giving up their last {event['giving_up']} "
+                     f"pick(s), so their turns will be passed over from here.")
+        return text
+
+    if kind == "player_reopened":
+        return (f"↩️ A moderator has put **{event['display_name']}** back into the "
+                f"draft — they are picking again, {event['picks']} of "
+                f"{event['max_picks']} Pokémon in. Their next turn will come "
+                f"round as normal.")
+
     if kind == "queue_exhausted":
         return (f"⚠️ <@{event['user_id']}> every Pokémon in your Round {event['round']} queue "
                 f"has already been drafted. Your timer is running — pick manually with `/pick`. "
@@ -633,7 +650,8 @@ class _PlayerSelect(discord.ui.Select):
                 discord.SelectOption(
                     label=player["display_name"][:100],
                     value=str(player["id"]),
-                    description=("withdrawn" if player["status"] == "withdrawn" else None),
+                    description=(player["status"]
+                                 if player["status"] != rules.ACTIVE else None),
                     default=browser.player is not None
                     and player["id"] == browser.player["id"])
                 for player in self.players[:SELECT_LIMIT]
@@ -644,3 +662,73 @@ class _PlayerSelect(discord.ui.Select):
         chosen = int(self.values[0])
         self.browser.player = next(p for p in self.players if p["id"] == chosen)
         await self.browser.refresh(interaction)
+
+
+class ConfirmFinish(discord.ui.View):
+    """Double-checks a player ending their own draft early.
+
+    Only a moderator can undo it, so the numbers are put in front of them
+    and the question asked plainly, rather than trusting a slash command
+    typed in a hurry.
+    """
+
+    def __init__(self, bot, pool_id, owner_id, timeout=120):
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.pool_id = pool_id
+        self.owner_id = owner_id
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "❌ That is not your draft to finish.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Yes, I'm done drafting",
+                       style=discord.ButtonStyle.danger)
+    async def finish(self, interaction, button):
+        draft = rules.get_pool(self.bot.conn, self.pool_id)
+        try:
+            summary, events = rules.finish_drafting(
+                self.bot.conn, draft, self.owner_id)
+        except rules.DraftError as error:
+            # Something changed between asking and answering - a moderator
+            # removed them, or the draft ended.
+            self.clear_items()
+            await interaction.response.edit_message(content=str(error), view=None)
+            self.stop()
+            return
+
+        self.clear_items()
+        await interaction.response.edit_message(
+            content=(f"✅ Your draft is finished with **{summary['picks']}** "
+                     f"Pokémon. Your team is yours — you keep your roster, your "
+                     f"place in the schedule and your trades. Ask a moderator if "
+                     f"you need to pick again."),
+            view=None,
+        )
+        self.stop()
+        await announce(self.bot, self.pool_id, events)
+
+    @discord.ui.button(label="No, keep drafting",
+                       style=discord.ButtonStyle.secondary)
+    async def keep(self, interaction, button):
+        self.clear_items()
+        await interaction.response.edit_message(
+            content="👍 Nothing has changed — you are still drafting.", view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        """An unanswered question must not leave a live button lying around."""
+        self.clear_items()
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(
+                content="⌛ That timed out, so nothing changed. Run "
+                        "`/finishdrafting` again if you still want to finish.",
+                view=None)
+        except discord.DiscordException:
+            pass

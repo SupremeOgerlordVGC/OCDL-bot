@@ -809,6 +809,29 @@ class AdminCog(commands.Cog):
         )
         await ui.announce(self.bot, pool["id"], events)
 
+    # ---- /reopendrafting ------------------------------------------------
+
+    @app_commands.command(
+        name="reopendrafting",
+        description="Moderator only: put a player who finished early back on the clock.",
+    )
+    @app_commands.describe(player="The player to put back into the draft")
+    async def reopendrafting(self, interaction: discord.Interaction,
+                             player: discord.Member):
+        pool = rules.require_active_pool(self.bot.conn, interaction.channel_id)
+        ui.require_moderator(self.bot, interaction)
+        await interaction.response.defer(ephemeral=True)
+
+        events = rules.reopen_drafting(self.bot.conn, pool, player.id)
+
+        await interaction.followup.send(
+            f"↩️ **{player.display_name}** is drafting again. The rounds that "
+            f"went by while they were finished are gone — they were passed "
+            f"over, so no makeup pick is owed and no timer was reduced.",
+            ephemeral=True,
+        )
+        await ui.announce(self.bot, pool["id"], events)
+
     # ---- /removeplayer --------------------------------------------------
 
     @app_commands.command(

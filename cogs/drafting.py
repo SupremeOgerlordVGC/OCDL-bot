@@ -420,6 +420,44 @@ class DraftingCog(commands.Cog):
             ephemeral=True, wait=True,
         )
 
+    # ---- /finishdrafting ------------------------------------------------
+
+    @app_commands.command(
+        name="finishdrafting",
+        description="Finish your own draft early, keeping the team you have.",
+    )
+    async def finishdrafting(self, interaction: discord.Interaction):
+        draft = rules.require_active_pool(self.bot.conn, interaction.channel_id)
+        await interaction.response.defer(ephemeral=True)
+
+        # Checked before the question is asked, so nobody is offered a button
+        # that would only refuse them.
+        summary = rules.finish_preview(self.bot.conn, draft, interaction.user.id)
+
+        lines = [
+            f"You have **{summary['picks']}** of a possible "
+            f"**{summary['max_picks']}** Pokémon (the minimum is "
+            f"{summary['min_picks']}).",
+        ]
+        if summary["giving_up"]:
+            lines.append(f"Finishing now gives up your last "
+                         f"**{summary['giving_up']}** pick(s).")
+        if summary["budget_left"]:
+            lines.append(f"You would leave **{summary['budget_left']}** points "
+                         f"unspent.")
+        if summary["makeups"]:
+            owed = ", ".join(str(r) for r in summary["makeups"])
+            lines.append(f"Your outstanding makeup pick(s) for Round {owed} "
+                         f"would be given up too.")
+        lines.append("You keep your team, your place in the schedule and your "
+                     "trades. Only a moderator can put you back on the clock.")
+
+        view = ui.ConfirmFinish(self.bot, draft["id"], interaction.user.id)
+        view.message = await interaction.followup.send(
+            "🏁 **Finish your draft?**\n" + "\n".join(lines),
+            view=view, ephemeral=True, wait=True,
+        )
+
     # ---- /makeuppick ----------------------------------------------------
 
     @app_commands.command(

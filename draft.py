@@ -912,6 +912,13 @@ def moderator_role_ids(conn, guild_id):
 TIMER_SKIP = "timer expired"
 MODERATOR_SKIP = "moderator"
 
+# players.status. Only WITHDRAWN means somebody has left the league: a
+# FINISHED player has simply stopped drafting and keeps their team, their
+# place in the schedule and their trades.
+ACTIVE = "active"
+FINISHED = "finished"
+WITHDRAWN = "withdrawn"
+
 
 def _event(kind, player=None, **fields):
     event = {"type": kind}
@@ -1164,7 +1171,7 @@ def begin_turn(conn, pool_id):
                     free_trades_until=draft["free_trades_until"],
                     max_trades=draft["max_trades"],
                     players=[p["user_id"] for p in get_players(conn, draft["id"])
-                             if p["status"] == "active"],
+                             if p["status"] != WITHDRAWN],
                     league_finished=league is not None
                     and league["status"] in ("complete", "archived"),
                     archived=league is not None and league["status"] == "archived"))
@@ -1341,6 +1348,9 @@ def make_pick(conn, draft, user_id, round_number, pokemon, cost,
     on_clock = current_player(conn, draft)
     player = get_player(conn, draft["id"], user_id)
 
+    if player is not None and not acting_as_admin:
+        _require_still_drafting(player)
+
     if player is None or player["id"] != on_clock["id"]:
         if not acting_as_admin:
             raise DraftError(
@@ -1429,6 +1439,7 @@ def queue_picks(conn, draft, user_id, round_number, pokemon_names, costs=None, t
         raise DraftError("❌ This draft is not running.")
 
     player = require_player(conn, draft["id"], user_id)
+    _require_still_drafting(player)
 
     if round_number < 1 or round_number > draft["max_picks"]:
         raise DraftError(f"❌ This draft only has rounds 1–{draft['max_picks']}.")
@@ -2159,6 +2170,131 @@ def set_skip_count(conn, draft, user_id, skips, timer=None):
 
 
 # --------------------------------------------------------------------------
+# Finishing early
+# --------------------------------------------------------------------------
+
+
+def _require_still_drafting(player):
+    """A clearer refusal than "it is not your turn" for somebody who stopped."""
+    if player["status"] == FINISHED:
+        raise DraftError(
+            "❌ You finished your draft, so you have no more picks to make. "
+            "A moderator can reopen it for you if that was a mistake."
+        )
+
+
+def finish_preview(conn, draft, user_id):
+    """Check that a player may finish, and describe what it would cost them.
+
+    Raises if they cannot, so the question is never put to somebody who
+    would then be refused. Returns the numbers worth seeing before making
+    a decision that cannot be undone.
+    """
+    if draft["status"] != "active":
+        raise DraftError("❌ This draft is not running.")
+
+    player = require_player(conn, draft["id"], user_id)
+    if player["status"] == FINISHED:
+        raise DraftError("❌ You have already finished your draft.")
+    if player["status"] != ACTIVE:
+        raise DraftError("❌ You are no longer drafting in this pool.")
+
+    made = picks_made(conn, draft["id"], player["id"])
+    if made < draft["min_picks"]:
+        short = draft["min_picks"] - made
+        raise DraftError(
+            f"❌ You need at least **{draft['min_picks']}** Pokémon before you can "
+            f"finish, and you have **{made}**. {short} more to go."
+        )
+
+    return {
+        "player": player,
+        "picks": made,
+        "giving_up": max(0, draft["max_picks"] - made),
+        "budget_left": player["budget_remaining"],
+        "tera_budget_left": player["tera_budget_remaining"],
+        "min_picks": draft["min_picks"],
+        "max_picks": draft["max_picks"],
+        "makeups": pending_makeup_rounds(conn, draft["id"], player["id"]),
+    }
+
+
+def finish_drafting(conn, draft, user_id):
+    """/finishdrafting - stop early and keep the team you have.
+
+    Their turns are passed over from here on, exactly like a player who can
+    no longer afford anything, so the draft still ends on its own once
+    nobody is left who can pick. Everything else about them is unchanged:
+    the roster stands, they stay in the schedule and they can still trade.
+
+    Returns (summary, events). If they were on the clock the turn is handed
+    straight on, because a draft should not sit waiting for somebody who
+    has just said they are done.
+    """
+    summary = finish_preview(conn, draft, user_id)
+    player = summary["player"]
+
+    conn.execute("UPDATE players SET status = ? WHERE id = ?", (FINISHED, player["id"]))
+    # Nothing of theirs may fire afterwards. A queue would draft against the
+    # decision they just made, and a makeup pick they will never take would
+    # be announced as expired at a turn that no longer comes.
+    conn.execute("DELETE FROM queued_picks WHERE pool_id = ? AND player_id = ?",
+                 (draft["id"], player["id"]))
+    conn.execute(
+        "UPDATE makeups SET status = 'resolved', resolved_at = ? "
+        "WHERE pool_id = ? AND player_id = ? AND status = 'pending'",
+        (database.now(), draft["id"], player["id"]),
+    )
+    conn.commit()
+
+    events = [_event("player_finished", get_player_by_id(conn, player["id"]),
+                     picks=summary["picks"], budget_left=summary["budget_left"],
+                     giving_up=summary["giving_up"],
+                     round=draft["current_round"])]
+
+    on_clock = current_player(conn, draft)
+    if on_clock is not None and on_clock["id"] == player["id"]:
+        advance_turn(conn, draft["id"])
+        events.extend(begin_turn(conn, draft["id"]))
+
+    return summary, events
+
+
+def reopen_drafting(conn, draft, user_id):
+    """Moderator only: put a finished player back on the clock.
+
+    For a decision made by mistake. Rounds that went by while they were
+    finished are gone - they were passed over, not skipped, so no makeup
+    pick is owed for them and no timer was reduced. They simply rejoin at
+    their next turn.
+
+    Only moderators can do this, which also means nobody can finish to
+    dodge a timer reduction and then quietly reopen.
+    """
+    if draft["status"] != "active":
+        raise DraftError(
+            "❌ This pool's draft is no longer running, so nobody can rejoin it."
+        )
+
+    player = require_player(conn, draft["id"], user_id)
+    if player["status"] == WITHDRAWN:
+        raise DraftError(
+            f"❌ **{player['display_name']}** was removed from the draft. Use "
+            f"`/substitute` to put somebody in their seat."
+        )
+    if player["status"] != FINISHED:
+        raise DraftError(f"❌ **{player['display_name']}** is still drafting.")
+
+    conn.execute("UPDATE players SET status = ? WHERE id = ?", (ACTIVE, player["id"]))
+    conn.commit()
+
+    player = get_player_by_id(conn, player["id"])
+    return [_event("player_reopened", player,
+                   picks=picks_made(conn, draft["id"], player["id"]),
+                   max_picks=draft["max_picks"])]
+
+
+# --------------------------------------------------------------------------
 # Removing a player
 # --------------------------------------------------------------------------
 
@@ -2181,7 +2317,7 @@ def remove_player(conn, draft, user_id, release_roster=True):
     player = get_player(conn, draft["id"], user_id)
     if player is None:
         raise DraftError("❌ That player is not in this pool's draft.")
-    if player["status"] != "active":
+    if player["status"] == WITHDRAWN:
         raise DraftError(f"❌ **{player['display_name']}** has already been removed.")
 
     released = []
@@ -2446,10 +2582,11 @@ def export_for_sheet(conn, league_id):
         for player in get_players(conn, pool["id"]):
             coaches[player["coach_number"]] = (player["display_name"], pool["label"])
 
-            if player["status"] != "active":
+            if player["status"] == WITHDRAWN:
                 # Somebody removed mid-draft keeps their row - they were in
                 # the league - but their block is cleared, which matches
-                # their Pokemon having gone back into the pool.
+                # their Pokemon having gone back into the pool. A player who
+                # merely finished early still owns their team.
                 blocks[player["coach_number"]] = [("", False)] * rows
                 continue
 

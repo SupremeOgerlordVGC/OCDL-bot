@@ -2561,6 +2561,202 @@ class QueueViewTests(unittest.TestCase):
             draft.queue_view(self.conn, self.draft, user(2), 99)
 
 
+class FinishEarlyTests(unittest.TestCase):
+    """Stopping before the maximum, once the minimum is met."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=1900, players=3, budget=100,
+                                min_picks=2, max_picks=4, base_timer=120)
+
+    def live(self):
+        return draft.get_pool(self.conn, self.draft["id"])
+
+    def player(self, seat):
+        return draft.get_player(self.conn, self.draft["id"], user(seat))
+
+    def pick_round(self, round_number):
+        """Everybody still drafting takes their turn in this round.
+
+        Driven by the pool's own state rather than a fixed count, because a
+        finished player is passed over and the round ends sooner.
+        """
+        while True:
+            live = self.live()
+            if live["status"] != "active" or live["current_round"] != round_number:
+                return
+            current = draft.current_player(self.conn, live)
+            if current is None:
+                return
+            draft.make_pick(self.conn, live, current["user_id"], round_number,
+                            f"R{round_number}-{current['display_name']}", 5)
+
+    def test_you_cannot_finish_below_the_minimum(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.finish_drafting(self.conn, self.live(), user(1))
+        self.assertIn("at least **2**", str(caught.exception))
+        self.assertEqual(self.player(1)["status"], draft.ACTIVE)
+
+    def test_you_can_finish_once_the_minimum_is_met(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        summary, events = draft.finish_drafting(self.conn, self.live(), user(1))
+
+        self.assertEqual(self.player(1)["status"], draft.FINISHED)
+        self.assertEqual(summary["picks"], 2)
+        self.assertEqual(summary["giving_up"], 2)
+        finished = [e for e in events if e["type"] == "player_finished"][0]
+        self.assertEqual(finished["display_name"], "Player1")
+
+    def test_a_finished_player_is_passed_over_without_penalty(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        draft.finish_drafting(self.conn, self.live(), user(1))
+        before = self.player(1)
+
+        # Round 3 comes round to them and simply goes past.
+        self.pick_round(3)
+
+        after = self.player(1)
+        self.assertEqual(after["current_timer"], before["current_timer"],
+                         "being passed over is not a skip")
+        self.assertEqual(after["skip_count"], 0)
+        self.assertEqual(draft.pending_makeup_rounds(self.conn, self.draft["id"],
+                                                     after["id"]), [])
+        self.assertEqual(draft.picks_made(self.conn, self.draft["id"], after["id"]), 2)
+
+    def test_finishing_on_the_clock_hands_the_turn_straight_on(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        # Round 3 runs forward again, so Player1 is up with 2 picks made.
+        self.assertEqual(on_clock(self.conn, self.draft), "Player1")
+
+        summary, events = draft.finish_drafting(self.conn, self.live(), user(1))
+
+        self.assertEqual(on_clock(self.conn, self.draft), "Player2",
+                         "the draft must not wait for somebody who just stopped")
+        self.assertTrue([e for e in events if e["type"] == "turn_started"])
+
+    def test_the_draft_ends_when_everybody_has_finished(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        events = []
+        for seat in (1, 2, 3):
+            _, batch = draft.finish_drafting(self.conn, self.live(), user(seat))
+            events.extend(batch)
+
+        self.assertEqual(self.live()["status"], "complete")
+        complete = [e for e in events if e["type"] == "draft_complete"]
+        self.assertTrue(complete, "the pool should close on its own")
+        self.assertEqual(complete[0]["round_reached"], 3)
+
+    def test_a_queue_and_an_owed_makeup_are_given_up(self):
+        # A makeup that nobody will ever take must not be left pending: it
+        # would be announced as expired at a turn that no longer arrives.
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=1901, players=3, budget=100,
+                          min_picks=1, max_picks=4, base_timer=120)
+
+        def live():
+            return draft.get_pool(conn, pool["id"])
+
+        for seat in (1, 2, 3):
+            draft.make_pick(conn, live(), user(seat), 1, f"One{seat}", 5)
+        # Round 2 reverses: Player3, then Player2 - the middle seat, so their
+        # makeup deadline is not the very next turn.
+        draft.make_pick(conn, live(), user(3), 2, "Three2", 5)
+        draft.skip_current_player(conn, pool["id"])
+
+        p2 = draft.get_player(conn, pool["id"], user(2))
+        self.assertEqual(draft.pending_makeup_rounds(conn, pool["id"], p2["id"]), [2])
+        draft.queue_picks(conn, live(), user(2), 3, ["Queued"], [5])
+
+        draft.finish_drafting(conn, live(), user(2))
+
+        self.assertEqual(draft.pending_makeup_rounds(conn, pool["id"], p2["id"]), [])
+        self.assertEqual(draft.queued_entries(conn, pool["id"], p2["id"]), [])
+
+    def test_a_finished_player_cannot_pick_or_queue(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        draft.finish_drafting(self.conn, self.live(), user(1))
+
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.make_pick(self.conn, self.live(), user(1), 3, "Sneaky", 5)
+        self.assertIn("finished your draft", str(caught.exception))
+
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.queue_picks(self.conn, self.live(), user(1), 4, ["Sneaky"], [5])
+        self.assertIn("finished your draft", str(caught.exception))
+
+    def test_they_keep_their_team_on_the_spreadsheet(self):
+        # The trap: every other "not active" status clears the roster block,
+        # which would wipe a finished coach's team off the template.
+        self.pick_round(1)
+        self.pick_round(2)
+        draft.finish_drafting(self.conn, self.live(), user(1))
+
+        league_id = self.live()["league_id"]
+        coaches, blocks, overflow = draft.export_for_sheet(self.conn, league_id)
+        number = self.player(1)["coach_number"]
+
+        self.assertEqual(coaches[number][0], "Player1")
+        self.assertEqual([name for name, _ in blocks[number] if name],
+                         ["R1-Player1", "R2-Player1"])
+        self.assertEqual(overflow, {})
+
+    def test_they_keep_their_roster_and_budget(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        before = self.player(1)
+        draft.finish_drafting(self.conn, self.live(), user(1))
+        after = self.player(1)
+
+        self.assertEqual(after["budget_remaining"], before["budget_remaining"])
+        self.assertEqual(len(draft.roster_view(self.conn, self.live(), after)["pokemon"]), 2)
+
+    def test_a_moderator_can_reopen_it(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        draft.finish_drafting(self.conn, self.live(), user(1))
+
+        events = draft.reopen_drafting(self.conn, self.live(), user(1))
+
+        self.assertEqual(self.player(1)["status"], draft.ACTIVE)
+        self.assertEqual(events[0]["type"], "player_reopened")
+
+        # They rejoin at their NEXT turn: the round 3 turn they were passed
+        # over for is gone, so round 3 finishes without them.
+        self.pick_round(3)
+        self.assertEqual(draft.picks_made(self.conn, self.draft["id"],
+                                          self.player(1)["id"]), 2)
+        self.pick_round(4)
+        self.assertEqual(draft.picks_made(self.conn, self.draft["id"],
+                                          self.player(1)["id"]), 3)
+
+    def test_reopening_somebody_who_never_finished_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.reopen_drafting(self.conn, self.live(), user(1))
+        self.assertIn("still drafting", str(caught.exception))
+
+    def test_finishing_twice_is_refused(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        draft.finish_drafting(self.conn, self.live(), user(1))
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.finish_drafting(self.conn, self.live(), user(1))
+        self.assertIn("already finished", str(caught.exception))
+
+    def test_a_finished_player_can_still_be_removed(self):
+        self.pick_round(1)
+        self.pick_round(2)
+        draft.finish_drafting(self.conn, self.live(), user(1))
+        # They stopped drafting, but they have not left the league, so a
+        # moderator must still be able to take them out properly.
+        draft.remove_player(self.conn, self.live(), user(1))
+        self.assertEqual(self.player(1)["status"], draft.WITHDRAWN)
+
+
 class MigrationTests(unittest.TestCase):
     """An upgrade must not break an existing database.
 

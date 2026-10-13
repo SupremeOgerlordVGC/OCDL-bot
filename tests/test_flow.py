@@ -933,6 +933,119 @@ class SkipTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("you are on the clock", self.channel.text.lower())
 
 
+class FinishDraftingCommandTests(unittest.IsolatedAsyncioTestCase):
+    """The player-facing /finishdrafting, including its confirmation."""
+
+    CHANNEL = 9700
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(self.CHANNEL)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.pool_id = make_pool(
+            self.conn, self.CHANNEL, [(11, "Larry"), (22, "Alex")],
+            budget=100, min_picks=2, max_picks=4, base_timer=120)
+        self.cog = DraftingCog(self.bot)
+        self.admin = AdminCog(self.bot)
+        rules.start_pool(self.conn, self.pool())
+
+    def pool(self):
+        return rules.get_pool(self.conn, self.pool_id)
+
+    def player(self, user_id):
+        return rules.get_player(self.conn, self.pool_id, user_id)
+
+    def take_two_rounds(self):
+        for round_number in (1, 2):
+            while self.pool()["current_round"] == round_number:
+                current = rules.current_player(self.conn, self.pool())
+                rules.make_pick(self.conn, self.pool(), current["user_id"],
+                                round_number, f"R{round_number}-{current['id']}", 5)
+
+    async def ask(self, user_id=11):
+        interaction = FakeInteraction(self.bot, self.CHANNEL, user_id)
+        await self.cog.finishdrafting.callback(self.cog, interaction)
+        self.bot.timers.cancel_all()
+        return interaction
+
+    async def test_below_the_minimum_no_button_is_offered(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.ask()
+        self.assertIn("at least **2**", str(caught.exception))
+
+    async def test_the_question_shows_what_it_costs(self):
+        self.take_two_rounds()
+        interaction = await self.ask()
+
+        self.assertIsInstance(interaction.view, ui.ConfirmFinish)
+        text = interaction.text
+        self.assertIn("**2** of a possible **4**", text)
+        self.assertIn("gives up your last **2**", text)
+        self.assertIn("90", text)       # 100 - two 5-point picks
+        self.assertEqual(self.player(11)["status"], rules.ACTIVE,
+                         "asking must not finish anything by itself")
+
+    async def test_confirming_finishes_and_tells_the_channel(self):
+        self.take_two_rounds()
+        view = (await self.ask()).view
+
+        click = FakeComponentInteraction(11)
+        await view.finish.callback(click)
+        self.bot.timers.cancel_all()
+
+        self.assertEqual(self.player(11)["status"], rules.FINISHED)
+        self.assertIn("Your draft is finished", click.last["content"])
+        self.assertIsNone(click.last["view"], "the buttons must go away")
+        self.assertIn("finished drafting", self.channel.text)
+        self.assertIn("giving up their last 2", self.channel.text)
+
+    async def test_declining_changes_nothing(self):
+        self.take_two_rounds()
+        view = (await self.ask()).view
+
+        click = FakeComponentInteraction(11)
+        await view.keep.callback(click)
+
+        self.assertEqual(self.player(11)["status"], rules.ACTIVE)
+        self.assertIn("Nothing has changed", click.last["content"])
+        self.assertNotIn("finished drafting", self.channel.text)
+
+    async def test_somebody_else_cannot_press_it(self):
+        self.take_two_rounds()
+        view = (await self.ask()).view
+
+        other = FakeComponentInteraction(22)
+        self.assertFalse(await view.interaction_check(other))
+        self.assertIn("not your draft", other.replies[0])
+
+    async def test_a_moderator_can_reopen_it(self):
+        self.take_two_rounds()
+        view = (await self.ask()).view
+        await view.finish.callback(FakeComponentInteraction(11))
+        self.bot.timers.cancel_all()
+
+        interaction = FakeInteraction(self.bot, self.CHANNEL, 777, moderator=True)
+        await self.admin.reopendrafting.callback(
+            self.admin, interaction, SimpleNamespace(id=11, display_name="Larry"))
+        self.bot.timers.cancel_all()
+
+        self.assertEqual(self.player(11)["status"], rules.ACTIVE)
+        self.assertIn("drafting again", interaction.text)
+        self.assertIn("back into the", self.channel.text)
+
+    async def test_a_player_cannot_reopen_anybody(self):
+        self.take_two_rounds()
+        view = (await self.ask()).view
+        await view.finish.callback(FakeComponentInteraction(11))
+        self.bot.timers.cancel_all()
+
+        interaction = FakeInteraction(self.bot, self.CHANNEL, 22, moderator=False)
+        with self.assertRaises(rules.DraftError):
+            await self.admin.reopendrafting.callback(
+                self.admin, interaction, SimpleNamespace(id=11, display_name="Larry"))
+        self.assertEqual(self.player(11)["status"], rules.FINISHED)
+
+
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
     """A channel the bot cannot post in must not break the draft.
 

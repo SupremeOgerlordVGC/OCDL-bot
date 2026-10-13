@@ -122,6 +122,10 @@ class CommandOptionTests(unittest.TestCase):
         "removeplayer": {"player", "keep_roster"},
         "setskips": {"player", "skips", "timer"},
         "skipturn": {"player", "penalty"},
+        "reopendrafting": {"player"},
+        # No options at all: it is always your own draft, and the
+        # confirmation happens on a button rather than a flag.
+        "finishdrafting": set(),
         "substitute": {"out", "into"},
         "trade": {"drops", "gets", "partner", "for_player"},
         "approvetrade": {"trade_id", "name"},
