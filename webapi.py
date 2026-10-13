@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 
 from aiohttp import web
@@ -49,7 +50,8 @@ class WebApi:
         app = web.Application(client_max_size=64 * 1024)
         for path, handler in (
             ("/pick", self.pick), ("/makeup", self.makeup), ("/editpick", self.edit_pick),
-            ("/archive", self.archive), ("/deleteleague", self.delete_league), ("/prices", self.prices), ("/tierlist", self.tierlist),
+            ("/archive", self.archive), ("/deleteleague", self.delete_league),
+            ("/guilds", self.guilds), ("/setup", self.setup), ("/start", self.start_draft), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
         ):
             app.router.add_post(path, self.wrap(handler))
@@ -191,6 +193,98 @@ class WebApi:
              "tera_banned": bool(e["tera_banned"]), "taken_by": owners.get(e["key"])}
             for e in entries
         ]}
+
+    # ---- making a league (the site's staff) ---------------------------------
+
+    @property
+    def admin_cog(self):
+        return self.bot.get_cog("AdminCog")
+
+    async def guilds(self, body):
+        """The Discord servers the bot is in, with their text channels, for the site's league form"""
+        return {"guilds": [{
+            "id": str(guild.id), "name": guild.name,
+            "channels": [{"id": str(channel.id), "name": channel.name,
+                          "category": channel.category.name if channel.category else ""}
+                         for channel in guild.text_channels],
+        } for guild in self.bot.guilds]}
+
+    async def setup(self, body):
+        """/setup from draft.ogreclan.com: a league run on Discord (with its server and channels), or a
+        site-only league (no Discord at all; the bot still runs its rules and timers)"""
+        site_only = bool(body.get("site_only"))
+        pools = body.get("pools") or []
+        if not 1 <= len(pools) <= 2:
+            raise rules.DraftError("A league has one or two pools.")
+        labels = ["A", "B"][:len(pools)]
+        rosters, shuffled = {}, {}
+        guild = None
+        if not site_only:
+            guild = self.bot.get_guild(int(body["guild_id"]))
+            if guild is None:
+                raise rules.DraftError("The bot isn't in that Discord server.")
+            admin_channel = guild.get_channel(int(body["admin_channel_id"]))
+            if admin_channel is None:
+                raise rules.DraftError("Choose the channel where trades are approved.")
+            channels = {}
+            for label, pool in zip(labels, pools):
+                channel = guild.get_channel(int(pool.get("channel_id") or 0))
+                if channel is None:
+                    raise rules.DraftError(f"Choose pool {label}'s channel.")
+                channels[label] = channel.id
+        else:
+            admin_channel = None
+            channels = dict(zip(labels, rules.site_pool_channels(len(pools))))
+
+        for label, pool in zip(labels, pools):
+            entries = []
+            for player in pool.get("players") or []:
+                user_id = int(player["user_id"])
+                member = guild.get_member(user_id) if guild else None
+                if member is None and guild is not None:
+                    try:
+                        member = await guild.fetch_member(user_id)
+                    except Exception:
+                        member = None
+                entry = ui._player_entry(member, user_id) if member else {
+                    "user_id": user_id, "display_name": str(player.get("display_name") or f"User {user_id}"),
+                    "username": str(player.get("username") or ""),
+                }
+                entries.append(entry)
+            if pool.get("shuffle"):
+                random.shuffle(entries)
+            rosters[label] = entries
+            shuffled[label] = bool(pool.get("shuffle"))
+
+        number = lambda key: int(body[key]) if body.get(key) not in (None, "") else None  # noqa: E731
+        league, pool_rows, notes, coach_slots = await self.admin_cog.build_league(
+            guild_id=guild.id if guild else 0, admin_channel_id=admin_channel.id if admin_channel else 0,
+            name=body["name"], rosters=rosters, channels=channels,
+            min_picks=int(body["min_picks"]), max_picks=int(body["max_picks"]), timer=int(body["timer"]),
+            mode=str(body.get("mode") or "full_season"), budget=number("budget"), tera_budget=number("tera_budget"),
+            max_trades=number("max_trades") or 0, template_link=body.get("template_link") or None,
+            tiering_link=body.get("tiering_link") or None, weeks=number("weeks"),
+            visibility=str(body.get("visibility") or "public"), website=bool(body.get("website", True)),
+            site_only=site_only,
+        )
+        if not site_only:
+            await self.admin_cog.announce_setup(league, pool_rows, coach_slots, shuffled, admin_channel)
+        return {"league_id": league["id"], "notes": notes}
+
+    async def start_draft(self, body):
+        """/draft from draft.ogreclan.com: start a pool now, or at a time (unix seconds)"""
+        pool = self.pool(body)
+        if pool["status"] != "setup":
+            raise rules.DraftError("This pool has already started.")
+        if body.get("at"):
+            rules.schedule_pool_start(self.bot.conn, pool, float(body["at"]))
+            return {"scheduled": float(body["at"])}
+        events = rules.start_pool(self.bot.conn, pool)
+        channel = self.bot.get_channel(pool["channel_id"])
+        if channel is not None:
+            await self.admin_cog.announce_start(channel, pool)
+        await ui.announce(self.bot, pool["id"], events, channel=channel)
+        return {"started": True}
 
     # ---- ending a league (the site's admins) -------------------------------
 

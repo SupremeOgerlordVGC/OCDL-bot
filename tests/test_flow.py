@@ -47,6 +47,7 @@ class FakeChannel:
 
     def __init__(self, channel_id):
         self.id = channel_id
+        self.mention = f"<#{channel_id}>"
         self.messages = []
 
     async def send(self, content):
@@ -1266,3 +1267,59 @@ class TradeWeekCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.admin.postschedule.callback(self.admin, self.moderator(), week=2, name="Season")
         self.assertNotIn("Trades in effect", self.channel.text)
         self.assertEqual(self.owner("Garchomp"), "Alex")
+
+
+class SetupCommandTests(unittest.IsolatedAsyncioTestCase):
+    """/setup, as a moderator runs it, and the same builder used by draft.ogreclan.com."""
+
+    async def asyncSetUp(self):
+        from cogs.admin import AdminCog
+        self.conn = database.connect(":memory:")
+        self.admin_channel = FakeChannel(9500)
+        self.pool_channel = FakeChannel(9501)
+        self.bot = FakeBot(self.conn, self.admin_channel)
+        channels = {9500: self.admin_channel, 9501: self.pool_channel}
+        self.bot.get_channel = channels.get
+        self.cog = AdminCog(self.bot)
+
+    async def asyncTearDown(self):
+        self.bot.timers.cancel_all()
+
+    def moderator(self):
+        interaction = FakeInteraction(self.bot, 9500, 99, "Mod")
+        interaction.user.guild_permissions = SimpleNamespace(administrator=True)
+        members = {11: FakeMember(11, "Larry"), 22: FakeMember(22, "Alex")}
+        interaction.guild = SimpleNamespace(id=1, owner_id=0, get_member=members.get)
+        return interaction
+
+    async def test_setup_creates_a_league_and_says_so(self):
+        interaction = self.moderator()
+        await self.cog.setup_league.callback(
+            self.cog, interaction, name="Spring Cup", draft_channel=SimpleNamespace(id=9501, mention="#pool-a"),
+            min_picks=1, max_picks=3, timer=120, mode=SimpleNamespace(value="full_season"),
+            players="<@11> <@22>", budget=100, weeks=2)
+        league = rules.require_league_by_name(self.conn, 1, "Spring Cup")
+        self.assertEqual((league["website"], league["site_only"], league["admin_channel_id"]), (1, 0, 9500))
+        self.assertIn("Spring Cup** has been set up", self.admin_channel.text)
+        self.assertIn("1. <@11>", self.admin_channel.text)
+        self.assertIn("will be drafted here", self.pool_channel.text)
+        self.assertIn("created with 1 pool", interaction.text)
+        self.assertEqual(rules.fixture_weeks(self.conn, league["id"]), [1, 2])
+
+    async def test_a_site_only_league_runs_without_discord(self):
+        rosters = {"A": [{"user_id": 11, "display_name": "Larry", "username": ""},
+                         {"user_id": 22, "display_name": "Alex", "username": ""}]}
+        channels = dict(zip(["A"], rules.site_pool_channels(1)))
+        league, pools, notes, slots = await self.cog.build_league(
+            guild_id=0, admin_channel_id=0, name="Site Cup", rosters=rosters, channels=channels,
+            min_picks=1, max_picks=2, timer=120, mode="full_season", budget=100, weeks=1, site_only=True)
+        self.assertEqual((league["site_only"], league["website"]), (1, 1))
+        self.assertLess(pools[0]["channel_id"], 0)
+
+        # its clock runs, with nothing to post to
+        pool = rules.get_pool(self.conn, pools[0]["id"])
+        events = rules.start_pool(self.conn, pool)
+        await ui.announce(self.bot, pool["id"], events)
+        self.assertIsNotNone(rules.get_pool(self.conn, pool["id"])["turn_deadline"], "not paused")
+        with self.assertRaises(rules.DraftError):
+            rules.set_website(self.conn, league["id"], False)

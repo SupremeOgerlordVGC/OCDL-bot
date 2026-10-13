@@ -533,7 +533,7 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
                   budget, min_picks, max_picks, base_timer,
                   mode="full_season", doc_kind="none", doc_url=None,
                   tera_budget=0, max_trades=0, season_weeks=0, visibility="public",
-                  coach_slots=None):
+                  coach_slots=None, website=True, site_only=False):
     """Create a league in `setup` state, with one or two pools.
 
     `pools` is [(label, channel_id, [(user_id, display_name), ...]), ...],
@@ -635,11 +635,12 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
     cursor = conn.execute(
         """INSERT INTO leagues (guild_id, name, admin_channel_id, mode, doc_kind, doc_url,
                                 budget, tera_budget, min_picks, max_picks, base_timer,
-                                max_trades, season_weeks, status, created_at, visibility)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?)""",
+                                max_trades, season_weeks, status, created_at, visibility,
+                                website, site_only)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?)""",
         (guild_id, name, admin_channel_id, mode, doc_kind, doc_url, budget, tera_budget,
          min_picks, max_picks, base_timer, max_trades, max(0, season_weeks),
-         database.now(), visibility),
+         database.now(), visibility, 1 if website or site_only else 0, 1 if site_only else 0),
     )
     league_id = cursor.lastrowid
 
@@ -733,6 +734,23 @@ def require_any_league_by_name(conn, guild_id, name):
     if league is None:
         raise DraftError(f"❌ There is no league called **{name}** on this server.")
     return league
+
+
+def site_pool_channels(count):
+    """Placeholder channel IDs for a site-only league's pools: negative, so
+    they never match a Discord channel, and unique."""
+    base = -int(time.time() * 1000) * 10
+    return [base - index for index in range(count)]
+
+
+def set_website(conn, league_id, on):
+    """/website - whether the league uses draft.ogreclan.com."""
+    league = get_league(conn, league_id)
+    if league["site_only"] and not on:
+        raise DraftError("❌ This league lives on draft.ogreclan.com, so it always uses the website.")
+    conn.execute("UPDATE leagues SET website = ? WHERE id = ?", (1 if on else 0, league_id))
+    conn.commit()
+    return get_league(conn, league_id)
 
 
 def set_visibility(conn, league_id, visibility):

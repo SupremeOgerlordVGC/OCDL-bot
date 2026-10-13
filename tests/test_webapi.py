@@ -36,8 +36,13 @@ class PriceList(StubPriceList):
 class SiteBot(FakeBot):
     """The fake bot, with the drafting cog (which the web API reuses)"""
 
+    guilds = []
+
     def get_cog(self, name):
-        return self.cog if name == "DraftingCog" else None
+        return {"DraftingCog": self.cog, "AdminCog": self.admin_cog}.get(name)
+
+    def get_guild(self, guild_id):
+        return None
 
 
 class WebApiTests(unittest.IsolatedAsyncioTestCase):
@@ -47,6 +52,8 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.bot = SiteBot(self.conn, self.channel)
         self.bot.sheets = PriceList()
         self.bot.cog = DraftingCog(self.bot)
+        from cogs.admin import AdminCog
+        self.bot.admin_cog = AdminCog(self.bot)
         self.pool_id = make_pool(
             self.conn, 4242, [(11, "Larry"), (22, "Alex")], budget=100, min_picks=1, max_picks=3, base_timer=120,
             doc_url="https://docs.google.com/spreadsheets/d/TEST/edit")
@@ -124,6 +131,28 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
         status, body = await self.call("/prices")
         self.assertEqual([e["name"] for e in body["entries"]], ["Rotom-Wash", "Heatran"])
+
+    async def test_a_site_only_league_is_made_and_started_from_the_site(self):
+        status, body = await self.client.post("/setup", json={
+            "site_only": True, "name": "Site Cup", "mode": "full_season", "budget": 100, "min_picks": 1,
+            "max_picks": 2, "timer": 120, "weeks": 1, "visibility": "private",
+            "pools": [{"players": [{"user_id": "11", "display_name": "Larry"}, {"user_id": "22", "display_name": "Alex"}]}],
+        }, headers={"X-OgreClan-Secret": SECRET}), None
+        body = await status.json()
+        self.assertTrue(body["ok"], body)
+        league = rules.get_league(self.conn, body["league_id"])
+        self.assertEqual((league["site_only"], league["visibility"], league["guild_id"]), (1, "private", 0))
+
+        status, started = await self.call("/start", league_id=league["id"], pool="A")
+        self.assertEqual(status, 200, started)
+        pool = self.conn.execute("SELECT * FROM pool_view WHERE league_id = ?", (league["id"],)).fetchone()
+        self.assertEqual(pool["status"], "active")
+        self.assertIsNotNone(pool["turn_deadline"], "its clock runs with no Discord channel")
+
+        status, body = await self.call("/setup", name="Discord Cup", guild_id="1", admin_channel_id="2",
+                                       min_picks=1, max_picks=2, timer=120, budget=100, pools=[{"channel_id": "3"}])
+        self.assertEqual(status, 400)
+        self.assertIn("isn't in that Discord server", body["error"])
 
     async def test_the_tier_list_shows_everything_and_who_has_it(self):
         await self.start_draft()

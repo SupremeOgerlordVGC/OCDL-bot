@@ -67,6 +67,7 @@ class AdminCog(commands.Cog):
         players_role_b="Instead of listing them: a role for the second pool",
         weeks="Season length when the bot generates the schedule itself",
         visibility="Who can see it on draft.ogreclan.com. Public unless you choose Private.",
+        website="Use draft.ogreclan.com: picks there, Ready battles on play.ogreclan.com, kills and deaths recorded. On unless you turn it off.",
     )
     @app_commands.choices(mode=MODES, visibility=VISIBILITY)
     async def setup_league(self, interaction: discord.Interaction, name: str,
@@ -82,20 +83,13 @@ class AdminCog(commands.Cog):
                            players_b: str = None,
                            players_role_b: discord.Role = None,
                            weeks: int = None,
-                           visibility: app_commands.Choice[str] = None):
+                           visibility: app_commands.Choice[str] = None,
+                           website: bool = True):
         if interaction.guild is None:
             raise rules.DraftError("❌ Leagues can only be created inside a server.")
         ui.require_moderator(self.bot, interaction)
 
         await interaction.response.defer(ephemeral=True)
-
-        if template_link and tiering_link:
-            raise rules.DraftError(
-                "❌ Link a template **or** a tiering sheet, not both. The template already "
-                "contains its own tiering tab."
-            )
-        doc_kind = "template" if template_link else ("tiering" if tiering_link else "none")
-        doc_url = template_link or tiering_link
 
         has_pool_b_players = bool(players_b) or players_role_b is not None
         if not rules.second_pool_is_consistent(draft_channel_b is not None,
@@ -105,6 +99,57 @@ class AdminCog(commands.Cog):
                 "`draft_channel_b` plus either `players_b` or `players_role_b`. "
                 "Leave all three out for a single-pool draft."
             )
+
+        roster_a, shuffled_a = await ui.roster_from_options(
+            interaction.guild, players, players_role, "A")
+        rosters = {"A": roster_a}
+        shuffled = {"A": shuffled_a}
+
+        if draft_channel_b is not None:
+            roster_b, shuffled_b = await ui.roster_from_options(
+                interaction.guild, players_b, players_role_b, "B")
+            rosters["B"] = roster_b
+            shuffled["B"] = shuffled_b
+
+        channels = {"A": draft_channel.id}
+        if draft_channel_b is not None:
+            channels["B"] = draft_channel_b.id
+
+        league, pool_rows, notes, coach_slots = await self.build_league(
+            guild_id=interaction.guild_id, admin_channel_id=interaction.channel_id, name=name,
+            rosters=rosters, channels=channels, min_picks=min_picks, max_picks=max_picks,
+            timer=timer, mode=mode.value, budget=budget, tera_budget=tera_budget,
+            max_trades=max_trades, template_link=template_link, tiering_link=tiering_link,
+            weeks=weeks, visibility=visibility.value if visibility else "public", website=website,
+        )
+        await self.announce_setup(league, pool_rows, coach_slots, shuffled, interaction.channel)
+
+        extra = ("\n" + "\n".join(notes)) if notes else ""
+        await interaction.followup.send(
+            f"✅ **{league['name']}** created with "
+            f"{len(pool_rows)} pool{'s' if len(pool_rows) > 1 else ''}.{extra}",
+            ephemeral=True,
+        )
+
+    async def build_league(self, *, guild_id, admin_channel_id, name, rosters, channels,
+                           min_picks, max_picks, timer, mode, budget=None, tera_budget=None,
+                           max_trades=0, template_link=None, tiering_link=None, weeks=None,
+                           visibility="public", website=True, site_only=False):
+        """The heart of /setup, shared with draft.ogreclan.com (webapi.py).
+
+        Reads the document (a template's budgets and Coaches tab), creates the
+        league and its pools, generates a schedule when there's no template,
+        and writes the sheet. `rosters` is {"A": [player entries], "B": ...} in
+        draft order and `channels` is {"A": channel_id, ...}. Returns
+        (league, pool_rows, notes, coach_slots).
+        """
+        if template_link and tiering_link:
+            raise rules.DraftError(
+                "❌ Link a template **or** a tiering sheet, not both. The template already "
+                "contains its own tiering tab."
+            )
+        doc_kind = "template" if template_link else ("tiering" if tiering_link else "none")
+        doc_url = template_link or tiering_link
 
         # A template declares the league's own budget, so the sheet wins.
         notes = []
@@ -142,17 +187,6 @@ class AdminCog(commands.Cog):
                 )
             tera_budget = tera_budget or 0
 
-        roster_a, shuffled_a = await ui.roster_from_options(
-            interaction.guild, players, players_role, "A")
-        rosters = {"A": roster_a}
-        shuffled = {"A": shuffled_a}
-
-        if draft_channel_b is not None:
-            roster_b, shuffled_b = await ui.roster_from_options(
-                interaction.guild, players_b, players_role_b, "B")
-            rosters["B"] = roster_b
-            shuffled["B"] = shuffled_b
-
         # With a template, the Coaches tab decides which roster blocks exist
         # and who owns them. Only ticked "In schedule" rows take part, and a
         # row already naming somebody belongs to them - so players are
@@ -164,7 +198,7 @@ class AdminCog(commands.Cog):
                 self.bot.sheets.read_coach_slots, doc_url)
             coach_slots = {}
 
-            for label, roster in rosters.items():
+            for label, roster in list(rosters.items()):
                 available = slots.get(label, [])
                 if not available:
                     raise rules.DraftError(
@@ -215,28 +249,28 @@ class AdminCog(commands.Cog):
                     named = ", ".join(f"{sheet_names[n]} (row {n})" for n in unclaimed)
                     notes.append(f"⚠️ Pool {label}: ticked but nobody listed them — {named}")
 
-        pools = [("A", draft_channel.id, rosters["A"])]
-        if draft_channel_b is not None:
-            pools.append(("B", draft_channel_b.id, rosters["B"]))
+        pools = [(label, channels[label], rosters[label]) for label in sorted(rosters)]
 
         league_id = rules.create_league(
             self.bot.conn,
-            guild_id=interaction.guild_id,
-            admin_channel_id=interaction.channel_id,
+            guild_id=guild_id,
+            admin_channel_id=admin_channel_id,
             name=name,
             pools=pools,
             budget=budget,
             min_picks=min_picks,
             max_picks=max_picks,
             base_timer=timer,
-            mode=mode.value,
+            mode=mode,
             doc_kind=doc_kind,
             doc_url=doc_url,
             tera_budget=tera_budget,
             max_trades=max_trades,
             season_weeks=weeks or 0,
             coach_slots=coach_slots,
-            visibility=visibility.value if visibility else "public",
+            visibility=visibility,
+            website=website,
+            site_only=site_only,
         )
         league = rules.get_league(self.bot.conn, league_id)
 
@@ -254,24 +288,30 @@ class AdminCog(commands.Cog):
         pool_rows = rules.get_league_pools(self.bot.conn, league_id)
         ui.resync_sheet(self.bot, pool_rows[0]["id"])
 
-        document = {"template": "full template", "tiering": "tiering sheet",
-                    "none": "none"}[doc_kind]
-        if doc_url and not self.bot.sheets.enabled:
-            document += f" (inactive: {self.bot.sheets.reason})"
+        return league, pool_rows, notes, coach_slots
 
+    async def announce_setup(self, league, pool_rows, coach_slots, shuffled, admin_channel):
+        """/setup's summary in the admin channel, and a note in each pool's channel"""
+        document = {"template": "full template", "tiering": "tiering sheet",
+                    "none": "none"}[league["doc_kind"]]
+        if league["doc_url"] and not self.bot.sheets.enabled:
+            document += f" (inactive: {self.bot.sheets.reason})"
+        tera_budget = league["tera_budget"]
         summary = (
             f"📋 **{league['name']}** has been set up.\n"
             f"• Mode: **{'full season' if league['mode'] == 'full_season' else 'draft only'}**\n"
-            f"• Budget: **{budget}** points"
+            f"• Budget: **{league['budget']}** points"
             + (f" · Tera budget **{tera_budget}** (max {config.MAX_TERA_CAPTAINS} captains)\n"
                if tera_budget else "\n")
-            + f"• Picks: **{min_picks}–{max_picks}** per player ({max_picks} rounds)\n"
-            f"• Base timer: **{ui.format_seconds(timer)}**\n"
-            + (f"• Trade pickups per player: **{max_trades or 'unlimited'}** Pokémon\n"
+            + f"• Picks: **{league['min_picks']}–{league['max_picks']}** per player "
+            f"({league['max_picks']} rounds)\n"
+            f"• Base timer: **{ui.format_seconds(league['base_timer'])}**\n"
+            + (f"• Trade pickups per player: **{league['max_trades'] or 'unlimited'}** Pokémon\n"
                if league["mode"] == "full_season" else "")
             + f"• Document: {document}\n"
-            f"• On draft.ogreclan.com: **{league['visibility']}**\n"
-            f"• Trade approvals: {interaction.channel.mention}\n"
+            f"• On draft.ogreclan.com: **{league['visibility']}**"
+            + (", website compatible" if league["website"] else ", not using the website") + "\n"
+            + (f"• Trade approvals: {admin_channel.mention}\n" if admin_channel is not None else "")
         )
         for pool in pool_rows:
             seats = rules.get_players(self.bot.conn, pool["id"])
@@ -285,7 +325,7 @@ class AdminCog(commands.Cog):
             summary += (f"\n**Pool {pool['label']}** — <#{pool['channel_id']}> "
                         f"({len(seats)} players){how}\n{order}\n")
 
-        await ui.safe_send(interaction.channel, summary)
+        await ui.safe_send(admin_channel, summary)
         for pool in pool_rows:
             await ui.safe_send(
                 self.bot.get_channel(pool["channel_id"]),
@@ -293,13 +333,6 @@ class AdminCog(commands.Cog):
                 f"Settings can still be changed with `/edit`. A moderator starts the "
                 f"draft with `/draft`."
             )
-
-        extra = ("\n" + "\n".join(notes)) if notes else ""
-        await interaction.followup.send(
-            f"✅ **{league['name']}** created with "
-            f"{len(pool_rows)} pool{'s' if len(pool_rows) > 1 else ''}.{extra}",
-            ephemeral=True,
-        )
 
     # ---- /edit ----------------------------------------------------------
 
@@ -511,6 +544,27 @@ class AdminCog(commands.Cog):
                        f"on this server — approving trades, running `/setup`, and so on.")
 
         await interaction.response.send_message(message, ephemeral=True)
+
+    # ---- /website -------------------------------------------------------
+
+    @app_commands.command(
+        name="website",
+        description="Moderator only: whether a league uses draft.ogreclan.com.",
+    )
+    @app_commands.describe(name="The league's name",
+                           on="On: picks on the site, Ready battles on play.ogreclan.com, kills and deaths recorded")
+    async def website(self, interaction: discord.Interaction, name: str, on: bool):
+        ui.require_moderator(self.bot, interaction)
+        league = rules.require_any_league_by_name(self.bot.conn, interaction.guild_id, name)
+        league = rules.set_website(self.bot.conn, league["id"], on)
+        await interaction.response.send_message(
+            f"✅ **{league['name']}** " + (
+                "uses draft.ogreclan.com: picks and queues there, matches with Ready on play.ogreclan.com, "
+                "and kills and deaths recorded from those battles." if league["website"] else
+                "doesn't use draft.ogreclan.com for picks or matches: players report kills and deaths "
+                "themselves (or give the bot replay links)."),
+            ephemeral=True,
+        )
 
     # ---- /visibility ----------------------------------------------------
 

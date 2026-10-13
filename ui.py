@@ -323,6 +323,9 @@ async def announce(bot, draft_id, events, channel=None):
         elif event["type"] == "draft_complete":
             bot.timers.cancel(draft_id)
 
+    if draft["site_only"]:
+        # it lives on draft.ogreclan.com: nothing to post, and the clock runs
+        return
     if channel is None:
         log.warning("draft %s: channel %s is not visible to the bot",
                     draft_id, draft["channel_id"])

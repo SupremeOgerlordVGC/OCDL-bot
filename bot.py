@@ -209,6 +209,9 @@ class DraftBot(commands.Bot):
             deadline = self.timers.schedule(draft["id"], seconds, token)
             rules.open_turn_clock(self.conn, draft["id"], deadline)
             log.info("draft %s restarted the clock (%ss)", draft["id"], seconds)
+            if draft["site_only"]:
+                # it lives on draft.ogreclan.com, which shows the new deadline
+                continue
 
             posted = await ui.safe_send(
                 channel,

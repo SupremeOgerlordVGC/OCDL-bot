@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS leagues (
     -- Who sees it on draft.ogreclan.com: 'public' (everyone) or 'private'
     -- (its own players, signed in with Discord)
     visibility        TEXT NOT NULL DEFAULT 'public',
+    -- 1 when the league uses draft.ogreclan.com: picks and queues there,
+    -- battles started with Ready on OgreClan's Showdown server, and kills and
+    -- deaths recorded from them
+    website           INTEGER NOT NULL DEFAULT 1,
+    -- 1 for a league made on draft.ogreclan.com that lives only there: no
+    -- Discord server or channels (its pools have placeholder channel IDs),
+    -- so nothing is posted to Discord; the bot still runs its rules and timers
+    site_only         INTEGER NOT NULL DEFAULT 0,
     -- 'setup' | 'active' | 'complete' | 'archived' | 'cancelled'
     status            TEXT NOT NULL DEFAULT 'setup',
     created_at        TEXT NOT NULL,
@@ -289,7 +297,9 @@ SELECT pools.id               AS id,
        leagues.base_timer       AS base_timer,
        leagues.max_trades       AS max_trades,
        leagues.season_weeks     AS season_weeks,
-       leagues.status           AS league_status
+       leagues.status           AS league_status,
+       leagues.website          AS website,
+       leagues.site_only        AS site_only
 FROM pools JOIN leagues ON leagues.id = pools.league_id;
 """
 
@@ -314,6 +324,8 @@ ADDED_COLUMNS = [
     ("pools", "free_trades_until", "REAL"),
     ("trades", "free", "INTEGER NOT NULL DEFAULT 0"),
     ("leagues", "visibility", "TEXT NOT NULL DEFAULT 'public'"),
+    ("leagues", "website", "INTEGER NOT NULL DEFAULT 1"),
+    ("leagues", "site_only", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # Run once, when the column is added to an existing database. Trades approved
