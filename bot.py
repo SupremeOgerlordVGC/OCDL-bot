@@ -17,6 +17,7 @@ import sys
 import time
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 import config
@@ -289,6 +290,16 @@ class DraftBot(commands.Bot):
             message = str(original)
         elif isinstance(original, sheets.SheetError):
             message = f"⚠️ Google Sheets problem: {original}\nThe draft itself is unaffected."
+        elif isinstance(original, app_commands.TransformerError):
+            # Typing a name into a player: option instead of picking from the
+            # list, most often somebody who has since left the server. Worth
+            # saying plainly - mid-season departures are normal.
+            message = (
+                f"❌ I could not find **{original.value}** on this server. "
+                f"Pick the person from the list Discord offers rather than typing "
+                f"their name, and if they have left the server use the name the "
+                f"draft knows them by — `/progress` lists everybody in it."
+            )
         else:
             log.exception("unhandled command error", exc_info=original)
             message = "❌ Something went wrong running that command. The draft has not been changed."

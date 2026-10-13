@@ -554,8 +554,12 @@ class EditPickTests(unittest.TestCase):
         live = draft.get_pool(self.conn, self.draft["id"])
         draft.make_pick(self.conn, live, user(2), 1, "Heatran", 10)
         live = draft.get_pool(self.conn, self.draft["id"])
-        with self.assertRaises(draft.DraftError):
-            draft.edit_pick(self.conn, live, user(1), 1, "Heatran", 10)
+        # As a moderator, so it is the duplicate that refuses this and not
+        # the edit window - a player would be too late by now either way.
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.edit_pick(self.conn, live, 99999, 1, "Heatran", 10,
+                            target_user_id=user(1), acting_as_admin=True)
+        self.assertIn("already been drafted", str(caught.exception))
         # The rejected edit changed nothing.
         p1 = draft.get_player(self.conn, self.draft["id"], user(1))
         self.assertEqual(p1["budget_remaining"], 38)
@@ -583,6 +587,86 @@ class EditPickTests(unittest.TestCase):
         live = draft.get_pool(self.conn, self.draft["id"])
         draft.edit_pick(self.conn, live, user(1), 1, "Garchomp", 5)
         self.assertEqual(draft.get_player(self.conn, self.draft["id"], user(1))["budget_remaining"], 45)
+
+
+class EditWindowTests(unittest.TestCase):
+    """A player may correct their own pick only until the next pick is made.
+
+    Without this, somebody could rewrite an earlier pick after watching
+    what everyone else drafted - most temptingly when their own turn had
+    passed automatically from a queue.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=1700, players=3, budget=100,
+                                min_picks=1, max_picks=3)
+
+    def live(self):
+        return draft.get_pool(self.conn, self.draft["id"])
+
+    def test_you_can_fix_your_pick_straight_away(self):
+        draft.make_pick(self.conn, self.live(), user(1), 1, "Garchomp", 12)
+        draft.edit_pick(self.conn, self.live(), user(1), 1, "Heatran", 10)
+
+        p1 = draft.get_player(self.conn, self.draft["id"], user(1))
+        self.assertEqual(draft.roster_view(self.conn, self.live(), p1)["pokemon"],
+                         [("Heatran", 10)])
+
+    def test_you_cannot_once_somebody_else_has_picked(self):
+        draft.make_pick(self.conn, self.live(), user(1), 1, "Garchomp", 12)
+        draft.make_pick(self.conn, self.live(), user(2), 1, "Landorus", 15)
+
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.edit_pick(self.conn, self.live(), user(1), 1, "Heatran", 10)
+        self.assertIn("Too late", str(caught.exception))
+
+        # The refusal changed nothing at all.
+        p1 = draft.get_player(self.conn, self.draft["id"], user(1))
+        self.assertEqual(p1["budget_remaining"], 88)
+        self.assertEqual(draft.roster_view(self.conn, self.live(), p1)["pokemon"],
+                         [("Garchomp", 12)])
+
+    def test_you_cannot_reach_back_to_an_earlier_round(self):
+        for seat in (1, 2, 3):
+            draft.make_pick(self.conn, self.live(), user(seat), 1, f"Round1Mon{seat}", 10)
+        # Round 2 snakes back to seat 3, who picks again.
+        draft.make_pick(self.conn, self.live(), user(3), 2, "Round2Mon3", 10)
+
+        with self.assertRaises(draft.DraftError):
+            draft.edit_pick(self.conn, self.live(), user(3), 1, "Swapped", 10)
+
+    def test_a_moderator_is_never_too_late(self):
+        draft.make_pick(self.conn, self.live(), user(1), 1, "Garchomp", 12)
+        draft.make_pick(self.conn, self.live(), user(2), 1, "Landorus", 15)
+
+        result = draft.edit_pick(self.conn, self.live(), 99999, 1, "Heatran", 10,
+                                 target_user_id=user(1), acting_as_admin=True)
+        self.assertEqual((result["old_pokemon"], result["new_pokemon"]),
+                         ("Garchomp", "Heatran"))
+
+    def test_a_queued_pick_can_be_fixed_in_the_window(self):
+        # The case that prompted the rule: your turn went past on its own,
+        # so you get the same chance to correct it as anybody else.
+        draft.queue_picks(self.conn, self.live(), user(2), 1, ["Queued"], [9])
+        draft.make_pick(self.conn, self.live(), user(1), 1, "Garchomp", 12)
+
+        picks = draft.round_picks(self.conn, self.draft["id"], 1)
+        self.assertEqual([p["pokemon"] for p in picks], ["Garchomp", "Queued"])
+
+        draft.edit_pick(self.conn, self.live(), user(2), 1, "Wanted", 11)
+        p2 = draft.get_player(self.conn, self.draft["id"], user(2))
+        self.assertEqual(draft.roster_view(self.conn, self.live(), p2)["pokemon"],
+                         [("Wanted", 11)])
+
+    def test_a_makeup_pick_can_also_be_fixed_in_the_window(self):
+        draft.skip_current_player(self.conn, self.draft["id"])
+        draft.make_makeup_pick(self.conn, self.live(), user(1), 1, "LateMon", 10)
+        draft.edit_pick(self.conn, self.live(), user(1), 1, "Better", 11)
+
+        p1 = draft.get_player(self.conn, self.draft["id"], user(1))
+        self.assertEqual(draft.roster_view(self.conn, self.live(), p1)["pokemon"],
+                         [("Better", 11)])
 
 
 class TradeTests(unittest.TestCase):
@@ -2214,6 +2298,102 @@ class CancelQueueTests(unittest.TestCase):
         live = draft.get_pool(conn, pool["id"])
         events = draft.start_pool(conn, live)
         self.assertEqual([e for e in events if e["type"] == "auto_pick"], [])
+
+
+class PickEventShapeTests(unittest.TestCase):
+    """Both kinds of pick event must expose the same fields.
+
+    The announcement and the spreadsheet's Tera tick box are both built
+    from the event, not from the database, so a field present on one kind
+    and missing from the other goes wrong silently. That is exactly how
+    queued Tera Captains reached the sheet as ordinary picks.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=1600, players=2, budget=115,
+                                tera_budget=28, min_picks=1, max_picks=3)
+
+    def events_for_both_kinds(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 1, ["Queued"], [9], [True])
+        _, events = draft.make_pick(self.conn, self.draft, user(1), 1, "Typed", 10)
+        made = [e for e in events if e["type"] == "pick_made"][0]
+        auto = [e for e in events if e["type"] == "auto_pick"][0]
+        return made, auto
+
+    def test_a_typed_and_a_queued_pick_describe_themselves_alike(self):
+        made, auto = self.events_for_both_kinds()
+        self.assertEqual(set(made) - {"type"}, set(auto) - {"type"},
+                         "a field on one pick event but not the other will be "
+                         "silently dropped by the sheet or the announcement")
+
+    def test_a_queued_captain_is_flagged_on_its_event(self):
+        made, auto = self.events_for_both_kinds()
+        self.assertFalse(made["tera_captain"])
+        self.assertTrue(auto["tera_captain"], "the sheet's tick box is built from this")
+        self.assertEqual(auto["pokemon"], "Queued")
+
+
+class QueueViewTests(unittest.TestCase):
+    """Reading back your own queue, which is private to you."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=1800, players=3, budget=100,
+                                tera_budget=30, min_picks=1, max_picks=4,
+                                base_timer=120)
+
+    def test_entries_come_back_grouped_by_round_in_priority_order(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 2,
+                          ["First", "Second", "Third"], [12, 10, 8])
+        draft.queue_picks(self.conn, self.draft, user(2), 3, ["Later"], [5])
+
+        view = draft.queue_view(self.conn, self.draft, user(2))
+
+        self.assertEqual([r for r, _ in view["rounds"]], [2, 3])
+        self.assertEqual([e["pokemon"] for e in view["rounds"][0][1]],
+                         ["First", "Second", "Third"])
+        self.assertEqual([e["priority"] for e in view["rounds"][0][1]], [1, 2, 3])
+
+    def test_one_round_can_be_asked_for(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 2, ["Wanted"], [12])
+        draft.queue_picks(self.conn, self.draft, user(2), 3, ["Other"], [5])
+
+        view = draft.queue_view(self.conn, self.draft, user(2), 3)
+        self.assertEqual([r for r, _ in view["rounds"]], [3])
+
+    def test_the_tera_flag_and_an_unknown_cost_survive(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 2, ["Starred"], [None], [True])
+        entry = draft.queue_view(self.conn, self.draft, user(2))["rounds"][0][1][0]
+        self.assertTrue(entry["tera_captain"])
+        self.assertIsNone(entry["cost"])
+
+    def test_an_empty_queue_is_not_an_error(self):
+        view = draft.queue_view(self.conn, self.draft, user(2))
+        self.assertEqual(view["rounds"], [])
+
+    def test_rounds_already_drafted_are_reported(self):
+        draft.make_pick(self.conn, self.conn.execute(
+            "SELECT * FROM pool_view WHERE id = ?", (self.draft["id"],)).fetchone(),
+            user(1), 1, "Taken", 10)
+        view = draft.queue_view(self.conn, self.draft, user(1))
+        self.assertEqual(view["picked"], {1})
+
+    def test_a_queue_is_private_unless_you_are_a_moderator(self):
+        draft.queue_picks(self.conn, self.draft, user(2), 2, ["Secret"], [12])
+
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.queue_view(self.conn, self.draft, user(3), target_user_id=user(2))
+        self.assertIn("private", str(caught.exception))
+
+        view = draft.queue_view(self.conn, self.draft, user(3),
+                                target_user_id=user(2), acting_as_admin=True)
+        self.assertEqual(view["player"]["display_name"], "Player2")
+        self.assertEqual(view["rounds"][0][1][0]["pokemon"], "Secret")
+
+    def test_a_round_outside_the_draft_is_refused(self):
+        with self.assertRaises(draft.DraftError):
+            draft.queue_view(self.conn, self.draft, user(2), 99)
 
 
 class MigrationTests(unittest.TestCase):

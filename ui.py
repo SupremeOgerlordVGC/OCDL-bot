@@ -183,8 +183,9 @@ def render_event(event, draft):
                 f"pick #{event['pick_order']})*")
 
     if kind == "auto_pick":
+        captain = " ⭐ **Tera Captain**" if event.get("tera_captain") else ""
         return (f"🤖 **{event['display_name']}**'s queued pick: **{event['pokemon']}** "
-                f"for **{event['cost']}** points. *(Round {event['round']}, "
+                f"for **{event['cost']}** points.{captain} *(Round {event['round']}, "
                 f"pick #{event['pick_order']})*")
 
     if kind == "queue_exhausted":

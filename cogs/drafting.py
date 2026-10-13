@@ -1,7 +1,7 @@
 """
 The commands players use during a draft:
-/pick, /queuepick, /cancelqueue, /makeuppick, /editpick, /status,
-/progress, /roster.
+/pick, /queuepick, /myqueue, /cancelqueue, /makeuppick, /editpick,
+/status, /progress, /roster.
 
 Every command finds its draft from `interaction.channel_id`, which is what
 keeps parallel drafts in different channels completely separate.
@@ -350,6 +350,60 @@ class DraftingCog(commands.Cog):
                 f"🗑️ A moderator cancelled **{target['display_name']}**'s "
                 f"{which}. No pick was changed.",
             )
+
+    # ---- /myqueue -------------------------------------------------------
+
+    @app_commands.command(
+        name="myqueue",
+        description="See the Pokémon you have queued for an upcoming turn.",
+    )
+    @app_commands.describe(
+        round="The round to look at. Leave empty to see every round you have queued.",
+        player="Moderators only: whose queue to look at",
+    )
+    async def myqueue(self, interaction: discord.Interaction, round: int = None,
+                      player: discord.Member = None):
+        draft = rules.require_live_pool(self.bot.conn, interaction.channel_id)
+        # Ephemeral without exception: a visible queue hands opponents your plan.
+        await interaction.response.defer(ephemeral=True)
+
+        view = rules.queue_view(
+            self.bot.conn, draft, interaction.user.id, round,
+            target_user_id=player.id if player else None,
+            acting_as_admin=ui.is_moderator(self.bot, interaction),
+        )
+        target = view["player"]
+        whose = ("Your" if target["user_id"] == interaction.user.id
+                 else f"**{target['display_name']}**'s")
+
+        if not view["rounds"]:
+            where = f" for Round {round}" if round else ""
+            note = ""
+            if round and round in view["picked"]:
+                note = f" That round is already drafted — see `/roster`."
+            elif round:
+                note = (f" Queue one with `/queuepick round:{round} "
+                        f"pokemon:Garchomp, Heatran`.")
+            await interaction.followup.send(
+                f"📭 Nothing queued{where}.{note}", ephemeral=True)
+            return
+
+        lines = []
+        for round_number, entries in view["rounds"]:
+            taken = " *(already drafted)*" if round_number in view["picked"] else ""
+            lines.append(f"**Round {round_number}**{taken}")
+            for entry in entries:
+                captain = " ⭐ Tera Captain" if entry["tera_captain"] else ""
+                cost = "cost unknown" if entry["cost"] is None else f"{entry['cost']} points"
+                lines.append(f"{entry['priority']}. **{entry['pokemon']}** — {cost}{captain}")
+
+        await interaction.followup.send(
+            f"📝 {whose} queue:\n" + "\n".join(lines)
+            + "\n\nThe bot takes the first one still available and affordable. "
+              "`/queuepick` replaces a round's queue, `/cancelqueue` deletes it.",
+            ephemeral=True,
+        )
+
 
     # ---- /makeuppick ----------------------------------------------------
 

@@ -270,6 +270,20 @@ def roster_size(conn, pool_id, player_id):
     ).fetchone()["n"]
 
 
+def pick_is_latest(conn, pool_id, pick):
+    """True if nothing has been drafted in this pool since this pick.
+
+    pick_order is global to the pool and always MAX + 1, so the newest pick
+    is simply the highest. Used to decide whether a player may still change
+    their own pick, or whether that is now a moderator's job.
+    """
+    latest = conn.execute(
+        "SELECT COALESCE(MAX(pick_order), 0) AS n FROM picks WHERE pool_id = ?",
+        (pool_id,),
+    ).fetchone()["n"]
+    return pick["pick_order"] == latest
+
+
 def next_pick_order(conn, pool_id):
     row = conn.execute(
         "SELECT COALESCE(MAX(pick_order), 0) + 1 AS n FROM picks WHERE pool_id = ?",
@@ -1078,8 +1092,12 @@ def begin_turn(conn, pool_id):
         # 3. Queued picks: draft automatically if anything in the list is legal.
         pick, had_queue = _try_queue(conn, draft, player)
         if pick is not None:
+            # tera_captain has to travel with the event: the sheet's tick box
+            # and the announcement are both built from it, and a queued
+            # captain is otherwise written to the sheet as an ordinary pick.
             events.append(_event("auto_pick", player, round=pick["round"],
                                  pokemon=pick["pokemon"], cost=pick["cost"],
+                                 tera_captain=bool(pick["tera_captain"]),
                                  pick_order=pick["pick_order"]))
             advance_turn(conn, pool_id)
             continue    # the next player might also have a queue
@@ -1394,6 +1412,41 @@ def cancel_queue(conn, draft, actor_user_id, round_number=None,
     return {"player": player, "removed": removed}
 
 
+def queue_view(conn, draft, actor_user_id, round_number=None,
+               target_user_id=None, acting_as_admin=False):
+    """/myqueue - look at what is stored for an upcoming turn.
+
+    A queue is private: it is the one thing in the draft that gives an
+    opponent an edge if they see it, so only its owner - or a moderator
+    helping them - may look, and the reply is always ephemeral.
+
+    Returns {"player", "rounds": [(round, [entries])], "picked": {rounds
+    already drafted}}, so the caller can tell "nothing queued" apart from
+    "that turn has already been taken".
+    """
+    target_user_id = target_user_id or actor_user_id
+    if target_user_id != actor_user_id and not acting_as_admin:
+        raise DraftError(
+            "❌ A queue is private — only a moderator can look at somebody else's."
+        )
+    if draft["status"] not in ("setup", "active"):
+        raise DraftError("❌ This draft is not running.")
+
+    player = require_player(conn, draft["id"], target_user_id)
+    if round_number is not None and not 1 <= round_number <= draft["max_picks"]:
+        raise DraftError(f"❌ This draft only has rounds 1–{draft['max_picks']}.")
+
+    grouped = {}
+    for entry in queued_entries(conn, draft["id"], player["id"], round_number):
+        grouped.setdefault(entry["round"], []).append(entry)
+
+    picked = {row["round"] for row in conn.execute(
+        "SELECT round FROM picks WHERE pool_id = ? AND player_id = ?",
+        (draft["id"], player["id"]))}
+
+    return {"player": player, "rounds": sorted(grouped.items()), "picked": picked}
+
+
 def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
               tera_captain=False, target_user_id=None, acting_as_admin=False):
     """/editpick - replace a pick that has already been made."""
@@ -1442,6 +1495,17 @@ def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
             "new_cost": cost,
             "created": True,
         }
+
+    # A player may only correct their own pick until the next pick is made.
+    # Past that, they would be rewriting a choice with the benefit of seeing
+    # what everybody drafted afterwards; from there it is a moderator's call.
+    # Moderators are not restricted at all.
+    if not acting_as_admin and not pick_is_latest(conn, draft["id"], pick):
+        raise DraftError(
+            f"❌ Too late to change that yourself — somebody has picked since. "
+            f"You can only edit your own pick until the next pick is made. "
+            f"Ask a moderator and they can fix it for you."
+        )
 
     roster_row = conn.execute(
         "SELECT * FROM rosters WHERE pick_id = ?", (pick["id"],)

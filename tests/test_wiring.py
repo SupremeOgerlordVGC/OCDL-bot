@@ -108,6 +108,7 @@ class CommandOptionTests(unittest.TestCase):
         "editpick": {"round", "pokemon", "cost", "tera_captain", "player"},
         "queuepick": {"round", "pokemon", "costs", "tera"},
         "cancelqueue": {"round", "player"},
+        "myqueue": {"round", "player"},
         "draft": {"at"},
         "setup": {"name", "draft_channel", "players", "players_role", "min_picks",
                   "max_picks", "timer", "mode", "budget", "tera_budget", "max_trades",
@@ -162,6 +163,70 @@ class CommandOptionTests(unittest.TestCase):
             for param in command.parameters:
                 self.assertTrue(param.description,
                                 f"/{command.name} {param.name} has no description")
+
+
+class ErrorReportingTests(unittest.TestCase):
+    """What the user is told when a command cannot even be parsed.
+
+    Discord rejects a name typed into a player: option before the command
+    runs, which used to surface as "Something went wrong". Somebody leaving
+    the server mid-season makes that a normal thing to hit.
+    """
+
+    def setUp(self):
+        import asyncio, tempfile, os as _os
+        import config as _config
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        _os.close(handle)
+        _config.DB_PATH = self.path
+        import bot as botmod
+        self.bot = botmod.DraftBot(members_intent=False)
+
+    def tearDown(self):
+        import asyncio, os as _os
+        asyncio.run(self.bot.close())
+        for suffix in ("", "-wal", "-shm"):
+            if _os.path.exists(self.path + suffix):
+                _os.remove(self.path + suffix)
+
+    def report(self, error):
+        import asyncio
+
+        sent = []
+
+        class Response:
+            def is_done(self):
+                return False
+
+            async def send_message(self, content, ephemeral=False):
+                sent.append(content)
+
+        class Interaction:
+            response = Response()
+
+        asyncio.run(self.bot.on_app_command_error(Interaction(), error))
+        return sent[0]
+
+    def test_an_unknown_member_is_named_rather_than_hidden(self):
+        import discord
+        from discord import app_commands
+
+        class Transformer:
+            _error_display_name = "Member"
+
+        message = self.report(app_commands.TransformerError(
+            "philomelee", discord.AppCommandOptionType.user, Transformer()))
+        self.assertIn("philomelee", message)
+        self.assertNotIn("Something went wrong", message)
+
+    def test_a_rule_violation_is_passed_through_unchanged(self):
+        import draft as rules
+        self.assertEqual(self.report(rules.DraftError("❌ It is not your turn.")),
+                         "❌ It is not your turn.")
+
+    def test_anything_unexpected_still_says_the_draft_is_safe(self):
+        message = self.report(RuntimeError("boom"))
+        self.assertIn("has not been changed", message)
 
 
 if __name__ == "__main__":

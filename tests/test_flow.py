@@ -16,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import discord      # noqa: E402
+from types import SimpleNamespace   # noqa: E402
 
 import config       # noqa: E402
 import database     # noqa: E402
@@ -498,6 +499,119 @@ class QueuePricingTests(unittest.IsolatedAsyncioTestCase):
                          88)
 
 
+class FakeInteraction:
+    """Enough of an Interaction to run a command callback.
+
+    Worth having: a command body only fails when somebody actually runs it,
+    which is how /pick shipped without tera_captain and how two sheet write
+    paths stayed broken behind a try/except.
+    """
+
+    def __init__(self, bot, channel_id, user_id, display_name="Larry"):
+        self.client = bot
+        self.channel_id = channel_id
+        self.channel = bot.get_channel(channel_id)
+        self.user = SimpleNamespace(id=user_id, display_name=display_name,
+                                    name=display_name.lower(), roles=[],
+                                    guild_permissions=None)
+        self.guild = None
+        self.guild_id = 1
+        self.replies = []
+        interaction = self
+
+        class Response:
+            def is_done(self):
+                return bool(interaction.replies)
+
+            async def defer(self, ephemeral=False):
+                interaction.deferred = ephemeral
+
+            async def send_message(self, content, ephemeral=False):
+                interaction.replies.append(content)
+
+        class Followup:
+            async def send(self, content, ephemeral=False):
+                interaction.replies.append(content)
+
+        self.deferred = None
+        self.response = Response()
+        self.followup = Followup()
+
+    @property
+    def text(self):
+        return "\n".join(self.replies)
+
+
+class MyQueueCommandTests(unittest.IsolatedAsyncioTestCase):
+    """Running /myqueue the way a player does."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9300)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.pool_id = make_pool(
+            self.conn, 9300, [(11, "Larry"), (22, "Alex")],
+            budget=115, tera_budget=28, min_picks=1, max_picks=4)
+        self.cog = DraftingCog(self.bot)
+        rules.start_pool(self.conn, self.pool())
+
+    def pool(self):
+        return rules.get_pool(self.conn, self.pool_id)
+
+    def interaction(self, user_id=11):
+        return FakeInteraction(self.bot, 9300, user_id)
+
+    async def run_command(self, interaction, **kwargs):
+        await self.cog.myqueue.callback(self.cog, interaction, **kwargs)
+        self.bot.timers.cancel_all()
+        return interaction.text
+
+    async def test_a_queue_is_listed_in_priority_order(self):
+        rules.queue_picks(self.conn, self.pool(), 11, 2,
+                          ["Garchomp", "Rotom-Wash"], [12, 8], [True, False])
+
+        text = await self.run_command(self.interaction())
+
+        self.assertIn("Round 2", text)
+        self.assertIn("1. **Garchomp** — 12 points ⭐ Tera Captain", text)
+        self.assertIn("2. **Rotom-Wash** — 8 points", text)
+        self.assertTrue(self.interaction().deferred is not False)
+
+    async def test_an_empty_queue_says_so_and_suggests_the_command(self):
+        text = await self.run_command(self.interaction(), round=3)
+        self.assertIn("Nothing queued for Round 3", text)
+        self.assertIn("/queuepick round:3", text)
+
+    async def test_one_round_can_be_asked_for(self):
+        rules.queue_picks(self.conn, self.pool(), 11, 2, ["Wanted"], [12])
+        rules.queue_picks(self.conn, self.pool(), 11, 3, ["Other"], [8])
+
+        text = await self.run_command(self.interaction(), round=3)
+        self.assertIn("Other", text)
+        self.assertNotIn("Wanted", text)
+
+    async def test_an_unknown_cost_is_not_rendered_as_none(self):
+        rules.queue_picks(self.conn, self.pool(), 11, 2, ["Mystery"], [None])
+        text = await self.run_command(self.interaction(), round=2)
+        self.assertIn("cost unknown", text)
+        self.assertNotIn("None", text)
+
+    async def test_a_drafted_round_is_marked(self):
+        rules.queue_picks(self.conn, self.pool(), 11, 1, ["Garchomp"], [12])
+        rules.make_pick(self.conn, self.pool(), 11, 1, "Garchomp", 12)
+        # The queue is consumed by the pick, so ask about the round itself.
+        text = await self.run_command(self.interaction(), round=1)
+        self.assertIn("already drafted", text)
+
+    async def test_a_player_cannot_read_somebody_elses_queue(self):
+        rules.queue_picks(self.conn, self.pool(), 22, 2, ["Secret"], [12])
+        other = SimpleNamespace(id=22)
+
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.run_command(self.interaction(user_id=11), player=other)
+        self.assertIn("private", str(caught.exception))
+
+
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
     """A channel the bot cannot post in must not break the draft.
 
@@ -656,6 +770,25 @@ class SheetWritePathTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
 
         self.assertFalse(self.recorder.picks[0][5])
+        self.bot.timers.cancel_all()
+
+    async def test_a_queued_captain_is_written_as_a_captain(self):
+        # The live bug: the auto_pick event carried no tera_captain, so the
+        # database had the captain right while the sheet's tick box stayed
+        # clear. Two real drafts ended up with a silently demoted captain.
+        await ui.announce(self.bot, self.pool_id, rules.start_pool(self.conn, self.pool()))
+        rules.queue_picks(self.conn, self.pool(), 22, 1, ["Garchomp"], [11], [True])
+        _, events = rules.make_pick(self.conn, self.pool(), 11, 1, "Rotom-Wash", 8)
+        await ui.announce(self.bot, self.pool_id, events)
+        await self.settle()
+
+        written = {pick[4]: pick for pick in self.recorder.picks}
+        self.assertIn("Garchomp", written, "the queued pick never reached the sheet")
+        self.assertEqual(written["Garchomp"][2], 2, "Alex is coach 2")
+        self.assertTrue(written["Garchomp"][5],
+                        "a queued Tera Captain must tick the box, like a typed one")
+        # And the channel says so, rather than announcing an ordinary pick.
+        self.assertIn("Tera Captain", self.channel.text)
         self.bot.timers.cancel_all()
 
     async def test_a_full_sync_sends_coaches_and_blocks(self):

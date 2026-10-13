@@ -25,6 +25,9 @@ Nothing here lists the moderator commands. Those are in the README.
 • Add `costs: 12, 10, 8` if no sheet is linked.
 • **If every Pokémon in your queue gets taken, your timer is NOT reduced.** You keep your normal time to pick by hand.
 
+**`/myqueue`** — check what you have queued. Only you can see the reply.
+`/myqueue round:3`  •  `/myqueue` on its own shows every round you queued.
+
 **`/cancelqueue`** — throw a queue away before it fires.
 `/cancelqueue round:3`  •  `/cancelqueue` on its own clears every round you queued.
 • Changed your mind, or queued the wrong thing? This deletes it. No pick is undone and your clock is untouched.
@@ -33,8 +36,10 @@ Nothing here lists the moderator commands. Those are in the README.
 `/makeuppick round:3 pokemon:Garchomp cost:12`
 • You get one chance: it must be used **before your next turn**.
 
-**`/editpick`** — fix one of your own picks.
+**`/editpick`** — fix your own pick, **until the next pick is made**.
 `/editpick round:2 pokemon:Heatran cost:10`
+• After somebody else has picked it is too late — ask a moderator, who can fix it any time.
+• This applies to a pick your queue made for you too, so check it when you get back.
 ```
 
 ---
