@@ -51,7 +51,9 @@ class WebApi:
         for path, handler in (
             ("/pick", self.pick), ("/makeup", self.makeup), ("/editpick", self.edit_pick),
             ("/archive", self.archive), ("/deleteleague", self.delete_league),
-            ("/guilds", self.guilds), ("/setup", self.setup), ("/start", self.start_draft), ("/prices", self.prices), ("/tierlist", self.tierlist),
+            ("/guilds", self.guilds), ("/setup", self.setup), ("/start", self.start_draft),
+            ("/postweek", self.post_week), ("/trade", self.trade), ("/approvetrade", self.approve_trade),
+            ("/rejecttrade", self.reject_trade), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
         ):
             app.router.add_post(path, self.wrap(handler))
@@ -285,6 +287,88 @@ class WebApi:
             await self.admin_cog.announce_start(channel, pool)
         await ui.announce(self.bot, pool["id"], events, channel=channel)
         return {"started": True}
+
+    # ---- the season (players and the site's staff) --------------------------
+
+    def league(self, body):
+        league = rules.get_league(self.bot.conn, int(body["league_id"]))
+        if league is None:
+            raise rules.DraftError("That league doesn't exist.")
+        return league
+
+    async def post_week(self, body):
+        """/postschedule from draft.ogreclan.com: the week's matches, and approved trades into effect.
+        A league on Discord gets the post in its trade approvals channel."""
+        league = self.league(body)
+        week = int(body["week"])
+        result = await self.admin_cog.post_week(league, week)
+        if result is None:
+            raise rules.DraftError(f"No matches found for week {week}.")
+        if not league["site_only"]:
+            channel = self.bot.get_channel(league["admin_channel_id"])
+            for message in ui.pack_messages(result["lines"]):
+                await ui.safe_send(channel, message)
+        return {"matches": result["matches"], "applied": result["applied"], "report": plain(result["report"])}
+
+    async def trade(self, body):
+        """/trade from draft.ogreclan.com: user_id proposes; with partner_user_id it's a swap,
+        without it free agency. drops can be empty (a pickup paid with points left)."""
+        draft = self.pool(body)
+        if draft["mode"] != "full_season":
+            raise rules.DraftError("This league doesn't have trades.")
+        drops = [str(name).strip() for name in body.get("drops") or [] if str(name).strip()]
+        drops = rules.parse_pokemon_list(", ".join(drops), config.MAX_TRADE_SIZE) if drops else []
+        gets = rules.parse_pokemon_list(", ".join(str(name) for name in body.get("gets") or []), config.MAX_TRADE_SIZE)
+        partner = int(body["partner_user_id"]) if body.get("partner_user_id") else None
+        record, warnings = rules.propose_trade(self.bot.conn, draft, int(body["user_id"]), drops, gets,
+                                               partner_user_id=partner)
+        if not draft["site_only"]:
+            league = rules.get_league(self.bot.conn, draft["league_id"])
+            proposer = rules.get_player_by_id(self.bot.conn, record["proposer_id"])
+            notes = ("\n\n⚠️ **Worth checking**\n" + "\n".join(f"• {w}" for w in warnings)) if warnings else ""
+            await ui.safe_send(self.bot.get_channel(league["admin_channel_id"]),
+                f"📨 **Trade #{record['trade_number']}** — *pending* (proposed on draft.ogreclan.com)\n"
+                f"• Draft: **{league['name']}** — Pool {draft['label']}\n"
+                f"• Proposed by: <@{proposer['user_id']}>\n"
+                f"• Partner: {f'<@{partner}>' if partner else '*undrafted pool (free agency)*'}\n"
+                f"• Giving up: {rules.trade_side(drops)}\n• Receiving: {', '.join(gets)}\n\n"
+                f"Approve with `/approvetrade trade_id:{record['trade_number']} name:{league['name']}`, "
+                f"reject with `/rejecttrade`, or decide it on the site.{notes}")
+        return {"trade_number": record["trade_number"], "free": bool(record["free"]),
+                "warnings": [plain(w) for w in warnings]}
+
+    async def approve_trade(self, body):
+        """/approvetrade from draft.ogreclan.com (user_id is the approving staff member's Discord ID)"""
+        league = self.league(body)
+        number = int(body["trade_number"])
+        trade = rules.get_trade(self.bot.conn, league["id"], number)
+        if trade is None:
+            raise rules.DraftError(f"There is no trade #{number} in {league['name']}.")
+        pool = rules.get_pool(self.bot.conn, trade["pool_id"])
+        record, notes = rules.approve_trade(self.bot.conn, pool, number, int(body.get("user_id") or 0))
+        next_week = (league["current_week"] or 0) + 1
+        if not league["site_only"]:
+            proposer = rules.get_player_by_id(self.bot.conn, record["proposer_id"])
+            partner = (rules.get_player_by_id(self.bot.conn, record["partner_id"])
+                       if record["partner_id"] else None)
+            await ui.safe_send(self.bot.get_channel(pool["channel_id"]),
+                f"🤝 **Trade #{number} approved!**\n"
+                f"• **{proposer['display_name']}** gives up: {rules.trade_side(record['drops'])}\n"
+                f"• **{proposer['display_name']}** receives: {rules.trade_side(record['gets'])}\n"
+                + (f"• Partner: **{partner['display_name']}**\n" if partner else "• Traded with the undrafted pool\n")
+                + f"Rosters and budgets change from week {next_week}, when it's posted.")
+        return {"week": next_week, "notes": [plain(note) for note in notes]}
+
+    async def reject_trade(self, body):
+        """/rejecttrade from draft.ogreclan.com"""
+        league = self.league(body)
+        number = int(body["trade_number"])
+        trade = rules.get_trade(self.bot.conn, league["id"], number)
+        if trade is None:
+            raise rules.DraftError(f"There is no trade #{number} in {league['name']}.")
+        rules.reject_trade(self.bot.conn, rules.get_pool(self.bot.conn, trade["pool_id"]), number,
+                           int(body.get("user_id") or 0))
+        return {}
 
     # ---- ending a league (the site's admins) -------------------------------
 

@@ -598,7 +598,20 @@ class AdminCog(commands.Cog):
     async def postschedule(self, interaction: discord.Interaction, week: int, name: str):
         ui.require_moderator(self.bot, interaction)
         league = rules.require_season_league_by_name(self.bot.conn, interaction.guild_id, name)
+        await interaction.response.defer(ephemeral=True)
+        result = await self.post_week(league, week)
+        if result is None:
+            await interaction.followup.send(f"No matches found for week {week}.", ephemeral=True)
+            return
+        for message in ui.pack_messages(result["lines"]):
+            await ui.safe_send(interaction.channel, message)
+        await interaction.followup.send(result["report"], ephemeral=True)
 
+    async def post_week(self, league, week):
+        """/postschedule's work, shared with draft.ogreclan.com (webapi.py): reads the week's
+        matches (the template's, or the bot's own schedule), puts approved trades into
+        effect, records the week, and rewrites the sheet. Returns the lines to post and a
+        report for the moderator, or None when the week has no matches."""
         if league["mode"] not in config.SCHEDULE_MODES:
             raise rules.DraftError(
                 f"❌ **{league['name']}** is a draft-only league, so it has no schedule. "
@@ -606,8 +619,6 @@ class AdminCog(commands.Cog):
             )
         if week < 1:
             raise rules.DraftError("❌ Weeks start at 1.")
-
-        await interaction.response.defer(ephemeral=True)
 
         if league["doc_kind"] == "template":
             # The template owns the fixtures, so read them from the sheet.
@@ -644,9 +655,7 @@ class AdminCog(commands.Cog):
                         if available else "")
 
         if not pairs:
-            await interaction.followup.send(
-                f"No matches found for week {week}.", ephemeral=True)
-            return
+            return None
 
         # Approved trades change rosters from the week that's posted next.
         applied = rules.apply_trades(self.bot.conn, league["id"], week)
@@ -672,8 +681,6 @@ class AdminCog(commands.Cog):
         if footnote:
             lines += ["", footnote]
 
-        for message in ui.pack_messages(lines):
-            await ui.safe_send(interaction.channel, message)
         for pool_id in {trade["pool_id"] for trade, _ in applied}:
             ui.resync_sheet(self.bot, pool_id)
 
@@ -683,7 +690,7 @@ class AdminCog(commands.Cog):
             notes = [f"#{trade['trade_number']}: {note}" for trade, notes in applied for note in notes]
             if notes:
                 report += "\n\nNotes:\n" + "\n".join(f"• {note}" for note in notes)
-        await interaction.followup.send(report, ephemeral=True)
+        return {"lines": lines, "report": report, "matches": len(pairs), "applied": len(applied)}
 
     async def price_trades(self, applied):
         """A free-agency pickup has no price until the tiering list is consulted."""

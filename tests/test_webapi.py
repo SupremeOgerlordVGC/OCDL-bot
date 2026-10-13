@@ -154,6 +154,39 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400)
         self.assertIn("isn't in that Discord server", body["error"])
 
+    async def test_a_site_only_season_trades_and_posts_weeks_on_the_site(self):
+        setup = await self.client.post("/setup", json={
+            "site_only": True, "name": "Site Season", "mode": "full_season", "budget": 100, "min_picks": 1,
+            "max_picks": 1, "timer": 120, "weeks": 1,
+            "pools": [{"players": [{"user_id": "11", "display_name": "Larry"}, {"user_id": "22", "display_name": "Alex"}]}],
+        }, headers={"X-OgreClan-Secret": SECRET})
+        league_id = (await setup.json())["league_id"]
+        await self.call("/start", league_id=league_id)
+        # no spreadsheet, so picks carry their cost
+        status, body = await self.call("/pick", league_id=league_id, user_id="11", round=1, pokemon="Garchomp", cost=12)
+        self.assertEqual(status, 200, body)
+        await self.call("/pick", league_id=league_id, user_id="22", round=1, pokemon="Rotom-Wash", cost=8)
+
+        status, body = await self.call("/trade", league_id=league_id, user_id="11", drops=["Garchomp"], gets=["Heatran"])
+        self.assertEqual(status, 200, body)
+        number = body["trade_number"]
+        status, body = await self.call("/approvetrade", league_id=league_id, trade_number=number, user_id="99")
+        self.assertEqual((status, body["week"]), (200, 1))
+        pool = self.conn.execute("SELECT id FROM pools WHERE league_id = ?", (league_id,)).fetchone()["id"]
+        self.assertIsNotNone(rules.find_owner(self.conn, pool, "garchomp"), "not until the week is posted")
+
+        status, body = await self.call("/postweek", league_id=league_id, week=1)
+        self.assertEqual((status, body["matches"], body["applied"]), (200, 1, 1), body)
+        self.assertIsNone(rules.find_owner(self.conn, pool, "garchomp"))
+        self.assertEqual(rules.get_league(self.conn, league_id)["current_week"], 1)
+        status, body = await self.call("/postweek", league_id=league_id, week=9)
+        self.assertEqual(status, 400)
+
+        status, body = await self.call("/trade", league_id=league_id, user_id="22", drops=[], gets=["Bulbasaur"])
+        self.assertEqual(status, 200, "drops can be nothing")
+        status, body = await self.call("/rejecttrade", league_id=league_id, trade_number=body["trade_number"])
+        self.assertEqual(status, 200)
+
     async def test_the_tier_list_shows_everything_and_who_has_it(self):
         await self.start_draft()
         await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
