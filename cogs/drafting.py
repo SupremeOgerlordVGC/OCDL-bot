@@ -501,23 +501,29 @@ class DraftingCog(commands.Cog):
         await interaction.followup.send(
             "✅ Pick added." if result["created"] else "✅ Pick updated.", ephemeral=True
         )
+        await self.announce_edited_pick(draft, result, interaction.channel)
+
+    async def announce_edited_pick(self, draft, result, channel, where=""):
+        """Tell the channel about an edited (or filled-in) pick, and rewrite the sheet.
+        Used by /editpick and by draft.ogreclan.com's admins (webapi.py)."""
         captain = " ⭐ Tera Captain" if result["tera_captain"] else ""
         if result["created"]:
             announcement = (
-                f"✏️ A moderator recorded a Round {result['round']} pick for "
+                f"✏️ A moderator{where} recorded a Round {result['round']} pick for "
                 f"**{result['player']['display_name']}**: "
                 f"**{result['new_pokemon']} ({result['new_cost']})**{captain}."
             )
         else:
             announcement = (
                 f"✏️ **{result['player']['display_name']}**'s Round {result['round']} pick was "
-                f"changed: ~~{result['old_pokemon']} ({result['old_cost']})~~ → "
+                f"changed{where}: ~~{result['old_pokemon']} ({result['old_cost']})~~ → "
                 f"**{result['new_pokemon']} ({result['new_cost']})**{captain}."
             )
-        await ui.safe_send(
-            interaction.channel,
-            f"{announcement}\nBudget remaining: **{result['player']['budget_remaining']}**.",
-        )
+        if channel is not None:
+            await ui.safe_send(
+                channel,
+                f"{announcement}\nBudget remaining: **{result['player']['budget_remaining']}**.",
+            )
         # An edit can free up the old Pokémon, so push the whole picture.
         ui.resync_sheet(self.bot, draft["id"])
 

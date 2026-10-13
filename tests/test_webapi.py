@@ -24,6 +24,11 @@ SECRET = "a-test-secret-that-is-long-enough"
 
 
 class PriceList(StubPriceList):
+    ENTRIES = StubPriceList.ENTRIES + [
+        {"key": "heatran", "name": "Heatran", "cost": 10, "tera_cost": 13,
+         "banned": False, "tera_banned": False, "row": 5},
+    ]
+
     def pool(self, doc_url, tab=None, force=False):
         return self.ENTRIES
 
@@ -88,13 +93,37 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400, "a wrong cost is refused, as for /pick")
         self.assertIn("8", body["error"])
 
+    async def test_an_admin_picks_for_whoever_is_on_the_clock(self):
+        await self.start_draft()
+        status, body = await self.call("/pick", user_id="22", round=1, pokemon="Garchomp")
+        self.assertEqual(status, 400, "not Alex's turn, and he isn't an admin")
+        status, body = await self.call("/pick", user_id="11", round=1, pokemon="Garchomp", as_admin=True)
+        self.assertEqual(status, 200, body)
+        larry = rules.get_player(self.conn, self.pool_id, 11)
+        self.assertEqual(larry["budget_remaining"], 88)
+        self.assertIn("by an admin on draft.ogreclan.com", self.channel.text)
+
+    async def test_an_admin_edits_anyones_pick(self):
+        await self.start_draft()
+        await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
+        await self.call("/pick", user_id="22", round=1, pokemon="Rotom-Wash")
+        status, body = await self.call("/editpick", user_id="11", actor_id="999", round=1, pokemon="Rotom-Wash")
+        self.assertEqual(status, 400, "taken by Alex")
+
+        # long after the next pick, which a player couldn't do themselves
+        status, body = await self.call("/editpick", user_id="11", actor_id="999", round=1, pokemon="heatran")
+        self.assertEqual(status, 200, body)
+        self.assertEqual((body["old_pokemon"], body["pokemon"], body["cost"]), ("Garchomp", "Heatran", 10))
+        self.assertEqual(rules.get_player(self.conn, self.pool_id, 11)["budget_remaining"], 90)
+        self.assertIn("changed on draft.ogreclan.com", self.channel.text)
+
     async def test_the_price_list_leaves_out_what_is_taken_or_banned(self):
         status, body = await self.call("/prices")
-        self.assertEqual([e["name"] for e in body["entries"]], ["Garchomp", "Rotom-Wash"])
+        self.assertEqual([e["name"] for e in body["entries"]], ["Garchomp", "Rotom-Wash", "Heatran"])
         await self.start_draft()
         await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
         status, body = await self.call("/prices")
-        self.assertEqual([e["name"] for e in body["entries"]], ["Rotom-Wash"])
+        self.assertEqual([e["name"] for e in body["entries"]], ["Rotom-Wash", "Heatran"])
 
     async def test_the_tier_list_shows_everything_and_who_has_it(self):
         await self.start_draft()
@@ -102,7 +131,7 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self.call("/tierlist")
         self.assertEqual(status, 200)
         rows = {e["name"]: e for e in body["entries"]}
-        self.assertEqual(sorted(rows), ["Bulbasaur", "Garchomp", "Rotom-Wash"])
+        self.assertEqual(sorted(rows), ["Bulbasaur", "Garchomp", "Heatran", "Rotom-Wash"])
         larry = rules.get_player(self.conn, self.pool_id, 11)
         self.assertEqual(rows["Garchomp"]["taken_by"], larry["id"])
         self.assertIsNone(rows["Rotom-Wash"]["taken_by"])

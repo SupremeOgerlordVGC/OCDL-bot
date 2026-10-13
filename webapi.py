@@ -46,7 +46,7 @@ class WebApi:
     def app(self):
         app = web.Application(client_max_size=64 * 1024)
         for path, handler in (
-            ("/pick", self.pick), ("/makeup", self.makeup), ("/prices", self.prices), ("/tierlist", self.tierlist),
+            ("/pick", self.pick), ("/makeup", self.makeup), ("/editpick", self.edit_pick), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
         ):
             app.router.add_post(path, self.wrap(handler))
@@ -111,17 +111,36 @@ class WebApi:
     # ---- picks ------------------------------------------------------------
 
     async def pick(self, body):
-        """/pick: on your turn"""
+        """/pick: on your turn, or (as_admin, for the site's admins) for whoever is on the clock"""
         draft = self.pool(body)
         if draft["status"] != "active":
             raise rules.DraftError("This draft isn't running.")
         tera = bool(body.get("tera_captain"))
+        as_admin = bool(body.get("as_admin"))
+        on_clock = rules.current_player(self.bot.conn, draft)
         pokemon, cost = await self.priced(draft, body["pokemon"], body.get("cost"), tera)
         pick, events = rules.make_pick(self.bot.conn, draft, int(body["user_id"]), int(body["round"]),
-                                       pokemon, cost, tera_captain=tera, acting_as_admin=False)
+                                       pokemon, cost, tera_captain=tera, acting_as_admin=as_admin)
         # announced, timed and put on the sheet exactly like /pick
         await ui.announce(self.bot, draft["id"], events)
+        if as_admin:
+            await ui.safe_send(self.bot.get_channel(draft["channel_id"]),
+                               f"🛠️ That pick was made for **{on_clock['display_name']}** by an admin "
+                               f"on draft.ogreclan.com.")
         return {"pokemon": pick["pokemon"], "cost": cost, "tera_captain": tera}
+
+    async def edit_pick(self, body):
+        """/editpick as a moderator, for the site's admins: change any player's pick, or fill in a round they
+        have none for (which settles a makeup pick they owe)"""
+        draft = self.pool(body)
+        tera = bool(body.get("tera_captain"))
+        pokemon, cost = await self.priced(draft, body["pokemon"], body.get("cost"), tera)
+        result = rules.edit_pick(self.bot.conn, draft, int(body["actor_id"]), int(body["round"]), pokemon, cost,
+                                 tera_captain=tera, target_user_id=int(body["user_id"]), acting_as_admin=True)
+        await self.cog.announce_edited_pick(draft, result, self.bot.get_channel(draft["channel_id"]),
+                                            where=" on draft.ogreclan.com")
+        return {"created": result["created"], "pokemon": result["new_pokemon"], "cost": result["new_cost"],
+                "old_pokemon": result["old_pokemon"]}
 
     async def makeup(self, body):
         """/makeuppick: a round you were skipped in"""
