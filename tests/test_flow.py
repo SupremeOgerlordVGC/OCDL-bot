@@ -1300,6 +1300,7 @@ class SetupCommandTests(unittest.IsolatedAsyncioTestCase):
             players="<@11> <@22>", budget=100, weeks=2)
         league = rules.require_league_by_name(self.conn, 1, "Spring Cup")
         self.assertEqual((league["website"], league["site_only"], league["admin_channel_id"]), (1, 0, 9500))
+        self.assertEqual(league["created_by"], 99, "who ran /setup")
         self.assertIn("Spring Cup** has been set up", self.admin_channel.text)
         self.assertIn("1. <@11>", self.admin_channel.text)
         self.assertIn("will be drafted here", self.pool_channel.text)

@@ -265,7 +265,7 @@ class WebApi:
             max_trades=number("max_trades") or 0, template_link=body.get("template_link") or None,
             tiering_link=body.get("tiering_link") or None, weeks=number("weeks"),
             visibility=str(body.get("visibility") or "public"), website=bool(body.get("website", True)),
-            site_only=site_only,
+            site_only=site_only, created_by=int(body["created_by"]) if body.get("created_by") else None,
         )
         if not site_only:
             await self.admin_cog.announce_setup(league, pool_rows, coach_slots, shuffled, admin_channel)

@@ -121,6 +121,7 @@ class AdminCog(commands.Cog):
             timer=timer, mode=mode.value, budget=budget, tera_budget=tera_budget,
             max_trades=max_trades, template_link=template_link, tiering_link=tiering_link,
             weeks=weeks, visibility=visibility.value if visibility else "public", website=website,
+            created_by=interaction.user.id,
         )
         await self.announce_setup(league, pool_rows, coach_slots, shuffled, interaction.channel)
 
@@ -134,7 +135,7 @@ class AdminCog(commands.Cog):
     async def build_league(self, *, guild_id, admin_channel_id, name, rosters, channels,
                            min_picks, max_picks, timer, mode, budget=None, tera_budget=None,
                            max_trades=0, template_link=None, tiering_link=None, weeks=None,
-                           visibility="public", website=True, site_only=False):
+                           visibility="public", website=True, site_only=False, created_by=None):
         """The heart of /setup, shared with draft.ogreclan.com (webapi.py).
 
         Reads the document (a template's budgets and Coaches tab), creates the
@@ -271,6 +272,7 @@ class AdminCog(commands.Cog):
             visibility=visibility,
             website=website,
             site_only=site_only,
+            created_by=created_by,
         )
         league = rules.get_league(self.bot.conn, league_id)
 

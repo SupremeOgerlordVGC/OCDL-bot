@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS leagues (
     -- Discord server or channels (its pools have placeholder channel IDs),
     -- so nothing is posted to Discord; the bot still runs its rules and timers
     site_only         INTEGER NOT NULL DEFAULT 0,
+    -- The Discord user who made it (with /setup or on draft.ogreclan.com)
+    created_by        INTEGER,
     -- 'setup' | 'active' | 'complete' | 'archived' | 'cancelled'
     status            TEXT NOT NULL DEFAULT 'setup',
     created_at        TEXT NOT NULL,
@@ -326,6 +328,7 @@ ADDED_COLUMNS = [
     ("leagues", "visibility", "TEXT NOT NULL DEFAULT 'public'"),
     ("leagues", "website", "INTEGER NOT NULL DEFAULT 1"),
     ("leagues", "site_only", "INTEGER NOT NULL DEFAULT 0"),
+    ("leagues", "created_by", "INTEGER"),
 ]
 
 # Run once, when the column is added to an existing database. Trades approved

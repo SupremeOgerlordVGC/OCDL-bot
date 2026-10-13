@@ -533,7 +533,7 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
                   budget, min_picks, max_picks, base_timer,
                   mode="full_season", doc_kind="none", doc_url=None,
                   tera_budget=0, max_trades=0, season_weeks=0, visibility="public",
-                  coach_slots=None, website=True, site_only=False):
+                  coach_slots=None, website=True, site_only=False, created_by=None):
     """Create a league in `setup` state, with one or two pools.
 
     `pools` is [(label, channel_id, [(user_id, display_name), ...]), ...],
@@ -636,11 +636,11 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
         """INSERT INTO leagues (guild_id, name, admin_channel_id, mode, doc_kind, doc_url,
                                 budget, tera_budget, min_picks, max_picks, base_timer,
                                 max_trades, season_weeks, status, created_at, visibility,
-                                website, site_only)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?)""",
+                                website, site_only, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?, ?)""",
         (guild_id, name, admin_channel_id, mode, doc_kind, doc_url, budget, tera_budget,
          min_picks, max_picks, base_timer, max_trades, max(0, season_weeks),
-         database.now(), visibility, 1 if website or site_only else 0, 1 if site_only else 0),
+         database.now(), visibility, 1 if website or site_only else 0, 1 if site_only else 0, created_by),
     )
     league_id = cursor.lastrowid
 
