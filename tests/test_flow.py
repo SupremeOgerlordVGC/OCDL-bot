@@ -356,7 +356,7 @@ class PriceListRuleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_sheet_outage_never_blocks_a_pick(self):
         class BrokenSheets(StubPriceList):
-            def lookup(self, doc_url, pokemon):
+            def lookup(self, doc_url, pokemon, tab=None):
                 raise RuntimeError("Google is down")
 
         self.bot.sheets = BrokenSheets()
@@ -507,13 +507,15 @@ class FakeInteraction:
     paths stayed broken behind a try/except.
     """
 
-    def __init__(self, bot, channel_id, user_id, display_name="Larry"):
+    def __init__(self, bot, channel_id, user_id, display_name="Larry",
+                 moderator=False):
         self.client = bot
         self.channel_id = channel_id
         self.channel = bot.get_channel(channel_id)
-        self.user = SimpleNamespace(id=user_id, display_name=display_name,
-                                    name=display_name.lower(), roles=[],
-                                    guild_permissions=None)
+        self.user = SimpleNamespace(
+            id=user_id, display_name=display_name, name=display_name.lower(),
+            roles=[],
+            guild_permissions=SimpleNamespace(administrator=True) if moderator else None)
         self.guild = None
         self.guild_id = 1
         self.replies = []
@@ -529,17 +531,35 @@ class FakeInteraction:
             async def send_message(self, content, ephemeral=False):
                 interaction.replies.append(content)
 
+        class FakeMessage:
+            def __init__(self):
+                self.edited = []
+
+            async def edit(self, **kwargs):
+                self.edited.append(kwargs)
+
         class Followup:
-            async def send(self, content, ephemeral=False):
+            async def send(self, content=None, ephemeral=False, embed=None,
+                           view=None, wait=False):
                 interaction.replies.append(content)
+                interaction.embeds.append(embed)
+                interaction.views.append(view)
+                return FakeMessage() if wait else None
 
         self.deferred = None
+        self.embeds = []
+        self.views = []
         self.response = Response()
         self.followup = Followup()
 
     @property
     def text(self):
-        return "\n".join(self.replies)
+        return "\n".join(part for part in self.replies if part)
+
+    @property
+    def view(self):
+        """The view actually attached to a reply, if any."""
+        return next((item for item in self.views if item is not None), None)
 
 
 class MyQueueCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -610,6 +630,208 @@ class MyQueueCommandTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(rules.DraftError) as caught:
             await self.run_command(self.interaction(user_id=11), player=other)
         self.assertIn("private", str(caught.exception))
+
+
+class FakeComponentInteraction:
+    """A click on a select menu."""
+
+    def __init__(self, user_id):
+        self.user = SimpleNamespace(id=user_id)
+        self.edits = []
+        self.replies = []
+        owner = self
+
+        class Response:
+            async def edit_message(self, content=None, embed=None, view=None):
+                owner.edits.append({"content": content, "embed": embed, "view": view})
+
+            async def send_message(self, content, ephemeral=False):
+                owner.replies.append(content)
+
+        self.response = Response()
+
+    @property
+    def last(self):
+        return self.edits[-1]
+
+
+class QueueBrowserTests(unittest.IsolatedAsyncioTestCase):
+    """The admin-channel lookup: narrow by draft, then pool, then player."""
+
+    ADMIN_CHANNEL = 9500
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(self.ADMIN_CHANNEL)
+        self.bot = FakeBot(self.conn, self.channel)
+
+    def one_pool_league(self, name="Solo", channel_id=9501):
+        rules.create_league(
+            self.conn, guild_id=1, admin_channel_id=self.ADMIN_CHANNEL, name=name,
+            pools=[("A", channel_id, [(11, "Larry"), (22, "Alex")])],
+            budget=100, min_picks=1, max_picks=3, base_timer=120)
+
+    def two_pool_league(self, name="双", channel_a=9502, channel_b=9503):
+        rules.create_league(
+            self.conn, guild_id=1, admin_channel_id=self.ADMIN_CHANNEL, name=name,
+            pools=[("A", channel_a, [(31, "Ann"), (32, "Bo")]),
+                   ("B", channel_b, [(41, "Cy"), (42, "Di")])],
+            budget=100, min_picks=1, max_picks=3, base_timer=120,
+            doc_kind="template", doc_url="https://example/sheet")
+
+    def browser(self, round_number=None, owner_id=777):
+        leagues = rules.leagues_in_admin_channel(self.conn, self.ADMIN_CHANNEL)
+        return ui.QueueBrowser(self.bot, owner_id, leagues, round_number)
+
+    async def run_myqueue(self, channel_id, user_id=777, moderator=True, **kwargs):
+        cog = DraftingCog(self.bot)
+        interaction = FakeInteraction(self.bot, channel_id, user_id,
+                                      moderator=moderator)
+        await cog.myqueue.callback(cog, interaction, **kwargs)
+        self.bot.timers.cancel_all()
+        return interaction
+
+    @staticmethod
+    def kinds(browser):
+        return [type(item).__name__ for item in browser.children]
+
+    async def test_one_league_and_one_pool_asks_only_for_a_player(self):
+        self.one_pool_league()
+        browser = self.browser()
+        self.assertEqual(self.kinds(browser), ["_PlayerSelect"])
+        self.assertEqual([o.label for o in browser.children[0].options],
+                         ["Larry", "Alex"])
+        self.assertIn("Pick a player", browser.prompt())
+
+    async def test_two_pools_ask_for_the_pool_first(self):
+        self.two_pool_league()
+        browser = self.browser()
+        self.assertEqual(self.kinds(browser), ["_PoolSelect"])
+        self.assertIn("which pool", browser.prompt())
+
+    async def test_several_leagues_ask_for_the_draft_first(self):
+        self.one_pool_league("Solo")
+        self.two_pool_league("Double")
+        browser = self.browser()
+        self.assertEqual(self.kinds(browser), ["_LeagueSelect"])
+        self.assertEqual(sorted(o.label for o in browser.children[0].options),
+                         ["Double", "Solo"])
+
+    async def test_choosing_a_player_shows_their_queue(self):
+        self.one_pool_league()
+        pool = rules.get_live_pool(self.conn, 9501)
+        rules.queue_picks(self.conn, pool, 22, 2, ["Garchomp", "Heatran"], [12, 10])
+
+        browser = self.browser()
+        select = browser.children[0]
+        alex = [p for p in select.players if p["user_id"] == 22][0]
+        select._values = [str(alex["id"])]
+
+        click = FakeComponentInteraction(777)
+        await select.callback(click)
+
+        embed = click.last["embed"]
+        self.assertEqual(embed.title, "Alex's queue")
+        self.assertIn("1. **Garchomp** — 12 points", embed.description)
+        self.assertIn("2. **Heatran** — 10 points", embed.description)
+        self.assertIn("Pool A", embed.footer.text)
+        self.assertIn("All rounds", embed.footer.text)
+
+    async def test_a_round_asked_for_is_kept(self):
+        self.one_pool_league()
+        pool = rules.get_live_pool(self.conn, 9501)
+        rules.queue_picks(self.conn, pool, 22, 2, ["Wanted"], [12])
+        rules.queue_picks(self.conn, pool, 22, 3, ["Other"], [8])
+
+        browser = self.browser(round_number=3)
+        select = browser.children[0]
+        alex = [p for p in select.players if p["user_id"] == 22][0]
+        select._values = [str(alex["id"])]
+        await select.callback(FakeComponentInteraction(777))
+
+        embed = browser.embed()
+        self.assertIn("Other", embed.description)
+        self.assertNotIn("Wanted", embed.description)
+        self.assertIn("Round 3", embed.footer.text)
+
+    async def test_an_empty_queue_says_so_in_the_embed(self):
+        self.one_pool_league()
+        browser = self.browser()
+        select = browser.children[0]
+        select._values = [str(select.players[0]["id"])]
+        await select.callback(FakeComponentInteraction(777))
+        self.assertEqual(browser.embed().description, "Nothing queued.")
+
+    async def test_picking_a_pool_then_a_player_walks_down_the_levels(self):
+        self.two_pool_league()
+        browser = self.browser()
+
+        pool_select = browser.children[0]
+        pool_b = [p for p in pool_select.pools if p["label"] == "B"][0]
+        pool_select._values = [str(pool_b["id"])]
+        await pool_select.callback(FakeComponentInteraction(777))
+
+        self.assertEqual(self.kinds(browser), ["_PoolSelect", "_PlayerSelect"])
+        player_select = browser.children[1]
+        self.assertEqual([o.label for o in player_select.options], ["Cy", "Di"])
+
+    async def test_changing_the_league_forgets_the_old_pool_and_player(self):
+        self.one_pool_league("Solo")
+        self.two_pool_league("Double")
+        browser = self.browser()
+
+        league_select = browser.children[0]
+        solo = [l for l in browser.leagues if l["name"] == "Solo"][0]
+        league_select._values = [str(solo["id"])]
+        await league_select.callback(FakeComponentInteraction(777))
+        self.assertEqual(browser.pool["label"], "A", "a single pool is filled in")
+
+        double = [l for l in browser.leagues if l["name"] == "Double"][0]
+        league_select._values = [str(double["id"])]
+        await league_select.callback(FakeComponentInteraction(777))
+        self.assertIsNone(browser.pool, "two pools, so it must ask again")
+        self.assertIsNone(browser.player)
+
+    async def test_a_moderator_in_the_admin_channel_gets_the_pickers(self):
+        self.one_pool_league()
+        interaction = await self.run_myqueue(self.ADMIN_CHANNEL)
+
+        browser = interaction.view
+        self.assertIsInstance(browser, ui.QueueBrowser)
+        self.assertEqual([type(i).__name__ for i in browser.children],
+                         ["_PlayerSelect"])
+        self.assertIsNone(interaction.embeds[0], "nothing to show until one is chosen")
+        self.assertIs(interaction.deferred, True, "a queue lookup is always ephemeral")
+
+    async def test_a_player_outside_a_draft_channel_is_sent_home(self):
+        self.one_pool_league()
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.run_myqueue(self.ADMIN_CHANNEL, user_id=11, moderator=False)
+        self.assertIn("in your draft channel", str(caught.exception))
+
+    async def test_a_channel_with_no_draft_at_all_says_so(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.run_myqueue(999999)
+        self.assertIn("no draft in this channel", str(caught.exception))
+
+    async def test_a_moderator_in_a_draft_channel_still_gets_their_own_queue(self):
+        # The pickers are only for the admin channel; in a draft channel the
+        # command behaves exactly as it does for a player.
+        self.one_pool_league()
+        pool = rules.get_live_pool(self.conn, 9501)
+        rules.queue_picks(self.conn, pool, 11, 2, ["Mine"], [12])
+
+        interaction = await self.run_myqueue(9501, user_id=11)
+        self.assertIsNone(interaction.view, "no pickers in a draft channel")
+        self.assertIn("Mine", interaction.text)
+
+    async def test_somebody_else_cannot_drive_it(self):
+        self.one_pool_league()
+        browser = self.browser(owner_id=777)
+        other = FakeComponentInteraction(888)
+        self.assertFalse(await browser.interaction_check(other))
+        self.assertIn("not your lookup", other.replies[0])
+        self.assertTrue(await browser.interaction_check(FakeComponentInteraction(777)))
 
 
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):

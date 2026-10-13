@@ -132,3 +132,30 @@ Use `/search` to see both prices. Some Pokémon have no Tera price at all — th
 
 `/roster` shows your Tera budget and which of your team are captains.
 ```
+
+---
+
+## Block 6 — new: checking and cancelling your queue
+
+```
+**📋 Two new commands for your queue**
+
+`/queuepick` lines up picks for a turn you might miss. Now you can check and cancel them too.
+
+**`/myqueue`** — see what you have queued.
+`/myqueue round:3` — just that round.
+`/myqueue` — every round you have queued.
+• Lists them in priority order with their costs, and marks any ⭐ Tera Captains.
+• **Only you can see the reply.** Your queue stays your business.
+
+**`/cancelqueue`** — delete a queue before it fires.
+`/cancelqueue round:3` — just that round.
+`/cancelqueue` — every round you have queued.
+• For when you have changed your mind, or queued the wrong Pokémon.
+• **It costs you nothing.** No pick is undone, your clock is not touched, and it is not a skip. You can even run it while you are on the clock.
+• That turn then needs a real `/pick` — or a fresh `/queuepick`.
+
+**Worth knowing:** `/queuepick` now checks your costs against the tier list and refuses a wrong price instead of quietly drafting at it. Leave `costs` out entirely and the bot fills in the list's own prices.
+
+**Also changed:** `/editpick` now only works until the next pick is made. After that, ask a moderator — they can fix anything at any time.
+```

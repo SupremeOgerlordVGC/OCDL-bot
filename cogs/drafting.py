@@ -363,9 +363,15 @@ class DraftingCog(commands.Cog):
     )
     async def myqueue(self, interaction: discord.Interaction, round: int = None,
                       player: discord.Member = None):
-        draft = rules.require_live_pool(self.bot.conn, interaction.channel_id)
+        draft = rules.get_live_pool(self.bot.conn, interaction.channel_id)
         # Ephemeral without exception: a visible queue hands opponents your plan.
         await interaction.response.defer(ephemeral=True)
+
+        if draft is None:
+            # Not a draft channel. A moderator in a league's admin channel
+            # gets pickers to look a player up; anyone else is sent home.
+            await self.browse_queues(interaction, round)
+            return
 
         view = rules.queue_view(
             self.bot.conn, draft, interaction.user.id, round,
@@ -388,22 +394,33 @@ class DraftingCog(commands.Cog):
                 f"📭 Nothing queued{where}.{note}", ephemeral=True)
             return
 
-        lines = []
-        for round_number, entries in view["rounds"]:
-            taken = " *(already drafted)*" if round_number in view["picked"] else ""
-            lines.append(f"**Round {round_number}**{taken}")
-            for entry in entries:
-                captain = " ⭐ Tera Captain" if entry["tera_captain"] else ""
-                cost = "cost unknown" if entry["cost"] is None else f"{entry['cost']} points"
-                lines.append(f"{entry['priority']}. **{entry['pokemon']}** — {cost}{captain}")
-
         await interaction.followup.send(
-            f"📝 {whose} queue:\n" + "\n".join(lines)
+            f"📝 {whose} queue:\n" + "\n".join(ui.queue_lines(view))
             + "\n\nThe bot takes the first one still available and affordable. "
               "`/queuepick` replaces a round's queue, `/cancelqueue` deletes it.",
             ephemeral=True,
         )
 
+
+    async def browse_queues(self, interaction, round_number):
+        """Look a player's queue up from a league's admin channel."""
+        if not ui.is_moderator(self.bot, interaction):
+            raise rules.DraftError(
+                "❌ Run `/myqueue` in your draft channel to see your own queue."
+            )
+
+        leagues = rules.leagues_in_admin_channel(self.bot.conn, interaction.channel_id)
+        if not leagues:
+            raise rules.DraftError(
+                "❌ There is no draft in this channel. Run `/myqueue` in a draft "
+                "channel, or in the admin channel of a league you look after."
+            )
+
+        browser = ui.QueueBrowser(self.bot, interaction.user.id, leagues, round_number)
+        browser.message = await interaction.followup.send(
+            browser.prompt(), embed=browser.embed(), view=browser,
+            ephemeral=True, wait=True,
+        )
 
     # ---- /makeuppick ----------------------------------------------------
 

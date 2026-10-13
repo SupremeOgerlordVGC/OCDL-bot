@@ -425,3 +425,215 @@ def resync_sheet(bot, pool_id):
             log.exception("sheet resync failed for pool %s (local data is fine)", pool_id)
 
     asyncio.create_task(worker())
+
+
+# --------------------------------------------------------------------------
+# Reading a queue back
+# --------------------------------------------------------------------------
+
+SELECT_LIMIT = 25       # Discord allows at most 25 options in one select
+
+
+def queue_lines(view):
+    """Format a rules.queue_view() result for Discord.
+
+    Shared by the player's own `/myqueue` and the moderator's browser, so
+    both show a queue exactly the same way.
+    """
+    lines = []
+    for round_number, entries in view["rounds"]:
+        drafted = " *(already drafted)*" if round_number in view["picked"] else ""
+        lines.append(f"**Round {round_number}**{drafted}")
+        for entry in entries:
+            captain = " ⭐ Tera Captain" if entry["tera_captain"] else ""
+            cost = "cost unknown" if entry["cost"] is None else f"{entry['cost']} points"
+            lines.append(f"{entry['priority']}. **{entry['pokemon']}** — {cost}{captain}")
+    return lines
+
+
+class QueueBrowser(discord.ui.View):
+    """Lets a moderator read a player's queue from the admin channel.
+
+    An admin channel can run several leagues at once and a league can have
+    two pools, so the moderator narrows down one select at a time. A level
+    with only one possible answer is filled in rather than asked about,
+    which means the common case is a single click.
+
+    Narrowing by pool also keeps every player list inside Discord's limit
+    of 25 options, since a pool holds at most MAX_PLAYERS.
+    """
+
+    def __init__(self, bot, owner_id, leagues, round_number=None, timeout=300):
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.leagues = leagues
+        self.round_number = round_number
+        self.message = None
+        self.league = leagues[0] if len(leagues) == 1 else None
+        self.pool = None
+        self.player = None
+        self._resolve_single_choices()
+        self._rebuild()
+
+    # ---- state ---------------------------------------------------------
+
+    def _pools(self):
+        if self.league is None:
+            return []
+        return rules.get_league_pools(self.bot.conn, self.league["id"])
+
+    def _resolve_single_choices(self):
+        pools = self._pools()
+        if self.pool is None and len(pools) == 1:
+            self.pool = pools[0]
+
+    def _rebuild(self):
+        """Put back one select per level the moderator can still change."""
+        self.clear_items()
+        if len(self.leagues) > 1:
+            self.add_item(_LeagueSelect(self))
+        if self.league is not None:
+            pools = self._pools()
+            if len(pools) > 1:
+                self.add_item(_PoolSelect(self, pools))
+            if self.pool is not None:
+                self.add_item(_PlayerSelect(self))
+
+    # ---- rendering -----------------------------------------------------
+
+    def prompt(self):
+        """What to say above the selects, based on what is still missing."""
+        if self.league is None:
+            return "🔎 Which draft?"
+        if self.pool is None:
+            return f"🔎 **{self.league['name']}** — which pool?"
+        if self.player is None:
+            return (f"🔎 **{self.league['name']}** — Pool {self.pool['label']}. "
+                    f"Pick a player to see their queue.")
+        return ""
+
+    def embed(self):
+        """The chosen player's queue, or None while still choosing."""
+        if self.player is None:
+            return None
+
+        view = rules.queue_view(
+            self.bot.conn, self.pool, self.owner_id,
+            self.round_number, target_user_id=self.player["user_id"],
+            acting_as_admin=True,
+        )
+        lines = queue_lines(view)
+        scope = f"Round {self.round_number}" if self.round_number else "All rounds"
+        embed = discord.Embed(
+            title=f"{self.player['display_name']}'s queue",
+            description="\n".join(lines) if lines else "Nothing queued.",
+            colour=discord.Colour.blurple(),
+        )
+        embed.set_footer(
+            text=f"{self.league['name']} — Pool {self.pool['label']} • {scope}")
+        return embed
+
+    async def refresh(self, interaction):
+        self._resolve_single_choices()
+        self._rebuild()
+        await interaction.response.edit_message(
+            content=self.prompt() or None, embed=self.embed(), view=self)
+
+    # ---- housekeeping --------------------------------------------------
+
+    async def interaction_check(self, interaction):
+        """Only the moderator who opened it may drive it.
+
+        The message is ephemeral so nobody else should see it in the first
+        place; this is belt and braces.
+        """
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "❌ That is not your lookup — run `/myqueue` yourself.", ephemeral=True)
+        return False
+
+    async def on_timeout(self):
+        """Leave the queue on screen but take away the dead selects."""
+        self.clear_items()
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(view=None)
+        except discord.DiscordException:
+            pass        # the moderator dismissed it, which is fine
+
+
+class _LeagueSelect(discord.ui.Select):
+    def __init__(self, browser):
+        self.browser = browser
+        super().__init__(
+            placeholder="Draft",
+            options=[
+                discord.SelectOption(
+                    label=league["name"][:100], value=str(league["id"]),
+                    default=browser.league is not None
+                    and league["id"] == browser.league["id"])
+                for league in browser.leagues[:SELECT_LIMIT]
+            ],
+        )
+
+    async def callback(self, interaction):
+        chosen = int(self.values[0])
+        browser = self.browser
+        browser.league = next(l for l in browser.leagues if l["id"] == chosen)
+        browser.pool = None         # a different draft means different pools
+        browser.player = None
+        await browser.refresh(interaction)
+
+
+class _PoolSelect(discord.ui.Select):
+    def __init__(self, browser, pools):
+        self.browser = browser
+        self.pools = pools
+        super().__init__(
+            placeholder="Pool",
+            options=[
+                discord.SelectOption(
+                    label=f"Pool {pool['label']}", value=str(pool["id"]),
+                    default=browser.pool is not None
+                    and pool["id"] == browser.pool["id"])
+                for pool in pools[:SELECT_LIMIT]
+            ],
+        )
+
+    async def callback(self, interaction):
+        chosen = int(self.values[0])
+        self.browser.pool = next(p for p in self.pools if p["id"] == chosen)
+        self.browser.player = None
+        await self.browser.refresh(interaction)
+
+
+class _PlayerSelect(discord.ui.Select):
+    def __init__(self, browser):
+        self.browser = browser
+        self.players = rules.get_players(browser.bot.conn, browser.pool["id"])
+        if not self.players:
+            # A select has to offer something, so say why it is empty.
+            super().__init__(placeholder="No players in this pool",
+                             options=[discord.SelectOption(label="—", value="0")],
+                             disabled=True)
+            return
+        super().__init__(
+            placeholder="Player",
+            options=[
+                discord.SelectOption(
+                    label=player["display_name"][:100],
+                    value=str(player["id"]),
+                    description=("withdrawn" if player["status"] == "withdrawn" else None),
+                    default=browser.player is not None
+                    and player["id"] == browser.player["id"])
+                for player in self.players[:SELECT_LIMIT]
+            ],
+        )
+
+    async def callback(self, interaction):
+        chosen = int(self.values[0])
+        self.browser.player = next(p for p in self.players if p["id"] == chosen)
+        await self.browser.refresh(interaction)
