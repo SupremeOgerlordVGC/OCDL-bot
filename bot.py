@@ -55,7 +55,7 @@ class HideIrrelevantWarnings(logging.Filter):
 for _name in ("discord.client", "discord.ext.commands.bot"):
     logging.getLogger(_name).addFilter(HideIrrelevantWarnings())
 
-COGS = ["cogs.admin", "cogs.drafting", "cogs.extras"]
+COGS = ["cogs.admin", "cogs.drafting", "cogs.extras", "cogs.results"]
 
 
 class DraftBot(commands.Bot):

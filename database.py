@@ -271,6 +271,56 @@ CREATE TABLE IF NOT EXISTS moderator_roles (
     PRIMARY KEY (guild_id, role_id)
 );
 
+-- Match results (results.py): each week's match, its games, and each
+-- Pokémon's kills and deaths, from battles on OgreClan's Showdown server,
+-- replay links, or players' own reports (and whether it was played on
+-- Pokémon Champions, with each player's Pokepaste).
+CREATE TABLE IF NOT EXISTS match_reports (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    league_id              INTEGER NOT NULL REFERENCES leagues(id) ON DELETE CASCADE,
+    week                   INTEGER NOT NULL,
+    match_number           INTEGER NOT NULL,
+    -- 1 once both players have agreed to play it on Pokémon Champions
+    champions              INTEGER NOT NULL DEFAULT 0,
+    -- the player IDs (comma separated) who have asked for Champions
+    champions_requested_by TEXT NOT NULL DEFAULT '',
+    -- whoever has won more games (a player ID), or NULL while it's level
+    winner_id              INTEGER,
+    updated_at             TEXT NOT NULL,
+    UNIQUE (league_id, week, match_number)
+);
+
+CREATE TABLE IF NOT EXISTS game_results (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id   INTEGER NOT NULL REFERENCES match_reports(id) ON DELETE CASCADE,
+    game        INTEGER NOT NULL,
+    winner_id   INTEGER,
+    -- the game's replay on replay.ogreclan.com, if there is one
+    replay      TEXT,
+    -- 'battle' (played with Ready), 'replay' or 'manual'
+    source      TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    UNIQUE (report_id, game)
+);
+
+CREATE TABLE IF NOT EXISTS game_stats (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    result_id   INTEGER NOT NULL REFERENCES game_results(id) ON DELETE CASCADE,
+    player_id   INTEGER NOT NULL,
+    pokemon     TEXT NOT NULL,
+    kills       INTEGER NOT NULL DEFAULT 0,
+    deaths      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (result_id, player_id, pokemon)
+);
+
+CREATE TABLE IF NOT EXISTS pokepastes (
+    report_id   INTEGER NOT NULL REFERENCES match_reports(id) ON DELETE CASCADE,
+    player_id   INTEGER NOT NULL,
+    url         TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (report_id, player_id)
+);
+
 -- A pool plus the settings of the league it belongs to, so the draft rules
 -- can read everything they need from one row.
 CREATE VIEW IF NOT EXISTS pool_view AS

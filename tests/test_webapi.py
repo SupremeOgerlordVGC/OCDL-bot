@@ -187,6 +187,40 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self.call("/rejecttrade", league_id=league_id, trade_number=body["trade_number"])
         self.assertEqual(status, 200)
 
+    async def test_results_are_reported_from_the_site(self):
+        import results
+        await self.start_draft()
+        await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
+        await self.call("/pick", user_id="22", round=1, pokemon="Rotom-Wash")
+        rules.generate_fixtures(self.conn, self.league_id, weeks=1)
+
+        # a battle played with Ready: both sides, the species as the battle names them
+        status, body = await self.call("/gameresult", week=1, match=1, game=1, source="battle", winner_user_id="11",
+                                       replay="https://replay.ogreclan.com/gen9-1",
+                                       stats=[{"user_id": "11", "pokemon": "Garchomp", "kills": 2, "deaths": 0},
+                                              {"user_id": "22", "pokemon": "rotom-wash", "kills": 0, "deaths": 1}])
+        self.assertEqual(status, 200, body)
+        view = results.match_view(self.conn, self.league_id, 1, 1)
+        larry = rules.get_player(self.conn, self.pool_id, 11)
+        alex = rules.get_player(self.conn, self.pool_id, 22)
+        self.assertEqual(view["games"][0]["stats"][alex["id"]], [("Rotom-Wash", 0, 1)], "the roster's spelling")
+        self.assertEqual(view["winner_id"], larry["id"])
+
+        # a player's own side by hand: someone else's Pokémon are ignored
+        status, body = await self.call("/gameresult", week=1, user_id="22", game=2, source="manual", winner_user_id="22",
+                                       stats=[{"user_id": "22", "pokemon": "Rotom-Wash", "kills": 1, "deaths": 0},
+                                              {"user_id": "11", "pokemon": "Garchomp", "kills": 9, "deaths": 9}])
+        self.assertEqual(status, 200, body)
+        game = results.match_view(self.conn, self.league_id, 1, 1)["games"][1]
+        self.assertEqual(list(game["stats"]), [alex["id"]])
+
+        status, body = await self.call("/champions", week=1, user_id="11")
+        self.assertFalse(body["champions"])
+        status, body = await self.call("/champions", week=1, user_id="22")
+        self.assertTrue(body["champions"])
+        status, body = await self.call("/pokepaste", week=1, user_id="11", url="https://pokepast.es/abc")
+        self.assertEqual(status, 200, body)
+
     async def test_the_tier_list_shows_everything_and_who_has_it(self):
         await self.start_draft()
         await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")

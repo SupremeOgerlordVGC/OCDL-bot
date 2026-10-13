@@ -247,6 +247,16 @@ def get_ogreclan_api():
     return int(port), secret
 
 
+def get_site_api():
+    """draft.ogreclan.com's API, for reading kills and deaths from replay links (/reportreplay): its address
+    (OGRECLAN_SITE_URL, on the server http://127.0.0.1:8100) and the shared secret, or None when it is off."""
+    url = os.environ.get("OGRECLAN_SITE_URL", "").strip().rstrip("/")
+    secret = os.environ.get("OGRECLAN_SECRET", "").strip()
+    if not url or len(secret) < 24:
+        return None
+    return url, secret
+
+
 def get_token():
     """Return the Discord bot token, or None if it has not been set."""
     token = os.environ.get("DISCORD_TOKEN", "").strip()

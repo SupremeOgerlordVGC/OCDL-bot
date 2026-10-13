@@ -23,6 +23,7 @@ from aiohttp import web
 import config
 import database
 import draft as rules
+import results
 import ui
 from cogs.drafting import tiering_tab_for
 
@@ -53,7 +54,8 @@ class WebApi:
             ("/archive", self.archive), ("/deleteleague", self.delete_league),
             ("/guilds", self.guilds), ("/setup", self.setup), ("/start", self.start_draft),
             ("/postweek", self.post_week), ("/trade", self.trade), ("/approvetrade", self.approve_trade),
-            ("/rejecttrade", self.reject_trade), ("/prices", self.prices), ("/tierlist", self.tierlist),
+            ("/rejecttrade", self.reject_trade), ("/gameresult", self.game_result), ("/champions", self.champions),
+            ("/pokepaste", self.pokepaste), ("/cleargame", self.clear_game), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
         ):
             app.router.add_post(path, self.wrap(handler))
@@ -368,6 +370,78 @@ class WebApi:
             raise rules.DraftError(f"There is no trade #{number} in {league['name']}.")
         rules.reject_trade(self.bot.conn, rules.get_pool(self.bot.conn, trade["pool_id"]), number,
                            int(body.get("user_id") or 0))
+        return {}
+
+    # ---- match results ------------------------------------------------------
+
+    def match_of(self, body):
+        """The league, the fixture (by match number, or the reporting player's that week) and its two players"""
+        league = self.league(body)
+        week = int(body["week"])
+        if body.get("match"):
+            fixture = self.bot.conn.execute(
+                "SELECT * FROM fixtures WHERE league_id = ? AND week = ? AND match_number = ?",
+                (league["id"], week, int(body["match"]))).fetchone()
+            if fixture is None:
+                raise rules.DraftError("That match doesn't exist.")
+        else:
+            player = results.player_in_league(self.bot.conn, league["id"], int(body["user_id"]))
+            fixture = results.find_match(self.bot.conn, league["id"], week, player["id"])
+        players = [rules.get_player_by_id(self.bot.conn, fixture["home_player_id"]),
+                   rules.get_player_by_id(self.bot.conn, fixture["away_player_id"])]
+        return league, week, fixture, players
+
+    async def game_result(self, body):
+        """A game's result from the site: a battle played with Ready or a replay (both sides), or a player's
+        own Pokémon (source 'manual', only that player's side). stats: [{user_id, pokemon, kills, deaths}]"""
+        league, week, fixture, players = self.match_of(body)
+        by_discord = {str(p["user_id"]): p for p in players}
+        source = str(body.get("source") or "manual")
+        reporter = by_discord.get(str(body.get("user_id"))) if body.get("user_id") else None
+        if source == "manual" and reporter is None:
+            raise rules.DraftError("Only the match's players report their own Pokémon.")
+        stats = {}
+        for entry in body.get("stats") or []:
+            player = by_discord.get(str(entry.get("user_id")))
+            if player is None:
+                continue
+            roster = results.roster_of(self.bot.conn, player)
+            name = (results.parse_kd(f"{entry['pokemon']} 0-0", roster)[0][0] if source == "manual"
+                    else results.roster_name(entry["pokemon"], roster))
+            stats.setdefault(player["id"], []).append((name, int(entry["kills"]), int(entry["deaths"])))
+        winner = by_discord.get(str(body.get("winner_user_id") or ""))
+        view = results.record_game(self.bot.conn, league["id"], week, fixture["match_number"], int(body["game"]),
+                                   source, winner_id=winner["id"] if winner else None, stats=stats,
+                                   replay=body.get("replay"), only_player=reporter["id"] if source == "manual" else None)
+        return {"match": fixture["match_number"], "winner_id": view["winner_id"], "games": len(view["games"])}
+
+    async def champions(self, body):
+        """A player agrees (or not) to play their match on Pokémon Champions"""
+        league, week, fixture, players = self.match_of(body)
+        player = next((p for p in players if str(p["user_id"]) == str(body["user_id"])), None)
+        if player is None:
+            raise rules.DraftError("Only the match's players can choose that.")
+        view = results.ask_champions(self.bot.conn, league["id"], week, fixture["match_number"], player["id"],
+                                     bool(body.get("on", True)))
+        if view["champions"] and not league["site_only"]:
+            pool = rules.get_pool(self.bot.conn, players[0]["pool_id"])
+            await ui.safe_send(self.bot.get_channel(pool["channel_id"]),
+                f"🏆 Both players agreed: the week {week} match between **{players[0]['display_name']}** and "
+                f"**{players[1]['display_name']}** is played on Pokémon Champions.")
+        return {"champions": view["champions"], "asked": view["asked"]}
+
+    async def pokepaste(self, body):
+        league, week, fixture, players = self.match_of(body)
+        player = next((p for p in players if str(p["user_id"]) == str(body["user_id"])), None)
+        if player is None:
+            raise rules.DraftError("Only the match's players give a Pokepaste.")
+        results.set_pokepaste(self.bot.conn, league["id"], week, fixture["match_number"], player["id"], body["url"])
+        return {}
+
+    async def clear_game(self, body):
+        """Staff: remove a game's result"""
+        league, week, fixture, players = self.match_of(body)
+        results.clear_game(self.bot.conn, league["id"], week, fixture["match_number"], int(body["game"]))
         return {}
 
     # ---- ending a league (the site's admins) -------------------------------

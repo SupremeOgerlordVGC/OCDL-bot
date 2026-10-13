@@ -863,6 +863,8 @@ def delete_league(conn, league_id):
             for table in ("queued_picks", "sub_requests", "makeups", "skips", "picks", "rosters", "players"):
                 removed[table] = conn.execute(
                     f"DELETE FROM {table} WHERE pool_id IN ({marks})", pools).rowcount
+        removed["match_reports"] = conn.execute(
+            "DELETE FROM match_reports WHERE league_id = ?", (league_id,)).rowcount
         for table in ("trades", "fixtures", "pools"):
             removed[table] = conn.execute(f"DELETE FROM {table} WHERE league_id = ?", (league_id,)).rowcount
         removed["leagues"] = conn.execute("DELETE FROM leagues WHERE id = ?", (league_id,)).rowcount
