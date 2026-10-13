@@ -129,6 +129,7 @@ class CommandOptionTests(unittest.TestCase):
         "substitute": {"out", "into"},
         "trade": {"drops", "gets", "partner", "for_player"},
         "approvetrade": {"trade_id", "name"},
+        "unapprovetrade": {"trade_id", "name"},
         "postschedule": {"week", "name"},
         "roster": {"player"},
         "progress": {"round"},

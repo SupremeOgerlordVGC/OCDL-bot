@@ -1981,6 +1981,42 @@ def record_week(conn, league_id, week, pairs):
     conn.commit()
 
 
+def unapprove_trade(conn, draft, trade_number):
+    """Put an approved trade back to pending, for an approval given in error.
+
+    Approving moves nothing on its own, so while a trade is still waiting
+    this is a clean reversal: the status goes back and the rosters never
+    knew. Once /postschedule has applied it the Pokemon have changed hands
+    and taking it back is a new trade, not an undo.
+    """
+    trade = get_trade(conn, draft["league_id"], trade_number)
+    if trade is None:
+        raise DraftError(f"❌ There is no trade #{trade_number} in this draft.")
+    if trade["status"] == "pending":
+        raise DraftError(
+            f"❌ Trade #{trade_number} is already waiting for a decision."
+        )
+    if trade["status"] != "approved":
+        raise DraftError(
+            f"❌ Trade #{trade_number} was {trade['status']}, not approved. "
+            f"A rejected trade has to be proposed again with `/trade`."
+        )
+    if trade["applied_at"] is not None:
+        raise DraftError(
+            f"❌ Trade #{trade_number} is already in effect — it was applied in "
+            f"week {trade['applied_week']}. The Pokémon have changed hands, so "
+            f"it cannot be taken back; use `/trade` to move them back."
+        )
+
+    conn.execute(
+        "UPDATE trades SET status = 'pending', resolved_at = NULL, resolved_by = NULL "
+        "WHERE id = ?",
+        (trade["id"],),
+    )
+    conn.commit()
+    return get_trade(conn, draft["league_id"], trade_number)
+
+
 def reject_trade(conn, draft, trade_number, approver_user_id):
     trade = get_trade(conn, draft["league_id"], trade_number)
     if trade is None:

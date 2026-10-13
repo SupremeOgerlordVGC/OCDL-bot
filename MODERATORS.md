@@ -127,6 +127,8 @@ Players propose with `/trade` in their draft channel. It lands in the **admin ch
 
 **`/approvetrade trade_id:3`** — approves it. Rosters and budgets change at the **next `/postschedule`**, so a roster never changes mid-week. Only works once.
 **`/rejecttrade trade_id:3`** — declines it. Nothing changes.
+**`/unapprovetrade trade_id:3`** — takes back an approval given by mistake, putting the trade back to pending so you can decide again. Only works while it is still waiting: approving moves nothing, so there is nothing to undo. Once a week has been posted the Pokémon have changed hands and you need a fresh `/trade` to move them back. The channel is told, since the approval was announced there.
+
 **`/trades`** — lists every trade and its status.
 
 Add `name:OCDL Season 1` to any of these if your admin channel runs more than one draft.

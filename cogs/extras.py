@@ -196,6 +196,44 @@ class ExtrasCog(commands.Cog):
             + f"Rosters and budgets change from week {next_week}, when it's posted.",
         )
 
+    # ---- /unapprovetrade ------------------------------------------------
+
+    @app_commands.command(name="unapprovetrade",
+                          description="Moderator only: take back an approval given by mistake.")
+    @app_commands.describe(trade_id="The trade number",
+                           name="The league's name, if this channel runs more than one")
+    async def unapprovetrade(self, interaction: discord.Interaction, trade_id: int,
+                             name: str = None):
+        ui.require_moderator(self.bot, interaction)
+        league = self.resolve_league(interaction, name)
+
+        await interaction.response.defer(ephemeral=True)
+
+        trade = rules.get_trade(self.bot.conn, league["id"], trade_id)
+        if trade is None:
+            raise rules.DraftError(f"❌ There is no trade #{trade_id} in **{league['name']}**.")
+        pool = rules.get_pool(self.bot.conn, trade["pool_id"])
+
+        record = rules.unapprove_trade(self.bot.conn, pool, trade_id)
+        proposer = rules.get_player_by_id(self.bot.conn, record["proposer_id"])
+
+        await interaction.followup.send(
+            f"↩️ Trade #{trade_id} is pending again — nothing had taken effect yet, "
+            f"so no roster or budget changed. Decide it with `/approvetrade "
+            f"trade_id:{trade_id}` or `/rejecttrade trade_id:{trade_id}`.",
+            ephemeral=True,
+        )
+
+        # The approval was announced publicly, so the retraction has to be
+        # too: the proposer is owed the news that it is not settled.
+        await ui.safe_send(
+            self.bot.get_channel(pool["channel_id"]),
+            f"↩️ **Trade #{trade_id} is no longer approved.** A moderator has put it "
+            f"back to pending for another look, so **{proposer['display_name']}**'s "
+            f"trade has not gone through. Nothing had changed hands yet — rosters "
+            f"and budgets are untouched.",
+        )
+
     # ---- /rejecttrade ---------------------------------------------------
 
     @app_commands.command(name="rejecttrade",

@@ -2757,6 +2757,101 @@ class FinishEarlyTests(unittest.TestCase):
         self.assertEqual(self.player(1)["status"], draft.WITHDRAWN)
 
 
+class UnapproveTradeTests(unittest.TestCase):
+    """Taking back an approval given in error.
+
+    Approving moves nothing by itself, so while a trade is still waiting
+    for /postschedule the approval can simply be undone.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=2000, players=2, budget=100,
+                                min_picks=1, max_picks=2)
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
+        self.live = draft.get_pool(self.conn, self.draft["id"])
+        draft.make_pick(self.conn, self.live, user(2), 1, "Heatran", 10)
+        self.live = draft.get_pool(self.conn, self.draft["id"])
+        draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], ["Heatran"],
+                            partner_user_id=user(2))
+
+    def trade(self):
+        return draft.get_trade(self.conn, self.live["league_id"], 1)
+
+    def rosters(self):
+        return {
+            seat: draft.roster_view(
+                self.conn, self.live,
+                draft.get_player(self.conn, self.draft["id"], user(seat)))["pokemon"]
+            for seat in (1, 2)
+        }
+
+    def test_an_approved_trade_goes_back_to_pending(self):
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        before = self.rosters()
+
+        record = draft.unapprove_trade(self.conn, self.live, 1)
+
+        self.assertEqual(record["status"], "pending")
+        self.assertIsNone(record["resolved_at"])
+        self.assertIsNone(record["resolved_by"])
+        self.assertEqual(self.rosters(), before, "nothing had moved, nothing moves back")
+
+    def test_it_stops_waiting_to_be_applied(self):
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        self.assertEqual([t["trade_number"]
+                          for t in draft.waiting_trades(self.conn, self.live["league_id"])], [1])
+
+        draft.unapprove_trade(self.conn, self.live, 1)
+
+        self.assertEqual(draft.waiting_trades(self.conn, self.live["league_id"]), [])
+        self.assertEqual(draft.apply_trades(self.conn, self.live["league_id"], week=3), [],
+                         "an unapproved trade must not take effect")
+        self.assertEqual(self.rosters()[1], [("Garchomp", 12)])
+
+    def test_it_can_then_be_decided_again(self):
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        draft.unapprove_trade(self.conn, self.live, 1)
+
+        record, _ = draft.approve_trade(self.conn, self.live, 1, approver_user_id=99)
+        self.assertEqual(record["status"], "approved")
+        self.assertEqual(record["resolved_by"], 99, "the second decision is recorded")
+
+    def test_it_can_be_rejected_instead(self):
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        draft.unapprove_trade(self.conn, self.live, 1)
+        record = draft.reject_trade(self.conn, self.live, 1, approver_user_id=42)
+        self.assertEqual(record["status"], "rejected")
+
+    def test_a_pending_trade_cannot_be_unapproved(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.unapprove_trade(self.conn, self.live, 1)
+        self.assertIn("already waiting", str(caught.exception))
+
+    def test_a_rejected_trade_cannot_be_unapproved(self):
+        draft.reject_trade(self.conn, self.live, 1, approver_user_id=42)
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.unapprove_trade(self.conn, self.live, 1)
+        self.assertIn("rejected", str(caught.exception))
+
+    def test_a_trade_already_in_effect_cannot_be_unapproved(self):
+        # Once the Pokémon have changed hands, undoing it is a new trade.
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        draft.apply_trades(self.conn, self.live["league_id"], week=3)
+
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.unapprove_trade(self.conn, self.live, 1)
+        message = str(caught.exception)
+        self.assertIn("already in effect", message)
+        self.assertIn("week 3", message)
+        self.assertEqual(self.trade()["status"], "approved", "the refusal changed nothing")
+        self.assertEqual(self.rosters()[1], [("Heatran", 10)], "and left the rosters alone")
+
+    def test_an_unknown_trade_number_is_refused(self):
+        with self.assertRaises(draft.DraftError):
+            draft.unapprove_trade(self.conn, self.live, 99)
+
+
 class MigrationTests(unittest.TestCase):
     """An upgrade must not break an existing database.
 
