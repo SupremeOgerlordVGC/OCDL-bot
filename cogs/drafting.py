@@ -359,10 +359,15 @@ class DraftingCog(commands.Cog):
     )
     @app_commands.describe(
         round="The round to look at. Leave empty to see every round you have queued.",
-        player="Moderators only: whose queue to look at",
     )
-    async def myqueue(self, interaction: discord.Interaction, round: int = None,
-                      player: discord.Member = None):
+    async def myqueue(self, interaction: discord.Interaction, round: int = None):
+        """Deliberately offers no `player` option.
+
+        Every option a command declares is visible to everybody who opens
+        it, so a `player` box would quietly tell all the players that their
+        queue can be read. Looking somebody up happens in the admin
+        channel instead, where only moderators are.
+        """
         draft = rules.get_live_pool(self.bot.conn, interaction.channel_id)
         # Ephemeral without exception: a visible queue hands opponents your plan.
         await interaction.response.defer(ephemeral=True)
@@ -373,14 +378,7 @@ class DraftingCog(commands.Cog):
             await self.browse_queues(interaction, round)
             return
 
-        view = rules.queue_view(
-            self.bot.conn, draft, interaction.user.id, round,
-            target_user_id=player.id if player else None,
-            acting_as_admin=ui.is_moderator(self.bot, interaction),
-        )
-        target = view["player"]
-        whose = ("Your" if target["user_id"] == interaction.user.id
-                 else f"**{target['display_name']}**'s")
+        view = rules.queue_view(self.bot.conn, draft, interaction.user.id, round)
 
         if not view["rounds"]:
             where = f" for Round {round}" if round else ""
@@ -395,7 +393,7 @@ class DraftingCog(commands.Cog):
             return
 
         await interaction.followup.send(
-            f"📝 {whose} queue:\n" + "\n".join(ui.queue_lines(view))
+            "📝 Your queue:\n" + "\n".join(ui.queue_lines(view))
             + "\n\nThe bot takes the first one still available and affordable. "
               "`/queuepick` replaces a round's queue, `/cancelqueue` deletes it.",
             ephemeral=True,

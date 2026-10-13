@@ -89,7 +89,7 @@ A scheduled start survives a bot restart. `/draft` with no time starts it early 
 
 **`/editpick round:3 pokemon:Garchomp cost:12 player:@Someone`** — change a pick. Players may only fix their own until the next pick is made, so anything older is your job. **You** are never too late. You can also use it to **add** a pick for a round where they have nothing recorded, which settles any makeup pick they owed.
 
-**`/myqueue`** — run it **here in the admin channel** and you get dropdowns to pick the draft, pool and player, then read their queue. In a draft channel, `/myqueue player:@Someone` goes straight there. Only moderators can see somebody else's queue.
+**`/myqueue`** — run it **here in the admin channel** and you get dropdowns to pick the draft, pool and player, then read their queue. In a draft channel it only ever shows your own, so the players have no idea this is possible. Keep it that way.
 
 **`/cancelqueue player:@Someone`** — deletes somebody's queued picks before they fire. Add `round:3` for just one round. Nothing else changes: no pick is undone and the clock is not touched. The channel is told, so the player knows their queue is gone.
 

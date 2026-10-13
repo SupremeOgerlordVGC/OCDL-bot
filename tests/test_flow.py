@@ -623,13 +623,22 @@ class MyQueueCommandTests(unittest.IsolatedAsyncioTestCase):
         text = await self.run_command(self.interaction(), round=1)
         self.assertIn("already drafted", text)
 
-    async def test_a_player_cannot_read_somebody_elses_queue(self):
-        rules.queue_picks(self.conn, self.pool(), 22, 2, ["Secret"], [12])
-        other = SimpleNamespace(id=22)
+    async def test_there_is_no_way_to_name_somebody_else(self):
+        # Discord shows every option a command declares to everybody who
+        # opens it, so even a moderators-only `player` box would tell the
+        # players their queues can be read. Looking one up is done from the
+        # admin channel instead.
+        self.assertNotIn("player", [p.name for p in self.cog.myqueue.parameters])
 
-        with self.assertRaises(rules.DraftError) as caught:
-            await self.run_command(self.interaction(user_id=11), player=other)
-        self.assertIn("private", str(caught.exception))
+    async def test_a_moderator_in_a_draft_channel_sees_only_their_own(self):
+        rules.queue_picks(self.conn, self.pool(), 22, 2, ["Secret"], [12])
+        rules.queue_picks(self.conn, self.pool(), 11, 2, ["Mine"], [12])
+
+        interaction = FakeInteraction(self.bot, 9300, 11, moderator=True)
+        text = await self.run_command(interaction)
+
+        self.assertIn("Mine", text)
+        self.assertNotIn("Secret", text)
 
 
 class FakeComponentInteraction:

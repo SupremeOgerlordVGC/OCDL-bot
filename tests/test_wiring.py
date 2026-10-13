@@ -108,7 +108,9 @@ class CommandOptionTests(unittest.TestCase):
         "editpick": {"round", "pokemon", "cost", "tera_captain", "player"},
         "queuepick": {"round", "pokemon", "costs", "tera"},
         "cancelqueue": {"round", "player"},
-        "myqueue": {"round", "player"},
+        # No player option on purpose: a declared option is visible to
+        # everybody, which would advertise that queues can be read.
+        "myqueue": {"round"},
         "draft": {"at"},
         "setup": {"name", "draft_channel", "players", "players_role", "min_picks",
                   "max_picks", "timer", "mode", "budget", "tera_budget", "max_trades",
