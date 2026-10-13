@@ -31,6 +31,11 @@ MODES = [
     app_commands.Choice(name="Draft only (archive once the draft finishes)", value="draft_only"),
 ]
 
+VISIBILITY = [
+    app_commands.Choice(name="Public: anyone can see it on draft.ogreclan.com", value="public"),
+    app_commands.Choice(name="Private: only its players (signed in with Discord) can see it", value="private"),
+]
+
 
 class AdminCog(commands.Cog):
     def __init__(self, bot):
@@ -60,8 +65,9 @@ class AdminCog(commands.Cog):
         players_b="Optional second pool's players, @mentioned in draft order",
         players_role_b="Instead of listing them: a role for the second pool",
         weeks="Season length when the bot generates the schedule itself",
+        visibility="Who can see it on draft.ogreclan.com. Public unless you choose Private.",
     )
-    @app_commands.choices(mode=MODES)
+    @app_commands.choices(mode=MODES, visibility=VISIBILITY)
     async def setup_league(self, interaction: discord.Interaction, name: str,
                            draft_channel: discord.TextChannel,
                            min_picks: int, max_picks: int, timer: int,
@@ -74,7 +80,8 @@ class AdminCog(commands.Cog):
                            draft_channel_b: discord.TextChannel = None,
                            players_b: str = None,
                            players_role_b: discord.Role = None,
-                           weeks: int = None):
+                           weeks: int = None,
+                           visibility: app_commands.Choice[str] = None):
         if interaction.guild is None:
             raise rules.DraftError("❌ Leagues can only be created inside a server.")
         ui.require_moderator(self.bot, interaction)
@@ -228,6 +235,7 @@ class AdminCog(commands.Cog):
             max_trades=max_trades,
             season_weeks=weeks or 0,
             coach_slots=coach_slots,
+            visibility=visibility.value if visibility else "public",
         )
         league = rules.get_league(self.bot.conn, league_id)
 
@@ -261,6 +269,7 @@ class AdminCog(commands.Cog):
             + (f"• Trade pickups per player: **{max_trades or 'unlimited'}** Pokémon\n"
                if league["mode"] == "full_season" else "")
             + f"• Document: {document}\n"
+            f"• On draft.ogreclan.com: **{league['visibility']}**\n"
             f"• Trade approvals: {interaction.channel.mention}\n"
         )
         for pool in pool_rows:
@@ -476,6 +485,26 @@ class AdminCog(commands.Cog):
                        f"on this server — approving trades, running `/setup`, and so on.")
 
         await interaction.response.send_message(message, ephemeral=True)
+
+    # ---- /visibility ----------------------------------------------------
+
+    @app_commands.command(
+        name="visibility",
+        description="Moderator only: who can see a league on draft.ogreclan.com.",
+    )
+    @app_commands.describe(name="The league's name", setting="Public or private")
+    @app_commands.choices(setting=VISIBILITY)
+    async def visibility(self, interaction: discord.Interaction, name: str,
+                         setting: app_commands.Choice[str]):
+        ui.require_moderator(self.bot, interaction)
+        league = rules.require_any_league_by_name(self.bot.conn, interaction.guild_id, name)
+        league = rules.set_visibility(self.bot.conn, league["id"], setting.value)
+        who = ("everyone" if league["visibility"] == "public" else
+               "only its players, signed in with their Discord account")
+        await interaction.response.send_message(
+            f"✅ **{league['name']}** is **{league['visibility']}** on draft.ogreclan.com: {who} can see it.",
+            ephemeral=True,
+        )
 
     # ---- /postschedule --------------------------------------------------
 

@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS leagues (
     season_weeks      INTEGER NOT NULL DEFAULT 0,
     -- The week /postschedule last posted (0 before the first)
     current_week      INTEGER NOT NULL DEFAULT 0,
+    -- Who sees it on draft.ogreclan.com: 'public' (everyone) or 'private'
+    -- (its own players, signed in with Discord)
+    visibility        TEXT NOT NULL DEFAULT 'public',
     -- 'setup' | 'active' | 'complete' | 'archived' | 'cancelled'
     status            TEXT NOT NULL DEFAULT 'setup',
     created_at        TEXT NOT NULL,
@@ -310,6 +313,7 @@ ADDED_COLUMNS = [
     ("trades", "applied_week", "INTEGER"),
     ("pools", "free_trades_until", "REAL"),
     ("trades", "free", "INTEGER NOT NULL DEFAULT 0"),
+    ("leagues", "visibility", "TEXT NOT NULL DEFAULT 'public'"),
 ]
 
 # Run once, when the column is added to an existing database. Trades approved

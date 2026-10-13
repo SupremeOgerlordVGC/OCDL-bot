@@ -404,6 +404,7 @@ itself is the thing that breaks.
 | `/setskips player skips [timer]` | Moderator | Corrects a player's skip count, and recalculates their timer to match. |
 | `/reschedule name [weeks]` | Moderator | Rolls a fresh random schedule, when the bot is the one generating it. |
 | `/edit` | Moderator | Changes budgets, pick limits, trade cap or the document link. Locked once `/draft` runs. |
+| `/visibility name setting` | Moderator | Whether draft.ogreclan.com shows the league to everyone (public) or only its players signed in with Discord (private). `/setup` takes it too; public by default. Works any time. |
 | `/draft` | Moderator | Run in a pool's channel: starts that pool, pings the first player and begins their timer. |
 | `/draft-moderator` | Administrator | Grants or revokes a role's access to every moderator command on the server. Run with no options to list the current roles. |
 | `/canceldraft` | Moderator | Cancels a league by name. Data is kept, not deleted. |

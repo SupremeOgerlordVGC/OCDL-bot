@@ -1604,6 +1604,15 @@ class LeagueNameTests(unittest.TestCase):
         with self.assertRaises(draft.DraftError):
             draft.require_season_league_by_name(self.conn, 1, "Season Cup")
 
+    def test_a_league_is_public_unless_made_private(self):
+        pool = make_draft(self.conn, channel_id=509, players=2, name="Shown")
+        league = draft.get_league(self.conn, pool["league_id"])
+        self.assertEqual(league["visibility"], "public")
+        self.assertEqual(draft.set_visibility(self.conn, league["id"], "private")["visibility"], "private")
+        self.assertEqual(draft.require_any_league_by_name(self.conn, 1, "shown")["id"], league["id"])
+        with self.assertRaises(draft.DraftError):
+            draft.set_visibility(self.conn, league["id"], "secret")
+
     def test_several_leagues_share_one_admin_channel(self):
         make_draft(self.conn, channel_id=506, players=2, name="One")
         make_draft(self.conn, channel_id=507, players=2, name="Two")

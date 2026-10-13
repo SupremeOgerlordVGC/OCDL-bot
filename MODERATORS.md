@@ -54,6 +54,7 @@ So: run `/setup` in your admin channel, and tell it which channel the drafting h
 • `max_trades` — the most Pokémon each player may pick up in trades over the season, 0 = unlimited
 • `template_link` **or** `tiering_link` — one, never both
 • `draft_channel_b` + `players_b` — a second pool (needs a template)
+• `visibility` — **Public** (anyone can see it on draft.ogreclan.com) or **Private** (only its players, signed in with Discord). Public unless you choose. Change it any time with **`/visibility name:... setting:Private`**.
 • `weeks` — season length when the bot makes its own schedule
 
 `/edit` changes budget, picks, trade cap or the document — but only until `/draft` runs.

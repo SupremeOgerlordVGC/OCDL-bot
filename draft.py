@@ -532,7 +532,7 @@ def _roster_entries(entries):
 def create_league(conn, guild_id, admin_channel_id, name, pools,
                   budget, min_picks, max_picks, base_timer,
                   mode="full_season", doc_kind="none", doc_url=None,
-                  tera_budget=0, max_trades=0, season_weeks=0,
+                  tera_budget=0, max_trades=0, season_weeks=0, visibility="public",
                   coach_slots=None):
     """Create a league in `setup` state, with one or two pools.
 
@@ -629,15 +629,17 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
 
     if len(set(everyone)) != len(everyone):
         raise DraftError("❌ The same player was listed twice.")
+    if visibility not in VISIBILITIES:
+        raise DraftError("❌ A league is either public or private on the website.")
 
     cursor = conn.execute(
         """INSERT INTO leagues (guild_id, name, admin_channel_id, mode, doc_kind, doc_url,
                                 budget, tera_budget, min_picks, max_picks, base_timer,
-                                max_trades, season_weeks, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?)""",
+                                max_trades, season_weeks, status, created_at, visibility)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?)""",
         (guild_id, name, admin_channel_id, mode, doc_kind, doc_url, budget, tera_budget,
          min_picks, max_picks, base_timer, max_trades, max(0, season_weeks),
-         database.now()),
+         database.now(), visibility),
     )
     league_id = cursor.lastrowid
 
@@ -714,6 +716,32 @@ def require_season_league_by_name(conn, guild_id, name):
         hint = f" Running here: {', '.join(running)}." if running else ""
         raise DraftError(f"❌ There is no league called **{name}** on this server.{hint}")
     return league
+
+
+# Who sees a league on draft.ogreclan.com: everyone, or only its own players
+# (signed in with Discord) and the site's administrators.
+VISIBILITIES = ("public", "private")
+
+
+def require_any_league_by_name(conn, guild_id, name):
+    """A league by name, finished or not: the live one, else the latest."""
+    league = conn.execute(
+        "SELECT * FROM leagues WHERE guild_id = ? AND lower(name) = lower(?) "
+        "ORDER BY status NOT IN ('setup', 'active', 'complete'), id DESC LIMIT 1",
+        (guild_id, " ".join(str(name or "").split())),
+    ).fetchone()
+    if league is None:
+        raise DraftError(f"❌ There is no league called **{name}** on this server.")
+    return league
+
+
+def set_visibility(conn, league_id, visibility):
+    """/visibility - who sees the league on draft.ogreclan.com."""
+    if visibility not in VISIBILITIES:
+        raise DraftError("❌ A league is either public or private on the website.")
+    conn.execute("UPDATE leagues SET visibility = ? WHERE id = ?", (visibility, league_id))
+    conn.commit()
+    return get_league(conn, league_id)
 
 
 def get_league_pools(conn, league_id):
