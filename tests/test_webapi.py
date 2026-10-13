@@ -96,6 +96,18 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self.call("/prices")
         self.assertEqual([e["name"] for e in body["entries"]], ["Rotom-Wash"])
 
+    async def test_the_tier_list_shows_everything_and_who_has_it(self):
+        await self.start_draft()
+        await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
+        status, body = await self.call("/tierlist")
+        self.assertEqual(status, 200)
+        rows = {e["name"]: e for e in body["entries"]}
+        self.assertEqual(sorted(rows), ["Bulbasaur", "Garchomp", "Rotom-Wash"])
+        larry = rules.get_player(self.conn, self.pool_id, 11)
+        self.assertEqual(rows["Garchomp"]["taken_by"], larry["id"])
+        self.assertIsNone(rows["Rotom-Wash"]["taken_by"])
+        self.assertTrue(rows["Bulbasaur"]["banned"])
+
     async def test_queues_are_kept_private_per_player(self):
         status, body = await self.call("/queue/set", user_id="22", round=1, pokemon=["garchomp", "rotom-wash"])
         self.assertEqual(status, 200, body)

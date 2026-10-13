@@ -46,7 +46,7 @@ class WebApi:
     def app(self):
         app = web.Application(client_max_size=64 * 1024)
         for path, handler in (
-            ("/pick", self.pick), ("/makeup", self.makeup), ("/prices", self.prices),
+            ("/pick", self.pick), ("/makeup", self.makeup), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
         ):
             app.router.add_post(path, self.wrap(handler))
@@ -149,6 +149,25 @@ class WebApi:
         return {"available": True, "entries": [
             {"name": e["name"], "cost": e["cost"], "tera_cost": e["tera_cost"]}
             for e in entries if not e["banned"] and e["key"] not in taken
+        ]}
+
+    async def tierlist(self, body):
+        """The pool's whole tiering list: every Pokémon with its costs, whether it's banned, and who has it now"""
+        draft = self.pool(body)
+        if not self.bot.sheets.enabled or not draft["doc_url"]:
+            return {"available": False, "entries": []}
+        try:
+            tab = await tiering_tab_for(self.bot, draft)
+            entries = await asyncio.to_thread(self.bot.sheets.pool, draft["doc_url"], tab)
+        except Exception:
+            log.exception("tiering list for the site failed")
+            return {"available": False, "entries": []}
+        owners = {row["pokemon_key"]: row["player_id"] for row in self.bot.conn.execute(
+            "SELECT pokemon_key, player_id FROM rosters WHERE pool_id = ?", (draft["id"],))}
+        return {"available": True, "entries": [
+            {"name": e["name"], "cost": e["cost"], "tera_cost": e["tera_cost"], "banned": bool(e["banned"]),
+             "tera_banned": bool(e["tera_banned"]), "taken_by": owners.get(e["key"])}
+            for e in entries
         ]}
 
     # ---- queues -----------------------------------------------------------
