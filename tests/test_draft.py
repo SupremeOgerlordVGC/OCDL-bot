@@ -1604,6 +1604,17 @@ class LeagueNameTests(unittest.TestCase):
         with self.assertRaises(draft.DraftError):
             draft.require_season_league_by_name(self.conn, 1, "Season Cup")
 
+    def test_deleting_a_league_removes_everything_in_it(self):
+        keep = make_draft(self.conn, channel_id=510, players=2, name="Keep")
+        pool = make_draft(self.conn, channel_id=511, players=2, min_picks=1, max_picks=1, name="Gone")
+        live = draft.get_pool(self.conn, pool["id"])
+        player = draft.current_player(self.conn, live)
+        draft.make_pick(self.conn, live, player["user_id"], 1, "Garchomp", 1)
+        removed = draft.delete_league(self.conn, pool["league_id"])
+        self.assertEqual((removed["leagues"], removed["pools"], removed["players"], removed["picks"]), (1, 1, 2, 1))
+        self.assertIsNone(draft.get_league(self.conn, pool["league_id"]))
+        self.assertIsNotNone(draft.get_league(self.conn, keep["league_id"]), "other leagues stay")
+
     def test_a_league_is_public_unless_made_private(self):
         pool = make_draft(self.conn, channel_id=509, players=2, name="Shown")
         league = draft.get_league(self.conn, pool["league_id"])

@@ -14,11 +14,13 @@ import asyncio
 import hmac
 import json
 import logging
+import os
 import re
 
 from aiohttp import web
 
 import config
+import database
 import draft as rules
 import ui
 from cogs.drafting import tiering_tab_for
@@ -46,7 +48,8 @@ class WebApi:
     def app(self):
         app = web.Application(client_max_size=64 * 1024)
         for path, handler in (
-            ("/pick", self.pick), ("/makeup", self.makeup), ("/editpick", self.edit_pick), ("/prices", self.prices), ("/tierlist", self.tierlist),
+            ("/pick", self.pick), ("/makeup", self.makeup), ("/editpick", self.edit_pick),
+            ("/archive", self.archive), ("/deleteleague", self.delete_league), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
         ):
             app.router.add_post(path, self.wrap(handler))
@@ -188,6 +191,34 @@ class WebApi:
              "tera_banned": bool(e["tera_banned"]), "taken_by": owners.get(e["key"])}
             for e in entries
         ]}
+
+    # ---- ending a league (the site's admins) -------------------------------
+
+    async def _end(self, body, verb):
+        league = rules.get_league(self.bot.conn, int(body["league_id"]))
+        if league is None:
+            raise rules.DraftError("That league doesn't exist.")
+        pools = rules.get_league_pools(self.bot.conn, league["id"])
+        for pool in pools:
+            self.bot.timers.cancel(pool["id"])
+        return league, pools
+
+    async def archive(self, body):
+        """/archive, for the site's admins"""
+        league, pools = await self._end(body, "archived")
+        rules.archive_league(self.bot.conn, league["id"])
+        return {"name": league["name"]}
+
+    async def delete_league(self, body):
+        """/deleteleague, for the site's admins: a backup first, then everything in the league goes"""
+        league, pools = await self._end(body, "deleted")
+        path = database.backup(self.bot.conn)
+        rules.delete_league(self.bot.conn, league["id"])
+        log.info("league %s (%s) deleted from draft.ogreclan.com; backup %s", league["id"], league["name"], path)
+        for pool in pools:
+            await ui.safe_send(self.bot.get_channel(pool["channel_id"]),
+                               f"🗑️ **{league['name']}** has been deleted by an admin on draft.ogreclan.com.")
+        return {"name": league["name"], "backup": os.path.basename(path)}
 
     # ---- queues -----------------------------------------------------------
 

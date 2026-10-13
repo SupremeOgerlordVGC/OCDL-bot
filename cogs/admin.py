@@ -11,6 +11,7 @@ happens in the pool channel (or two) named in the command.
 import asyncio
 import json
 import logging
+import os
 
 import discord
 from discord import app_commands
@@ -444,6 +445,31 @@ class AdminCog(commands.Cog):
             f"its channels are free for a new `/setup`.",
             ephemeral=True,
         )
+
+    @app_commands.command(
+        name="deleteleague",
+        description="Moderator only: delete a league and everything in it (a backup is kept).",
+    )
+    @app_commands.describe(name="The league's name", confirm="Type the league's name again to confirm")
+    async def deleteleague(self, interaction: discord.Interaction, name: str, confirm: str):
+        ui.require_moderator(self.bot, interaction)
+        league = rules.require_any_league_by_name(self.bot.conn, interaction.guild_id, name)
+        if " ".join(confirm.split()).lower() != league["name"].lower():
+            raise rules.DraftError("❌ Type the league's name in the confirm box to delete it.")
+        pools = rules.get_league_pools(self.bot.conn, league["id"])
+        path = database.backup(self.bot.conn)
+        for pool in pools:
+            self.bot.timers.cancel(pool["id"])
+        rules.delete_league(self.bot.conn, league["id"])
+        log.info("league %s (%s) deleted by %s; backup %s", league["id"], league["name"], interaction.user.id, path)
+        await interaction.response.send_message(
+            f"🗑️ **{league['name']}** is deleted, with everything in it. A backup was taken first "
+            f"(`{os.path.basename(path)}`), and its channels are free for a new `/setup`.",
+            ephemeral=True,
+        )
+        for pool in pools:
+            await ui.safe_send(self.bot.get_channel(pool["channel_id"]),
+                               f"🗑️ **{league['name']}** has been deleted by a moderator.")
 
     # ---- /draft-moderator -----------------------------------------------
 

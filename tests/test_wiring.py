@@ -117,6 +117,7 @@ class CommandOptionTests(unittest.TestCase):
                   "template_link", "tiering_link", "draft_channel_b", "players_b",
                   "players_role_b", "weeks", "visibility"},
         "visibility": {"name", "setting"},
+        "deleteleague": {"name", "confirm"},
         "removeplayer": {"player", "keep_roster"},
         "setskips": {"player", "skips", "timer"},
         "substitute": {"out", "into"},

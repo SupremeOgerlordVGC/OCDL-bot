@@ -833,6 +833,24 @@ def archive_league(conn, league_id):
     conn.commit()
 
 
+def delete_league(conn, league_id):
+    """/deleteleague - remove a league and everything in it: pools, players,
+    picks, rosters, queues, trades and its schedule. The caller takes a
+    backup first; this can't be undone otherwise. Returns what was removed."""
+    pools = [row["id"] for row in conn.execute("SELECT id FROM pools WHERE league_id = ?", (league_id,))]
+    removed = {}
+    marks = ",".join("?" * len(pools))
+    with conn:
+        if pools:
+            for table in ("queued_picks", "sub_requests", "makeups", "skips", "picks", "rosters", "players"):
+                removed[table] = conn.execute(
+                    f"DELETE FROM {table} WHERE pool_id IN ({marks})", pools).rowcount
+        for table in ("trades", "fixtures", "pools"):
+            removed[table] = conn.execute(f"DELETE FROM {table} WHERE league_id = ?", (league_id,)).rowcount
+        removed["leagues"] = conn.execute("DELETE FROM leagues WHERE id = ?", (league_id,)).rowcount
+    return removed
+
+
 # --------------------------------------------------------------------------
 # Moderator roles (set per server with /draft-moderator)
 # --------------------------------------------------------------------------
