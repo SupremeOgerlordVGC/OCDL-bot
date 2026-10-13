@@ -87,11 +87,9 @@ A scheduled start survives a bot restart. `/draft` with no time starts it early 
 
 **`/pick`** — you can pick for whoever is on the clock. Useful when somebody is cut off.
 
+**`/skipturn`** — ends the turn of whoever is on the clock, exactly as their timer running out would: they owe a makeup pick and their timer is reduced. For when somebody is clearly away and nobody wants to wait out the clock. Add `penalty:False` to skip them without touching their timer, and `player:@Someone` to refuse unless that is really who is on the clock — turns move on while you type.
+
 **`/editpick round:3 pokemon:Garchomp cost:12 player:@Someone`** — change a pick. Players may only fix their own until the next pick is made, so anything older is your job. **You** are never too late. You can also use it to **add** a pick for a round where they have nothing recorded, which settles any makeup pick they owed.
-
-**`/myqueue`** — run it **here in the admin channel** and you get dropdowns to pick the draft, pool and player, then read their queue. In a draft channel it only ever shows your own, so the players have no idea this is possible. Keep it that way.
-
-**`/cancelqueue player:@Someone`** — deletes somebody's queued picks before they fire. Add `round:3` for just one round. Nothing else changes: no pick is undone and the clock is not touched. The channel is told, so the player knows their queue is gone.
 
 **`/setskips player:@Someone skips:0`** — corrects their skip count and recalculates their timer from it, so `skips:0` restores their full base timer. Add `timer:300` to set the clock to an exact value. Use this when somebody was skipped unfairly.
 
@@ -104,7 +102,21 @@ Use `/substitute` to replace someone, `/removeplayer` when they're simply gone.
 
 ---
 
-## Block 5 — trades
+## Block 5 — players' queues
+
+```
+**📋 Queues** *(a queue is the list `/queuepick` drafts from automatically)*
+
+**`/myqueue`** — run it **here in the admin channel** and you get dropdowns: pick the draft, the pool and the player, and their queue appears. In a draft channel it only ever shows your own, so the players have no idea this is possible. Keep it that way.
+
+**`/cancelqueue player:@Someone`** — deletes somebody's queued picks before they fire, in a draft channel. Add `round:3` for just one round. Nothing else changes: no pick is undone and the clock is not touched. The channel is told, so the player knows their queue has gone.
+
+A queue costs a player nothing to lose — it is only a plan for a turn they might miss.
+```
+
+---
+
+## Block 6 — trades
 
 ```
 **🤝 Trades** *(full-season drafts only)*
@@ -128,7 +140,7 @@ Trade numbers are **per draft**, so two leagues sharing an admin channel never b
 
 ---
 
-## Block 6 — spreadsheet and season
+## Block 7 — spreadsheet and season
 
 ```
 **📊 Spreadsheet and schedule**
@@ -145,7 +157,7 @@ Trade numbers are **per draft**, so two leagues sharing an admin channel never b
 
 ---
 
-## Block 7 — ending and housekeeping
+## Block 8 — ending and housekeeping
 
 ```
 **🗃️ Finishing up**

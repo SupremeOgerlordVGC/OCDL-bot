@@ -198,8 +198,12 @@ def render_event(event, draft):
                 f"— {event['reason']}.")
 
     if kind == "skipped":
-        text = (f"⏰ **{event['display_name']}** ran out of time and was **skipped** "
-                f"in Round {event['round']}.")
+        if event.get("reason") == rules.MODERATOR_SKIP:
+            text = (f"⏭️ **{event['display_name']}** was **skipped** by a moderator "
+                    f"in Round {event['round']}.")
+        else:
+            text = (f"⏰ **{event['display_name']}** ran out of time and was **skipped** "
+                    f"in Round {event['round']}.")
         if event["halved"]:
             text += f"\nTheir timer is now **{format_seconds(event['new_timer'])}**."
         elif event.get("queue_exhausted"):

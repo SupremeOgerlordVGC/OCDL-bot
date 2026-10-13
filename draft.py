@@ -888,6 +888,13 @@ def moderator_role_ids(conn, guild_id):
 # --------------------------------------------------------------------------
 
 
+# Why a turn was skipped. Stored on the skip row and carried on the event,
+# because a moderator skipping somebody must not be announced as a timer
+# running out.
+TIMER_SKIP = "timer expired"
+MODERATOR_SKIP = "moderator"
+
+
 def _event(kind, player=None, **fields):
     event = {"type": kind}
     if player is not None:
@@ -1207,7 +1214,7 @@ def open_turn_clock(conn, pool_id, deadline):
     conn.commit()
 
 
-def skip_current_player(conn, pool_id, reason="timer expired", halve=None, _nested=False):
+def skip_current_player(conn, pool_id, reason=TIMER_SKIP, halve=None, _nested=False):
     """Skip whoever is on the clock and move on.
 
     `halve` defaults to "yes, unless the player's queue was exhausted" -
@@ -1246,6 +1253,7 @@ def skip_current_player(conn, pool_id, reason="timer expired", halve=None, _nest
 
     events = [_event("skipped", get_player_by_id(conn, player["id"]),
                      round=draft["current_round"], new_timer=new_timer, halved=halve,
+                     reason=reason,
                      queue_exhausted=bool(draft["queue_exhausted"]))]
 
     advance_turn(conn, pool_id)

@@ -710,6 +710,49 @@ class AdminCog(commands.Cog):
             f"**{result['skips']}**, timer **{ui.format_seconds(result['timer'])}**.",
         )
 
+    # ---- /skipturn ------------------------------------------------------
+
+    @app_commands.command(
+        name="skipturn",
+        description="Moderator only: skip whoever is on the clock, as a timer running out would.",
+    )
+    @app_commands.describe(
+        player="Safety check: refuses unless this is the person actually on the clock",
+        penalty="Set to False to skip them without reducing their timer",
+    )
+    async def skipturn(self, interaction: discord.Interaction,
+                       player: discord.Member = None, penalty: bool = True):
+        pool = rules.require_active_pool(self.bot.conn, interaction.channel_id)
+        ui.require_moderator(self.bot, interaction)
+        await interaction.response.defer(ephemeral=True)
+
+        on_clock = rules.current_player(self.bot.conn, pool)
+        if player is not None and on_clock["user_id"] != player.id:
+            # Turns can move on while a moderator is typing, and skipping the
+            # wrong person costs them a round. Naming them makes it safe.
+            raise rules.DraftError(
+                f"❌ **{on_clock['display_name']}** is on the clock, not "
+                f"**{player.display_name}** — the turn has moved on since you "
+                f"looked. Nothing was skipped."
+            )
+
+        round_number = pool["current_round"]
+        events = rules.skip_current_player(
+            self.bot.conn, pool["id"], reason=rules.MODERATOR_SKIP,
+            halve=None if penalty else False,
+        )
+
+        timer_note = ("Their timer was reduced, exactly as the clock running out "
+                      "would have done — `/setskips` puts it back."
+                      if penalty else "Their timer was left alone.")
+        await interaction.followup.send(
+            f"⏭️ Skipped **{on_clock['display_name']}** in Round {round_number}. "
+            f"They owe a Round {round_number} makeup pick, due before their next "
+            f"turn.\n{timer_note}",
+            ephemeral=True,
+        )
+        await ui.announce(self.bot, pool["id"], events)
+
     # ---- /removeplayer --------------------------------------------------
 
     @app_commands.command(

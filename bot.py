@@ -239,7 +239,7 @@ class DraftBot(commands.Bot):
         if (draft["current_round"], draft["current_turn_index"]) != tuple(token):
             return
 
-        events = rules.skip_current_player(self.conn, draft_id, reason="timer expired")
+        events = rules.skip_current_player(self.conn, draft_id, reason=rules.TIMER_SKIP)
         await ui.announce(self, draft_id, events)
 
     # ---- housekeeping ---------------------------------------------------

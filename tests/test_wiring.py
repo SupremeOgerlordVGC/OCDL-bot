@@ -120,6 +120,7 @@ class CommandOptionTests(unittest.TestCase):
         "deleteleague": {"name", "confirm"},
         "removeplayer": {"player", "keep_roster"},
         "setskips": {"player", "skips", "timer"},
+        "skipturn": {"player", "penalty"},
         "substitute": {"out", "into"},
         "trade": {"drops", "gets", "partner", "for_player"},
         "approvetrade": {"trade_id", "name"},

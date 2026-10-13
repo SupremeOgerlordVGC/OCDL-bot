@@ -23,6 +23,7 @@ import database     # noqa: E402
 import draft as rules   # noqa: E402
 import timers       # noqa: E402
 import ui           # noqa: E402
+from cogs.admin import AdminCog         # noqa: E402
 from cogs.drafting import DraftingCog   # noqa: E402
 
 
@@ -841,6 +842,94 @@ class QueueBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await browser.interaction_check(other))
         self.assertIn("not your lookup", other.replies[0])
         self.assertTrue(await browser.interaction_check(FakeComponentInteraction(777)))
+
+
+class SkipTurnTests(unittest.IsolatedAsyncioTestCase):
+    """A moderator ending a turn that nobody is going to use."""
+
+    CHANNEL = 9600
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(self.CHANNEL)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.pool_id = make_pool(
+            self.conn, self.CHANNEL, [(11, "Larry"), (22, "Alex"), (33, "Sam")],
+            budget=100, min_picks=1, max_picks=3, base_timer=120)
+        self.cog = AdminCog(self.bot)
+        rules.start_pool(self.conn, self.pool())
+
+    def pool(self):
+        return rules.get_pool(self.conn, self.pool_id)
+
+    def player(self, user_id):
+        return rules.get_player(self.conn, self.pool_id, user_id)
+
+    async def skip(self, moderator=True, **kwargs):
+        interaction = FakeInteraction(self.bot, self.CHANNEL, 777,
+                                      moderator=moderator)
+        await self.cog.skipturn.callback(self.cog, interaction, **kwargs)
+        self.bot.timers.cancel_all()
+        return interaction
+
+    async def test_the_channel_is_told_a_moderator_did_it(self):
+        await self.skip()
+        # Not "ran out of time": nobody's clock expired here.
+        self.assertIn("was **skipped** by a moderator", self.channel.text)
+        self.assertNotIn("ran out of time", self.channel.text)
+
+    async def test_the_turn_moves_on_and_a_makeup_is_owed(self):
+        interaction = await self.skip()
+
+        larry = self.player(11)
+        self.assertEqual(rules.pending_makeup_rounds(self.conn, self.pool_id,
+                                                     larry["id"]), [1])
+        self.assertEqual(rules.current_player(self.conn, self.pool())["display_name"],
+                         "Alex")
+        self.assertIn("Skipped **Larry**", interaction.text)
+
+    async def test_by_default_the_timer_is_reduced_like_any_skip(self):
+        await self.skip()
+        self.assertEqual(self.player(11)["current_timer"], 60)
+        self.assertEqual(self.player(11)["skip_count"], 1)
+
+    async def test_it_can_skip_without_a_penalty(self):
+        await self.skip(penalty=False)
+        self.assertEqual(self.player(11)["current_timer"], 120,
+                         "penalty:False must leave the timer alone")
+        self.assertIn("left alone", (await self.skip(penalty=False)).text)
+
+    async def test_naming_the_wrong_player_changes_nothing(self):
+        wrong = SimpleNamespace(id=22, display_name="Alex")
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.skip(player=wrong)
+        self.assertIn("Larry", str(caught.exception))
+
+        larry = self.player(11)
+        self.assertEqual(larry["current_timer"], 120)
+        self.assertEqual(larry["skip_count"], 0)
+        self.assertEqual(rules.pending_makeup_rounds(self.conn, self.pool_id,
+                                                     larry["id"]), [])
+        self.assertEqual(rules.current_player(self.conn, self.pool())["display_name"],
+                         "Larry", "still their turn")
+
+    async def test_naming_the_right_player_goes_ahead(self):
+        await self.skip(player=SimpleNamespace(id=11, display_name="Larry"))
+        self.assertEqual(rules.current_player(self.conn, self.pool())["display_name"],
+                         "Alex")
+
+    async def test_a_player_cannot_skip_anybody(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.skip(moderator=False)
+        self.assertIn("draft moderators", str(caught.exception))
+        self.assertEqual(rules.current_player(self.conn, self.pool())["display_name"],
+                         "Larry")
+
+    async def test_the_next_player_gets_a_fresh_clock(self):
+        await self.skip()
+        # The skip must hand the clock over, not leave the draft stalled.
+        self.assertIsNotNone(self.pool()["turn_deadline"])
+        self.assertIn("you are on the clock", self.channel.text.lower())
 
 
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
