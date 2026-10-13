@@ -233,6 +233,15 @@ def load_env(path=None):
                 os.environ[key] = value
 
 
+def get_ogreclan_api():
+    """The port and shared secret of the private web API for draft.ogreclan.com (webapi.py), or None when it is off."""
+    port = os.environ.get("OGRECLAN_API_PORT", "").strip()
+    secret = os.environ.get("OGRECLAN_SECRET", "").strip()
+    if not port.isdigit() or len(secret) < 24:
+        return None
+    return int(port), secret
+
+
 def get_token():
     """Return the Discord bot token, or None if it has not been set."""
     token = os.environ.get("DISCORD_TOKEN", "").strip()

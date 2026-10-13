@@ -26,6 +26,7 @@ import draft as rules
 import sheets
 import timers
 import ui
+import webapi
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +78,8 @@ class DraftBot(commands.Bot):
         # once per league, since it cannot change mid-draft.
         self.tiering_tabs = {}
         self._resumed = False
+        # draft.ogreclan.com's private web API (webapi.py), if it's set up
+        self.webapi = None
 
     # ---- startup --------------------------------------------------------
 
@@ -86,6 +89,16 @@ class DraftBot(commands.Bot):
             log.info("loaded %s", extension)
 
         self.tree.on_error = self.on_app_command_error
+
+        api = config.get_ogreclan_api()
+        if api:
+            self.webapi = webapi.WebApi(self, *api)
+            try:
+                await self.webapi.start()
+            except OSError:
+                # a busy port must not stop the draft bot itself
+                log.exception("could not start the web API for draft.ogreclan.com")
+                self.webapi = None
 
         # Syncing to one guild makes commands appear instantly while you are
         # testing. A global sync can take up to an hour to show up.
@@ -314,6 +327,8 @@ class DraftBot(commands.Bot):
 
     async def close(self):
         self.timers.cancel_all()
+        if self.webapi:
+            await self.webapi.stop()
         await super().close()
         self.conn.close()
 

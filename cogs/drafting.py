@@ -431,15 +431,23 @@ class DraftingCog(commands.Cog):
             f"✅ Round {round} makeup pick recorded: **{pick['pokemon']}** for {cost} points.",
             ephemeral=True,
         )
-        # A makeup pick never changes whose turn it is, so it is announced on
-        # its own rather than going through the turn machinery.
-        player = rules.get_player(self.bot.conn, draft["id"], interaction.user.id)
-        await ui.safe_send(
-            interaction.channel,
-            f"✅ **{player['display_name']}** made their **Round {round} makeup pick**: "
-            f"**{pick['pokemon']}** for **{cost}** points. "
-            f"*(The current turn is unaffected.)*",
-        )
+        await self.announce_makeup_pick(draft, interaction.user.id, pick, interaction.channel)
+
+    async def announce_makeup_pick(self, draft, user_id, pick, channel):
+        """Tell the channel about a makeup pick, and put it on the sheet.
+
+        A makeup pick never changes whose turn it is, so it is announced on
+        its own rather than going through the turn machinery. Used by
+        /makeuppick and by draft.ogreclan.com (webapi.py).
+        """
+        player = rules.get_player(self.bot.conn, draft["id"], user_id)
+        if channel is not None:
+            await ui.safe_send(
+                channel,
+                f"✅ **{player['display_name']}** made their **Round {pick['round']} makeup pick**: "
+                f"**{pick['pokemon']}** for **{pick['cost']}** points. "
+                f"*(The current turn is unaffected.)*",
+            )
         ui.sync_pick_to_sheet(self.bot, draft["id"], {
             "pick_order": pick["pick_order"], "round": pick["round"],
             "display_name": player["display_name"], "pokemon": pick["pokemon"],
