@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,6 +43,19 @@ def make_draft(conn, channel_id=100, players=4, budget=100, min_picks=2,
         draft.start_pool(conn, pool)
         pool = draft.get_pool(conn, pool["id"])
     return pool
+
+
+def approve_now(conn, pool, trade_number, approver_user_id):
+    """Approve a trade and put it into effect, as the next /postschedule does."""
+    record, notes = draft.approve_trade(conn, pool, trade_number, approver_user_id)
+    draft.apply_trades(conn, pool["league_id"], week=1)
+    return record, notes
+
+
+def close_free_window(conn, pool_id):
+    """As if the free trade window after the draft had already ended."""
+    conn.execute("UPDATE pools SET free_trades_until = NULL WHERE id = ?", (pool_id,))
+    conn.commit()
 
 
 def make_two_pool_league(conn, name="Two Pools", channel_a=201, channel_b=202,
@@ -692,10 +706,39 @@ class TradeTests(unittest.TestCase):
         owner = draft.find_owner(self.conn, self.draft["id"], "garchomp")
         self.assertEqual(owner["player_id"], draft.get_player(self.conn, self.draft["id"], user(1))["id"])
 
+    def test_approval_waits_for_the_next_posted_week(self):
+        draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], ["Heatran"],
+                            partner_user_id=user(2))
+        record, _ = draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        self.assertEqual(record["status"], "approved")
+        self.assertIsNone(record["applied_at"])
+        p1 = draft.get_player(self.conn, self.draft["id"], user(1))
+        self.assertEqual(draft.roster_view(self.conn, self.live, p1)["pokemon"], [("Garchomp", 12)],
+                         "nothing moves until /postschedule")
+        self.assertEqual(p1["budget_remaining"], 88)
+
+        applied = draft.apply_trades(self.conn, self.live["league_id"], week=3)
+        self.assertEqual([(t["trade_number"], t["applied_week"]) for t, _ in applied], [(1, 3)])
+        p1 = draft.get_player(self.conn, self.draft["id"], user(1))
+        self.assertEqual(draft.roster_view(self.conn, self.live, p1)["pokemon"], [("Heatran", 10)])
+        self.assertEqual(draft.apply_trades(self.conn, self.live["league_id"], week=4), [],
+                         "a trade only ever applies once")
+
+    def test_trades_waiting_for_the_same_week_apply_in_order(self):
+        draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], ["Heatran"],
+                            partner_user_id=user(2))
+        draft.propose_trade(self.conn, self.live, user(1), ["Heatran"], ["Skarmory"])
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        _, notes = draft.approve_trade(self.conn, self.live, 2, approver_user_id=42)
+        self.assertTrue(any("#1" in note and "heatran" in note for note in notes))
+        draft.apply_trades(self.conn, self.live["league_id"], week=2)
+        self.assertIsNone(draft.find_owner(self.conn, self.draft["id"], "heatran"))
+        self.assertIsNotNone(draft.find_owner(self.conn, self.draft["id"], "skarmory"))
+
     def test_approval_swaps_rosters_and_budgets(self):
         draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], ["Heatran"],
                             partner_user_id=user(2))
-        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        approve_now(self.conn, self.live, 1, 42)
 
         p1 = draft.get_player(self.conn, self.draft["id"], user(1))
         p2 = draft.get_player(self.conn, self.draft["id"], user(2))
@@ -713,6 +756,23 @@ class TradeTests(unittest.TestCase):
             draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
         self.assertIn("already been approved", str(caught.exception))
 
+    def test_nil_or_0_drops_nothing(self):
+        for typed in ["nil", "0", " NIL "]:
+            self.assertEqual(draft.parse_pokemon_list(typed, 5, allow_nothing=True), [])
+        self.assertEqual(draft.parse_pokemon_list("0", 5), ["0"], "only the giving-up side means nothing")
+
+        record, warnings = draft.propose_trade(self.conn, self.live, user(1), [], ["Skarmory"])
+        self.assertTrue(any("drops nothing" in w and "points" in w for w in warnings))
+        self.assertEqual(draft.trade_side(record["drops"]), "nothing")
+        draft.approve_trade(self.conn, self.live, record["trade_number"], 42)
+        draft.apply_trades(self.conn, self.live["league_id"], week=1)
+        p1 = draft.get_player(self.conn, self.draft["id"], user(1))
+        self.assertEqual(sorted(name for name, _ in draft.roster_view(self.conn, self.live, p1)["pokemon"]),
+                         ["Garchomp", "Skarmory"], "a pickup on top of the roster")
+
+        with self.assertRaises(draft.DraftError):
+            draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], [])
+
     def test_trading_a_pokemon_you_do_not_own_warns_but_does_not_block(self):
         # Admins judge trades, so the bot records it and flags the problem.
         record, warnings = draft.propose_trade(self.conn, self.live, user(1),
@@ -723,7 +783,7 @@ class TradeTests(unittest.TestCase):
 
     def test_free_agency_returns_the_dropped_pokemon_to_the_pool(self):
         draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], ["Skarmory"])
-        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        approve_now(self.conn, self.live, 1, 42)
         self.assertIsNone(draft.find_owner(self.conn, self.draft["id"], "garchomp"))
         self.assertIsNotNone(draft.find_owner(self.conn, self.draft["id"], "skarmory"))
         # History still records that Player1 drafted Garchomp in round 1.
@@ -733,7 +793,7 @@ class TradeTests(unittest.TestCase):
     def test_history_survives_a_trade(self):
         draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], ["Heatran"],
                             partner_user_id=user(2))
-        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        approve_now(self.conn, self.live, 1, 42)
         picks = draft.round_picks(self.conn, self.draft["id"], 1)
         self.assertEqual([(p["display_name"], p["pokemon"]) for p in picks],
                          [("Player1", "Garchomp"), ("Player2", "Heatran")])
@@ -956,7 +1016,7 @@ class AfterTheDraftTests(unittest.TestCase):
         record, _ = draft.propose_trade(self.conn, self.finished, user(1),
                                         ["Mon11"], ["Mon22"], partner_user_id=user(2))
         self.assertEqual(record["trade_number"], 1)
-        draft.approve_trade(self.conn, self.finished, 1, approver_user_id=5)
+        approve_now(self.conn, self.finished, 1, 5)
         owner = draft.find_owner(self.conn, self.draft["id"], "mon11")
         self.assertEqual(owner["player_id"], draft.get_player(self.conn, self.draft["id"], user(2))["id"])
 
@@ -1062,6 +1122,8 @@ class TradeLimitTests(unittest.TestCase):
             player = draft.current_player(self.conn, live)
             draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
                             f"P{player['id']}R{live['current_round']}", 5)
+        self.free_until = draft.get_pool(self.conn, self.draft["id"])["free_trades_until"]
+        close_free_window(self.conn, self.draft["id"])
         self.live = draft.get_pool(self.conn, self.draft["id"])
 
     def test_setup_stores_the_trade_cap(self):
@@ -1069,23 +1131,89 @@ class TradeLimitTests(unittest.TestCase):
 
     def test_second_trade_is_refused_once_the_cap_is_reached(self):
         record, _ = draft.propose_trade(self.conn, self.live, user(1), ["P1R1"], ["Wild"])
-        draft.approve_trade(self.conn, self.live, record["trade_number"], 999)
-        self.assertEqual(draft.trades_used(self.conn, self.draft["id"],
-                                           draft.get_player(self.conn, self.draft["id"],
-                                                            user(1))["id"]), 1)
+        approve_now(self.conn, self.live, record["trade_number"], 999)
+        self.assertEqual(draft.pickups_used(self.conn, self.draft["id"],
+                                            draft.get_player(self.conn, self.draft["id"],
+                                                             user(1))["id"]), 1)
 
         with self.assertRaises(draft.DraftError) as caught:
             draft.propose_trade(self.conn, self.live, user(1), ["P1R2"], ["Another"])
-        self.assertIn("already used all 1", str(caught.exception))
+        self.assertIn("already picked up 1", str(caught.exception))
+
+    def test_the_limit_counts_pokemon_received_not_given_up(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=1302, players=2, budget=100, min_picks=1,
+                          max_picks=3, max_trades=2)
+        for _ in range(6):
+            live = draft.get_pool(conn, pool["id"])
+            if live["status"] != "active":
+                break
+            player = draft.current_player(conn, live)
+            draft.make_pick(conn, live, player["user_id"], live["current_round"],
+                            f"P{player['id']}R{live['current_round']}", 5)
+        close_free_window(conn, pool["id"])
+        live = draft.get_pool(conn, pool["id"])
+        p1 = draft.get_player(conn, pool["id"], user(1))
+        p2 = draft.get_player(conn, pool["id"], user(2))
+
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.propose_trade(conn, live, user(1), ["P1R1"], ["A", "B", "C"])
+        self.assertIn("can't receive 3", str(caught.exception))
+
+        # dropping three for one costs the proposer one pickup...
+        record, _ = draft.propose_trade(conn, live, user(1), [f"P{p1['id']}R1", f"P{p1['id']}R2"],
+                                        [f"P{p2['id']}R1"], partner_user_id=user(2))
+        draft.approve_trade(conn, live, record["trade_number"], 999)
+        # ...and the partner, who receives two, two - approved counts even before it's in effect
+        self.assertEqual(draft.pickups_used(conn, pool["id"], p1["id"]), 1)
+        self.assertEqual(draft.pickups_used(conn, pool["id"], p2["id"]), 2)
+        with self.assertRaises(draft.DraftError):
+            draft.propose_trade(conn, live, user(2), [f"P{p2['id']}R2"], ["Wild"])
+        draft.propose_trade(conn, live, user(1), [f"P{p1['id']}R3"], ["Wild"])
 
     def test_partner_trades_count_against_both_players(self):
         record, _ = draft.propose_trade(self.conn, self.live, user(1), ["P1R1"], ["P2R1"],
                                         partner_user_id=user(2))
-        draft.approve_trade(self.conn, self.live, record["trade_number"], 999)
+        approve_now(self.conn, self.live, record["trade_number"], 999)
         p2 = draft.get_player(self.conn, self.draft["id"], user(2))
-        self.assertEqual(draft.trades_used(self.conn, self.draft["id"], p2["id"]), 1)
+        self.assertEqual(draft.pickups_used(self.conn, self.draft["id"], p2["id"]), 1)
         with self.assertRaises(draft.DraftError):
             draft.propose_trade(self.conn, self.live, user(2), ["P1R1"], ["Wild"])
+
+    def test_the_free_window_after_the_draft_does_not_count(self):
+        # setUp drafted every round, which opened the free window
+        self.assertAlmostEqual(self.free_until, time.time() + config.FREE_TRADE_HOURS * 3600, delta=60)
+        self.conn.execute("UPDATE pools SET free_trades_until = ? WHERE id = ?",
+                          (self.free_until, self.draft["id"]))
+        live = draft.get_pool(self.conn, self.draft["id"])
+        self.assertEqual(live["status"], "complete")
+        p1 = draft.get_player(self.conn, self.draft["id"], user(1))
+
+        for wild in ["Wild1", "Wild2", "Wild3"]:
+            record, _ = draft.propose_trade(self.conn, live, user(1), ["P1R1"], [wild])
+            self.assertEqual(record["free"], 1)
+            draft.approve_trade(self.conn, live, record["trade_number"], 999)
+        self.assertEqual(draft.pickups_used(self.conn, self.draft["id"], p1["id"]), 0)
+
+        # once it closes, the limit (1) applies again
+        self.conn.execute("UPDATE pools SET free_trades_until = ? WHERE id = ?",
+                          (time.time() - 1, self.draft["id"]))
+        live = draft.get_pool(self.conn, self.draft["id"])
+        record, _ = draft.propose_trade(self.conn, live, user(1), ["P1R2"], ["Wild4"])
+        self.assertEqual(record["free"], 0)
+        draft.approve_trade(self.conn, live, record["trade_number"], 999)
+        with self.assertRaises(draft.DraftError):
+            draft.propose_trade(self.conn, live, user(1), ["P1R3"], ["Wild5"])
+
+    def test_a_draft_only_league_has_no_free_window(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=1303, players=2, min_picks=1, max_picks=1,
+                          mode="draft_only")
+        for _ in range(2):
+            live = draft.get_pool(conn, pool["id"])
+            player = draft.current_player(conn, live)
+            draft.make_pick(conn, live, player["user_id"], 1, f"M{player['id']}", 1)
+        self.assertIsNone(draft.get_pool(conn, pool["id"])["free_trades_until"])
 
     def test_zero_means_unlimited(self):
         conn = database.connect(":memory:")
@@ -1094,16 +1222,17 @@ class TradeLimitTests(unittest.TestCase):
         draft.make_pick(conn, row, user(1), 1, "A", 5)
         live = draft.get_pool(conn, row["id"])
         draft.make_pick(conn, live, user(2), 1, "B", 5)
+        close_free_window(conn, row["id"])
         live = draft.get_pool(conn, row["id"])
         for name in ["C", "D", "E"]:
             record, _ = draft.propose_trade(conn, live, user(1), ["A"], [name])
-            draft.approve_trade(conn, live, record["trade_number"], 999)
+            approve_now(conn, live, record["trade_number"], 999)
             live = draft.get_pool(conn, row["id"])
             # the newly acquired Pokemon becomes the next thing to trade away
             conn.execute("UPDATE rosters SET pokemon = 'A', pokemon_key = 'a' "
                          "WHERE pool_id = ? AND pokemon_key = ?", (row["id"], name.lower()))
             conn.commit()
-        self.assertEqual(draft.trades_used(conn, row["id"],
+        self.assertEqual(draft.pickups_used(conn, row["id"],
                                            draft.get_player(conn, row["id"], user(1))["id"]), 3)
 
 
@@ -1184,7 +1313,7 @@ class SheetExportTests(unittest.TestCase):
         live = draft.get_pool(self.conn, self.draft["id"])
         record, _ = draft.propose_trade(self.conn, live, user(2),
                                         ["Player2-R1"], ["FreeAgentA", "FreeAgentB"])
-        draft.approve_trade(self.conn, live, record["trade_number"], 999)
+        approve_now(self.conn, live, record["trade_number"], 999)
 
         live = draft.get_pool(self.conn, self.draft["id"])
         p2 = draft.get_player(self.conn, self.draft["id"], user(2))
@@ -1201,7 +1330,7 @@ class SheetExportTests(unittest.TestCase):
         live = draft.get_pool(self.conn, self.draft["id"])
         record, _ = draft.propose_trade(self.conn, live, user(1), ["Garchomp"], ["Heatran"],
                                         partner_user_id=user(2))
-        draft.approve_trade(self.conn, live, record["trade_number"], 999)
+        approve_now(self.conn, live, record["trade_number"], 999)
 
         live = draft.get_pool(self.conn, self.draft["id"])
         p1 = draft.get_player(self.conn, self.draft["id"], user(1))
@@ -1227,7 +1356,7 @@ class SheetExportTests(unittest.TestCase):
         live = draft.get_pool(self.conn, self.draft["id"])
         record, _ = draft.propose_trade(self.conn, live, user(1),
                                         ["Garchomp"], ["A", "B", "C"])
-        draft.approve_trade(self.conn, live, record["trade_number"], 999)
+        approve_now(self.conn, live, record["trade_number"], 999)
 
         _, blocks, overflow = draft.export_for_sheet(self.conn, self.draft["league_id"])
         self.assertEqual(overflow, {})          # three fit fine in twelve rows
@@ -1458,6 +1587,22 @@ class LeagueNameTests(unittest.TestCase):
         with self.assertRaises(draft.DraftError) as caught:
             draft.require_league_by_name(self.conn, 1, "Nope")
         self.assertIn("Ogerpon Cup", str(caught.exception), "should list what is running")
+
+    def test_season_commands_find_a_league_after_its_draft(self):
+        pool = make_draft(self.conn, channel_id=508, players=2, min_picks=1,
+                          max_picks=1, name="Season Cup")
+        for _ in range(2):
+            live = draft.get_pool(self.conn, pool["id"])
+            player = draft.current_player(self.conn, live)
+            draft.make_pick(self.conn, live, player["user_id"], 1, f"M{player['id']}", 1)
+        self.assertEqual(draft.get_league(self.conn, pool["league_id"])["status"], "complete")
+        with self.assertRaises(draft.DraftError):
+            draft.require_league_by_name(self.conn, 1, "Season Cup")
+        found = draft.require_season_league_by_name(self.conn, 1, "season cup")
+        self.assertEqual(found["id"], pool["league_id"], "/postschedule still works after the draft")
+        draft.archive_league(self.conn, pool["league_id"])
+        with self.assertRaises(draft.DraftError):
+            draft.require_season_league_by_name(self.conn, 1, "Season Cup")
 
     def test_several_leagues_share_one_admin_channel(self):
         make_draft(self.conn, channel_id=506, players=2, name="One")
@@ -2441,6 +2586,32 @@ class MigrationTests(unittest.TestCase):
 
             league = conn.execute("SELECT name FROM leagues").fetchone()
             self.assertEqual(league["name"], "Old League", "existing data must survive")
+            conn.close()
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(path + suffix):
+                    os.remove(path + suffix)
+
+    def test_trades_approved_before_the_upgrade_stay_in_effect(self):
+        import sqlite3
+        path = self.build_old_database()
+        try:
+            old = sqlite3.connect(path)
+            old.executescript("""
+                CREATE TABLE trades (id INTEGER PRIMARY KEY, league_id INTEGER, pool_id INTEGER,
+                  trade_number INTEGER, proposer_id INTEGER, partner_id INTEGER, drops TEXT,
+                  gets TEXT, status TEXT, created_at TEXT, resolved_at TEXT, resolved_by INTEGER);
+                INSERT INTO trades VALUES (1, 1, 1, 1, 1, NULL, '["A"]', '["B"]', 'approved',
+                  '2026-10-01', '2026-10-02', 9);
+                INSERT INTO trades VALUES (2, 1, 1, 2, 1, NULL, '["B"]', '["C"]', 'pending',
+                  '2026-10-03', NULL, NULL);
+            """)
+            old.commit()
+            old.close()
+            conn = database.connect(path)
+            rows = conn.execute("SELECT trade_number, applied_at FROM trades ORDER BY trade_number").fetchall()
+            self.assertEqual([(r["trade_number"], r["applied_at"]) for r in rows], [(1, "2026-10-02"), (2, None)])
+            self.assertEqual(draft.waiting_trades(conn, 1), [], "already applied, so never applied again")
             conn.close()
         finally:
             for suffix in ("", "-wal", "-shm"):

@@ -618,8 +618,8 @@ class DraftingCog(commands.Cog):
                 f"({len(view['tera_captains'])}/{view['max_tera']} captains)")
         if draft["max_trades"]:
             lines.append(
-                f"• Trades used: **{rules.trades_used(self.bot.conn, draft['id'], target['id'])}**"
-                f" / {draft['max_trades']}")
+                f"• Pokémon picked up in trades: "
+                f"**{rules.pickups_used(self.bot.conn, draft['id'], target['id'])}** / {draft['max_trades']}")
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 

@@ -228,6 +228,14 @@ def render_event(event, draft):
                         f"{event['total_rounds']} rounds have finished.")
 
         tail = " Use `/roster` to review teams and `/progress` for the full history."
+        if event.get("free_trades_until"):
+            until = int(event["free_trades_until"])
+            pings = " ".join(f"<@{user_id}>" for user_id in event.get("players") or [])
+            limit = (f" and don't count toward the season's limit of {event['max_trades']} "
+                     f"Pokémon picked up" if event.get("max_trades") else "")
+            tail += (f"\n\n📣 {pings}\n🔓 **Free trade window:** until <t:{until}:F> (<t:{until}:R>), "
+                     f"trades and free-agency pickups are unlimited{limit}. Propose them with "
+                     f"`/trade`; once approved, they take effect when the next week is posted.")
         if event.get("archived"):
             tail += (" This was a draft-only league, so it is now archived and the "
                      "channels are free for a new `/setup`.")

@@ -96,7 +96,10 @@ A reduced timer is not permanent punishment — ask a moderator if you think it 
 `/trade drops:Garchomp gets:Heatran partner:@Alex`
 • With `partner` it is a swap with that player.
 • **Without** `partner` it is free agency: you drop Pokémon back into the pool and pick up undrafted ones.
-• Nothing changes until a moderator approves it. You will see the trade number.
+• Dropping nothing? Put `nil` or `0` in `drops` to pay for a pickup with the points you have left: `/trade drops:nil gets:Heatran`
+• Nothing changes until a moderator approves it, and then **rosters change when the next week is posted**, so nothing moves in the middle of a week. You will see the trade number.
+• The league's limit counts the **Pokémon you pick up**, not the ones you drop.
+• For **24 hours after the draft ends** (the bot pings everyone), trades are unlimited and don't count toward the limit.
 
 **`/trades`** — see every trade and whether it was approved.
 

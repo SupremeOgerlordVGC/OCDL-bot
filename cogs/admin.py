@@ -9,6 +9,7 @@ happens in the pool channel (or two) named in the command.
 """
 
 import asyncio
+import json
 import logging
 
 import discord
@@ -20,6 +21,7 @@ import database
 import draft as rules
 import sheets
 import ui
+from cogs.drafting import tiering_tab_for
 
 log = logging.getLogger("draftbot.admin")
 
@@ -51,7 +53,7 @@ class AdminCog(commands.Cog):
         mode="Whether the bot handles the whole season or only the draft",
         budget="Points each player may spend. Read from a template if you link one.",
         tera_budget="Tera Captain points. 0 means no Tera format.",
-        max_trades="Most trades one player may make. 0 = unlimited.",
+        max_trades="Most Pokémon one player may pick up in trades. 0 = unlimited.",
         template_link="Full league template. Gives rosters, settings and the schedule.",
         tiering_link="Simple tiering sheet: names in A, prices in B, Tera prices in C.",
         draft_channel_b="Optional second pool's channel (needs a template)",
@@ -256,7 +258,7 @@ class AdminCog(commands.Cog):
                if tera_budget else "\n")
             + f"• Picks: **{min_picks}–{max_picks}** per player ({max_picks} rounds)\n"
             f"• Base timer: **{ui.format_seconds(timer)}**\n"
-            + (f"• Trades per player: **{max_trades or 'unlimited'}**\n"
+            + (f"• Trade pickups per player: **{max_trades or 'unlimited'}** Pokémon\n"
                if league["mode"] == "full_season" else "")
             + f"• Document: {document}\n"
             f"• Trade approvals: {interaction.channel.mention}\n"
@@ -300,7 +302,7 @@ class AdminCog(commands.Cog):
         tera_budget="New Tera budget (0 for no Tera format)",
         min_picks="New minimum picks per player",
         max_picks="New maximum picks per player",
-        max_trades="New trade limit per player (0 = unlimited)",
+        max_trades="New limit on Pokémon each player may pick up in trades (0 = unlimited)",
         document_link="New template or tiering link",
     )
     async def edit_league(self, interaction: discord.Interaction, budget: int = None,
@@ -324,7 +326,7 @@ class AdminCog(commands.Cog):
             f"• Budget: **{updated['budget']}**"
             + (f" · Tera **{updated['tera_budget']}**" if updated["tera_budget"] else "")
             + f"\n• Picks: **{updated['min_picks']}–{updated['max_picks']}**\n"
-            f"• Trades per player: **{updated['max_trades'] or 'unlimited'}**\n"
+            f"• Trade pickups per player: **{updated['max_trades'] or 'unlimited'}** Pokémon\n"
             f"• Document: {updated['doc_url'] or 'none'}",
             ephemeral=True,
         )
@@ -422,7 +424,7 @@ class AdminCog(commands.Cog):
     @app_commands.describe(name="The league's name")
     async def archive(self, interaction: discord.Interaction, name: str):
         ui.require_moderator(self.bot, interaction)
-        league = rules.require_league_by_name(self.bot.conn, interaction.guild_id, name)
+        league = rules.require_season_league_by_name(self.bot.conn, interaction.guild_id, name)
 
         for pool in rules.get_league_pools(self.bot.conn, league["id"]):
             self.bot.timers.cancel(pool["id"])
@@ -484,7 +486,7 @@ class AdminCog(commands.Cog):
     @app_commands.describe(week="Which week to post", name="The league's name")
     async def postschedule(self, interaction: discord.Interaction, week: int, name: str):
         ui.require_moderator(self.bot, interaction)
-        league = rules.require_league_by_name(self.bot.conn, interaction.guild_id, name)
+        league = rules.require_season_league_by_name(self.bot.conn, interaction.guild_id, name)
 
         if league["mode"] not in config.SCHEDULE_MODES:
             raise rules.DraftError(
@@ -505,13 +507,19 @@ class AdminCog(commands.Cog):
                 self.bot.sheets.read_schedule, league["doc_url"], week)
 
             mentions = {}
+            seats = {}
             for pool in rules.get_league_pools(self.bot.conn, league["id"]):
                 for player in rules.get_players(self.bot.conn, pool["id"]):
                     mentions[rules.normalize(player["display_name"])] = player["user_id"]
+                    seats[rules.normalize(player["display_name"])] = player["id"]
 
             unknown = []
             pairs = [(_who(home, mentions, unknown), _who(away, mentions, unknown))
                      for home, away in sheet_matches]
+            # the week's matches, kept for draft.ogreclan.com
+            matched = [(seats[rules.normalize(home)], seats[rules.normalize(away)])
+                       for home, away in sheet_matches
+                       if rules.normalize(home) in seats and rules.normalize(away) in seats]
             footnote = (f"*Not matched to a Discord account: "
                         f"{', '.join(sorted(set(unknown)))}. Run `/sync` so the sheet's "
                         f"coach names match the bot's.*" if unknown else "")
@@ -529,15 +537,61 @@ class AdminCog(commands.Cog):
                 f"No matches found for week {week}.", ephemeral=True)
             return
 
+        # Approved trades change rosters from the week that's posted next.
+        applied = rules.apply_trades(self.bot.conn, league["id"], week)
+        rules.set_current_week(self.bot.conn, league["id"], week)
+        if league["doc_kind"] == "template":
+            rules.record_week(self.bot.conn, league["id"], week, matched)
+        if applied:
+            await self.price_trades(applied)
+
         lines = [f"📅 **{league['name']} — Week {week}**", ""]
         lines += [f"{home} **vs** {away}" for home, away in pairs]
+        if applied:
+            lines += ["", f"🔁 **Trades in effect from week {week}**"]
+            for trade, _ in applied:
+                proposer = rules.get_player_by_id(self.bot.conn, trade["proposer_id"])
+                partner = (rules.get_player_by_id(self.bot.conn, trade["partner_id"])
+                           if trade["partner_id"] else None)
+                lines.append(
+                    f"• #{trade['trade_number']} **{proposer['display_name']}** gives up "
+                    f"{rules.trade_side(trade['drops'])} and receives "
+                    f"{rules.trade_side(trade['gets'])}"
+                    + (f" (with **{partner['display_name']}**)" if partner else " (free agency)"))
         if footnote:
             lines += ["", footnote]
 
         for message in ui.pack_messages(lines):
             await ui.safe_send(interaction.channel, message)
-        await interaction.followup.send(
-            f"✅ Posted {len(pairs)} match(es) for week {week}.", ephemeral=True)
+        for pool_id in {trade["pool_id"] for trade, _ in applied}:
+            ui.resync_sheet(self.bot, pool_id)
+
+        report = f"✅ Posted {len(pairs)} match(es) for week {week}."
+        if applied:
+            report += f" {len(applied)} approved trade(s) are now in effect."
+            notes = [f"#{trade['trade_number']}: {note}" for trade, notes in applied for note in notes]
+            if notes:
+                report += "\n\nNotes:\n" + "\n".join(f"• {note}" for note in notes)
+        await interaction.followup.send(report, ephemeral=True)
+
+    async def price_trades(self, applied):
+        """A free-agency pickup has no price until the tiering list is consulted."""
+        if not self.bot.sheets.enabled:
+            return
+        for trade, _ in applied:
+            pool = rules.get_pool(self.bot.conn, trade["pool_id"])
+            if not pool["doc_url"]:
+                continue
+            for pokemon in json.loads(trade["gets"]):
+                try:
+                    tab = await tiering_tab_for(self.bot, pool)
+                    entry = await asyncio.to_thread(
+                        self.bot.sheets.lookup, pool["doc_url"], pokemon, tab)
+                except Exception:
+                    log.exception("could not read the price of %s after a trade", pokemon)
+                    continue
+                if entry and entry["cost"] is not None:
+                    rules.apply_sheet_cost(self.bot.conn, pool, pokemon, entry["cost"])
 
     @app_commands.command(
         name="reschedule",
@@ -547,7 +601,7 @@ class AdminCog(commands.Cog):
     async def reschedule(self, interaction: discord.Interaction, name: str,
                          weeks: int = None):
         ui.require_moderator(self.bot, interaction)
-        league = rules.require_league_by_name(self.bot.conn, interaction.guild_id, name)
+        league = rules.require_season_league_by_name(self.bot.conn, interaction.guild_id, name)
 
         if league["doc_kind"] == "template":
             raise rules.DraftError(

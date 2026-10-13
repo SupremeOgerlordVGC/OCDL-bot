@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS leagues (
     -- Weeks in the generated season. Only used when the bot makes its own
     -- schedule; with a template the sheet's own SeasonWeeks applies.
     season_weeks      INTEGER NOT NULL DEFAULT 0,
+    -- The week /postschedule last posted (0 before the first)
+    current_week      INTEGER NOT NULL DEFAULT 0,
     -- 'setup' | 'active' | 'complete' | 'archived' | 'cancelled'
     status            TEXT NOT NULL DEFAULT 'setup',
     created_at        TEXT NOT NULL,
@@ -92,6 +94,8 @@ CREATE TABLE IF NOT EXISTS pools (
     halved_this_turn    INTEGER NOT NULL DEFAULT 0,
     started_at          TEXT,
     finished_at         TEXT,
+    -- Unix time the free-trade window after the draft closes (NULL: none)
+    free_trades_until   REAL,
     UNIQUE (league_id, label)
 );
 
@@ -191,6 +195,13 @@ CREATE TABLE IF NOT EXISTS trades (
     created_at    TEXT NOT NULL,
     resolved_at   TEXT,
     resolved_by   INTEGER,
+    -- An approved trade changes rosters when the next week is posted with
+    -- /postschedule; until then these are empty.
+    applied_at    TEXT,
+    applied_week  INTEGER,
+    -- 1 when proposed in the free-trade window after the draft: it doesn't
+    -- count toward the league's trade limit
+    free          INTEGER NOT NULL DEFAULT 0,
     UNIQUE (league_id, trade_number)
 );
 
@@ -261,6 +272,7 @@ SELECT pools.id               AS id,
        pools.scheduled_start  AS scheduled_start,
        pools.queue_exhausted  AS queue_exhausted,
        pools.halved_this_turn AS halved_this_turn,
+       pools.free_trades_until AS free_trades_until,
        leagues.guild_id         AS guild_id,
        leagues.name             AS league_name,
        leagues.admin_channel_id AS admin_channel_id,
@@ -293,7 +305,19 @@ ADDED_COLUMNS = [
     ("rosters", "tera_captain", "INTEGER NOT NULL DEFAULT 0"),
     ("queued_picks", "tera_captain", "INTEGER NOT NULL DEFAULT 0"),
     ("makeups", "created_turn", "INTEGER NOT NULL DEFAULT 0"),
+    ("leagues", "current_week", "INTEGER NOT NULL DEFAULT 0"),
+    ("trades", "applied_at", "TEXT"),
+    ("trades", "applied_week", "INTEGER"),
+    ("pools", "free_trades_until", "REAL"),
+    ("trades", "free", "INTEGER NOT NULL DEFAULT 0"),
 ]
+
+# Run once, when the column is added to an existing database. Trades approved
+# before approval and application were separate were applied straight away.
+BACKFILLS = {
+    ("trades", "applied_at"):
+        "UPDATE trades SET applied_at = COALESCE(resolved_at, created_at) WHERE status = 'approved'",
+}
 
 # Views are rebuilt from scratch on every connect. `CREATE VIEW IF NOT
 # EXISTS` would keep a stale definition that is missing newly added columns.
@@ -314,6 +338,8 @@ def migrate(conn):
             continue                    # the table itself is new; SCHEMA made it
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            if (table, column) in BACKFILLS:
+                conn.execute(BACKFILLS[(table, column)])
             added.append(f"{table}.{column}")
 
     for view in VIEWS:

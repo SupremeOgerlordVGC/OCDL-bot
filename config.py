@@ -69,6 +69,11 @@ MAX_QUEUE_LENGTH = 5
 # Most Pokemon that can appear on either side of a single /trade.
 MAX_TRADE_SIZE = 5
 
+# When a full-season pool finishes drafting, every player is pinged and for
+# this many hours trades are unlimited: ones proposed in this window don't
+# count toward the league's limit on Pokémon picked up in trades.
+FREE_TRADE_HOURS = 24
+
 # The cheapest a Pokemon can possibly cost. Used to decide when a player can
 # no longer afford anything at all, which is how "everyone is out of budget"
 # is detected.

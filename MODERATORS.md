@@ -51,7 +51,7 @@ So: run `/setup` in your admin channel, and tell it which channel the drafting h
 **Optional:**
 • `budget` — read from the template if you link one, so usually leave blank
 • `tera_budget` — non-zero turns on Tera Captains (max 3 each)
-• `max_trades` — per player, 0 = unlimited
+• `max_trades` — the most Pokémon each player may pick up in trades over the season, 0 = unlimited
 • `template_link` **or** `tiering_link` — one, never both
 • `draft_channel_b` + `players_b` — a second pool (needs a template)
 • `weeks` — season length when the bot makes its own schedule
@@ -110,11 +110,13 @@ Use `/substitute` to replace someone, `/removeplayer` when they're simply gone.
 
 Players propose with `/trade` in their draft channel. It lands in the **admin channel** with a number.
 
-**`/approvetrade trade_id:3`** — applies it to rosters and budgets. Only works once.
+**`/approvetrade trade_id:3`** — approves it. Rosters and budgets change at the **next `/postschedule`**, so a roster never changes mid-week. Only works once.
 **`/rejecttrade trade_id:3`** — declines it. Nothing changes.
 **`/trades`** — lists every trade and its status.
 
 Add `name:OCDL Season 1` to any of these if your admin channel runs more than one draft.
+
+**The limit counts Pokémon picked up**, not dropped: each player counts what they receive. Trades proposed in the **24 hours after a pool's draft ends** (the bot pings the pool when it opens) don't count at all. A player dropping nothing types `nil` or `0` for `drops`.
 
 **The bot does not judge trades — you do.** It only checks the size limit and each player's trade cap. Anything odd — trading a Pokémon they don't own, claiming one already drafted — is attached to the message as a ⚠️ warning for you to read, not blocked.
 
@@ -136,7 +138,7 @@ Trade numbers are **per draft**, so two leagues sharing an admin channel never b
 
 **Who's in the draft comes from the sheet.** On the **Coaches** tab, only rows with the **In schedule** box ticked take part — a tick reserves that coach's roster block, so gaps are respected. If a ticked row already has a username, the bot matches the player to it, so your @mention order doesn't have to match the sheet.
 
-**`/postschedule week:3 name:OCDL Season 1`** — posts that week's matchups, pinging both players. Reads the template's schedule, or the bot's own if there's no template. Never automatic.
+**`/postschedule week:3 name:OCDL Season 1`** — posts that week's matchups, pinging both players, and puts every approved trade into effect (listed under the matchups). Reads the template's schedule, or the bot's own if there's no template. Never automatic.
 **`/reschedule name:... weeks:8`** — rerolls a bot-generated schedule.
 ```
 

@@ -457,7 +457,7 @@ Both are proposed in a pool channel and sent to the league's admin channel.
 | Command | Who | What it does |
 |---|---|---|
 | `/trade drops gets [partner] [for_player]` | Any player | Proposes a trade (up to 5 each way). With `partner` it is a player-to-player swap; without, a free-agency move against the undrafted pool. Moderators can use `for_player` to file a trade on somebody else's behalf. Nothing changes yet. |
-| `/approvetrade trade_id [name]` | Moderator | Applies the trade to rosters and budgets. A trade can only be approved once. |
+| `/approvetrade trade_id [name]` | Moderator | Approves the trade; rosters and budgets change at the next `/postschedule`. A trade can only be approved once. |
 | `/rejecttrade trade_id [name]` | Moderator | Rejects it. Nothing changes. |
 | `/trades [name]` | Anyone | Lists a league's trades and their status. |
 | `/subrequest reason` | Anyone | Asks to leave the draft (if you are in it) or to join it (if you are not). Posted for the moderators. |
@@ -473,7 +473,7 @@ Trades are a full-season feature; a draft-only league refuses them.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/postschedule week name` | Moderator | Posts that week's matchups into the channel you run it in, pinging both players. Reads the template's schedule, or the bot's own generated one. Never automatic. |
+| `/postschedule week name` | Moderator | Posts that week's matchups into the channel you run it in, pinging both players, and puts approved trades into effect. Reads the template's schedule, or the bot's own generated one. Never automatic. |
 | `/reschedule name [weeks]` | Moderator | Regenerates the bot's own schedule at random. Refused when the schedule lives on a template. |
 | `/sync` | Moderator | Rewrites the coach list and every roster block from the database. |
 | `/inspectsheet` | Moderator | Reports the document's structure without changing anything. |
@@ -667,7 +667,11 @@ a mistake is fixed with `/editpick`.
 **Trades are judged by moderators, not by the bot.** `/trade` records what was
 asked for and sends it to the admin channel; the only hard limits are the size
 of each side and the per-player cap from `/setup` (`max_trades`, 0 for
-unlimited). Anything that looks wrong — trading a Pokémon you do not own, or
+unlimited), which counts the Pokémon each player picks up, not the ones they
+drop. Trades proposed in the free window after a pool's draft
+(`FREE_TRADE_HOURS`, 24) don't count. `drops:nil` (or `0`) gives up nothing.
+An approved trade waits for the next `/postschedule`, which applies every
+waiting trade in number order, so rosters never change mid-week. Anything that looks wrong — trading a Pokémon you do not own, or
 claiming one already drafted — is attached to the moderator's message as a
 warning rather than blocking the proposal.
 

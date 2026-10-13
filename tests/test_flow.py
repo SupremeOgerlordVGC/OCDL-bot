@@ -889,3 +889,60 @@ class RosterFromRoleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(rules.DraftError) as caught:
             await ui.roster_from_options(None, None, None, "B")
         self.assertIn("needs players", str(caught.exception))
+
+
+class TradeWeekCommandTests(unittest.IsolatedAsyncioTestCase):
+    """/approvetrade and /postschedule as a moderator runs them: an approved
+    trade changes rosters only when the next week is posted."""
+
+    async def asyncSetUp(self):
+        from cogs.admin import AdminCog
+        from cogs.extras import ExtrasCog
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9400)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.pool_id = make_pool(self.conn, 9400, [(11, "Larry"), (22, "Alex")],
+                                 max_picks=1, name="Season")
+        pool = rules.get_pool(self.conn, self.pool_id)
+        rules.start_pool(self.conn, pool)
+        rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id), 11, 1, "Garchomp", 12)
+        rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id), 22, 1, "Rotom-Wash", 8)
+        rules.generate_fixtures(self.conn, pool["league_id"], weeks=2)
+        rules.propose_trade(self.conn, rules.get_pool(self.conn, self.pool_id), 11,
+                            ["Garchomp"], ["Rotom-Wash"], partner_user_id=22)
+        self.extras = ExtrasCog(self.bot)
+        self.admin = AdminCog(self.bot)
+
+    async def asyncTearDown(self):
+        self.bot.timers.cancel_all()
+
+    def moderator(self):
+        interaction = FakeInteraction(self.bot, 9400, 99, "Mod")
+        interaction.user.guild_permissions = SimpleNamespace(administrator=True)
+        return interaction
+
+    def owner(self, pokemon):
+        row = rules.find_owner(self.conn, self.pool_id, rules.normalize(pokemon))
+        return rules.get_player_by_id(self.conn, row["player_id"])["display_name"]
+
+    async def test_a_trade_takes_effect_when_the_next_week_is_posted(self):
+        approval = self.moderator()
+        await self.extras.approvetrade.callback(self.extras, approval, trade_id=1, name="Season")
+        self.assertIn("takes effect when week 1 is posted", approval.text)
+        self.assertIn("change from week 1", self.channel.text)
+        self.assertEqual(self.owner("Garchomp"), "Larry", "nothing moves on approval")
+
+        posting = self.moderator()
+        await self.admin.postschedule.callback(self.admin, posting, week=1, name="Season")
+        self.assertIn("Trades in effect from week 1", self.channel.text)
+        self.assertIn("1 approved trade(s) are now in effect", posting.text)
+        self.assertEqual(self.owner("Garchomp"), "Alex")
+        self.assertEqual(self.owner("Rotom-Wash"), "Larry")
+        league = rules.get_league(self.conn, rules.get_pool(self.conn, self.pool_id)["league_id"])
+        self.assertEqual(league["current_week"], 1)
+
+        # posting the next week doesn't apply it again
+        self.channel.messages.clear()
+        await self.admin.postschedule.callback(self.admin, self.moderator(), week=2, name="Season")
+        self.assertNotIn("Trades in effect", self.channel.text)
+        self.assertEqual(self.owner("Garchomp"), "Alex")

@@ -88,8 +88,16 @@ def parse_start_time(raw, now=None):
     return float(when)
 
 
-def parse_pokemon_list(raw, limit):
-    """Split a comma separated list into clean names, rejecting duplicates."""
+# What a player types for "nothing" on the giving-up side of /trade: a pickup
+# paid for with points they have left.
+NOTHING = {"nil", "0", "none", "nothing", "-"}
+
+
+def parse_pokemon_list(raw, limit, allow_nothing=False):
+    """Split a comma separated list into clean names, rejecting duplicates.
+    With allow_nothing, "nil" or "0" (see NOTHING) is an empty list."""
+    if allow_nothing and str(raw).strip().lower() in NOTHING:
+        return []
     names = [part.strip() for part in str(raw).split(",")]
     names = [n for n in names if n]
     if not names:
@@ -688,6 +696,26 @@ def require_league_by_name(conn, guild_id, name):
     return league
 
 
+def require_season_league_by_name(conn, guild_id, name):
+    """A league by name whose season isn't over: drafting, or drafted and
+    playing its weeks (status 'complete' until it's archived). What
+    /postschedule, /reschedule, /archive and the trade commands work on,
+    since they're used after the last round. A live league wins a name clash."""
+    league = conn.execute(
+        "SELECT * FROM leagues WHERE guild_id = ? AND lower(name) = lower(?) "
+        "AND status IN ('setup', 'active', 'complete') "
+        "ORDER BY status = 'complete', id DESC LIMIT 1",
+        (guild_id, " ".join(str(name or "").split())),
+    ).fetchone()
+    if league is None:
+        running = [row["name"] for row in conn.execute(
+            "SELECT DISTINCT name FROM leagues WHERE guild_id = ? "
+            "AND status IN ('setup', 'active', 'complete') ORDER BY name", (guild_id,))]
+        hint = f" Running here: {', '.join(running)}." if running else ""
+        raise DraftError(f"❌ There is no league called **{name}** on this server.{hint}")
+    return league
+
+
 def get_league_pools(conn, league_id):
     return conn.execute(
         "SELECT * FROM pool_view WHERE league_id = ? ORDER BY label", (league_id,)
@@ -901,10 +929,14 @@ def advance_turn(conn, pool_id):
 
     # The draft also ends early if nobody can afford anything any more.
     if round_number > draft["max_picks"] or not anyone_can_pick(conn, draft):
+        # A season's trades open with a free window (see FREE_TRADE_HOURS).
+        free_until = (time.time() + config.FREE_TRADE_HOURS * 3600
+                      if draft["mode"] == "full_season" and config.FREE_TRADE_HOURS else None)
         conn.execute(
             """UPDATE pools SET status = 'complete', finished_at = ?, turn_deadline = NULL,
-                                queue_exhausted = 0, halved_this_turn = 0 WHERE id = ?""",
-            (database.now(), pool_id),
+                                queue_exhausted = 0, halved_this_turn = 0,
+                                free_trades_until = ? WHERE id = ?""",
+            (database.now(), free_until, pool_id),
         )
         conn.commit()
         _finish_league_if_done(conn, draft["league_id"])
@@ -1058,6 +1090,10 @@ def begin_turn(conn, pool_id):
                     "draft_complete", total_rounds=draft["max_picks"],
                     round_reached=draft["current_round"], pool=draft["label"],
                     league_name=draft["league_name"],
+                    free_trades_until=draft["free_trades_until"],
+                    max_trades=draft["max_trades"],
+                    players=[p["user_id"] for p in get_players(conn, draft["id"])
+                             if p["status"] == "active"],
                     league_finished=league is not None
                     and league["status"] in ("complete", "archived"),
                     archived=league is not None and league["status"] == "archived"))
@@ -1585,14 +1621,16 @@ def propose_trade(conn, draft, user_id, drops, gets, partner_user_id=None):
             raise DraftError("❌ You cannot trade with yourself.")
         partner = require_player(conn, draft["id"], partner_user_id)
 
-    if not drops or not gets:
-        raise DraftError("❌ A trade needs at least one Pokémon on each side.")
+    if not gets:
+        raise DraftError("❌ A trade needs at least one Pokémon to receive.")
     if len(drops) > config.MAX_TRADE_SIZE or len(gets) > config.MAX_TRADE_SIZE:
         raise DraftError(f"❌ A trade may involve at most {config.MAX_TRADE_SIZE} Pokémon per side.")
 
-    check_trade_limit(conn, draft, proposer)
-    if partner is not None:
-        check_trade_limit(conn, draft, partner)
+    free = in_free_trade_window(draft)
+    if not free:
+        check_pickup_limit(conn, draft, proposer, len(gets))
+        if partner is not None:
+            check_pickup_limit(conn, draft, partner, len(drops))
 
     warnings = trade_warnings(conn, draft, proposer, partner, drops, gets)
 
@@ -1605,42 +1643,73 @@ def propose_trade(conn, draft, user_id, drops, gets, partner_user_id=None):
 
     cursor = conn.execute(
         """INSERT INTO trades (league_id, pool_id, trade_number, proposer_id, partner_id,
-                               drops, gets, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                               drops, gets, status, created_at, free)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
         (draft["league_id"], draft["id"], number, proposer["id"],
          partner["id"] if partner else None,
-         json.dumps(drops), json.dumps(gets), database.now()),
+         json.dumps(drops), json.dumps(gets), database.now(), 1 if free else 0),
     )
     conn.commit()
     record = conn.execute("SELECT * FROM trades WHERE id = ?", (cursor.lastrowid,)).fetchone()
     return record, warnings
 
 
-def trades_used(conn, pool_id, player_id):
-    """How many approved trades a player is already part of."""
-    return conn.execute(
-        "SELECT COUNT(*) AS n FROM trades WHERE pool_id = ? AND status = 'approved' "
+def in_free_trade_window(draft, now=None):
+    """Whether trades proposed now are free: the window after the draft."""
+    until = draft["free_trades_until"]
+    return bool(until) and (now if now is not None else time.time()) < until
+
+
+def pickups_in(trade, player_id):
+    """How many Pokémon a player receives in a trade: the proposer gets
+    `gets`, the partner gets `drops`. Free agency has no partner."""
+    if trade["proposer_id"] == player_id:
+        return len(json.loads(trade["gets"]))
+    if trade["partner_id"] == player_id:
+        return len(json.loads(trade["drops"]))
+    return 0
+
+
+def pickups_used(conn, pool_id, player_id):
+    """How many Pokémon a player has picked up in approved trades, whether or
+    not they are in effect yet. This is what the trade limit counts: the
+    Pokémon you receive, not the ones you give up."""
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE pool_id = ? AND status = 'approved' AND free = 0 "
         "AND (proposer_id = ? OR partner_id = ?)",
         (pool_id, player_id, player_id),
-    ).fetchone()["n"]
+    ).fetchall()
+    return sum(pickups_in(row, player_id) for row in rows)
 
 
-def check_trade_limit(conn, draft, player):
-    """Enforce the per-player trade cap set during /setup. 0 means unlimited."""
+def check_pickup_limit(conn, draft, player, incoming):
+    """Enforce the per-player limit set during /setup (max_trades), counted in
+    Pokémon picked up. 0 means unlimited."""
     limit = draft["max_trades"]
     if not limit:
         return
-    used = trades_used(conn, draft["id"], player["id"])
-    if used >= limit:
+    used = pickups_used(conn, draft["id"], player["id"])
+    if used + incoming > limit:
+        left = max(0, limit - used)
         raise DraftError(
-            f"❌ **{player['display_name']}** has already used all {limit} of their "
-            f"trades for this draft."
+            f"❌ **{player['display_name']}** may pick up {limit} Pokémon in trades and has "
+            f"already picked up {used}, so they can't receive {incoming} more "
+            f"({left} left)."
         )
 
 
 def trade_warnings(conn, draft, proposer, partner, drops, gets):
     """Things an approving admin probably wants to know. Never blocks."""
     notes = []
+    if not drops:
+        notes.append(f"{proposer['display_name']} drops nothing, so this is paid for with the "
+                     f"{proposer['budget_remaining']} points they have left.")
+        if partner is not None:
+            notes.append(f"{partner['display_name']} receives nothing in return.")
+    size = roster_size(conn, draft["id"], proposer["id"]) + len(gets) - len(drops)
+    if size > draft["max_picks"]:
+        notes.append(f"{proposer['display_name']} would have {size} Pokémon, more than the "
+                     f"{draft['max_picks']} a roster holds.")
     for name in drops:
         row = find_owner(conn, draft["id"], normalize(name))
         if row is None:
@@ -1680,6 +1749,12 @@ def apply_sheet_cost(conn, draft, pokemon, cost):
     return True
 
 
+def trade_side(names):
+    """One side of a trade for a message: "Garchomp, Rotom-Wash" or "nothing"."""
+    names = json.loads(names) if isinstance(names, str) else names
+    return ", ".join(names) if names else "nothing"
+
+
 def get_trade(conn, league_id, trade_number):
     return conn.execute(
         "SELECT * FROM trades WHERE league_id = ? AND trade_number = ?",
@@ -1688,10 +1763,11 @@ def get_trade(conn, league_id, trade_number):
 
 
 def approve_trade(conn, draft, trade_number, approver_user_id):
-    """/approvetrade - apply a pending trade to the rosters.
+    """/approvetrade - approve a pending trade.
 
-    The admin has already decided the trade is legal, so this applies it as
-    written and reports anything it could not do rather than refusing.
+    Nothing moves yet: an approved trade takes effect when the next week is
+    posted with /postschedule (see apply_trades), so a roster never changes
+    in the middle of a week. Returns the trade and notes for the moderator.
     """
     trade = get_trade(conn, draft["league_id"], trade_number)
     if trade is None:
@@ -1701,18 +1777,69 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
 
     proposer = get_player_by_id(conn, trade["proposer_id"])
     partner = get_player_by_id(conn, trade["partner_id"]) if trade["partner_id"] else None
+
+    # The limit is checked again here in case other trades were approved first;
+    # one proposed in the free window after the draft doesn't count.
+    if not trade["free"]:
+        check_pickup_limit(conn, draft, proposer, pickups_in(trade, proposer["id"]))
+        if partner is not None:
+            check_pickup_limit(conn, draft, partner, pickups_in(trade, partner["id"]))
+
+    notes = []
+    mine = {normalize(name) for name in json.loads(trade["drops"]) + json.loads(trade["gets"])}
+    for other in waiting_trades(conn, draft["league_id"]):
+        shared = mine & {normalize(n) for n in json.loads(other["drops"]) + json.loads(other["gets"])}
+        if shared:
+            notes.append(f"Trade #{other['trade_number']} (approved, not in effect yet) also "
+                         f"involves {', '.join(sorted(shared))}; they apply in number order.")
+
+    conn.execute(
+        "UPDATE trades SET status = 'approved', resolved_at = ?, resolved_by = ? WHERE id = ?",
+        (database.now(), approver_user_id, trade["id"]),
+    )
+    conn.commit()
+    return get_trade(conn, draft["league_id"], trade_number), notes
+
+
+def waiting_trades(conn, league_id):
+    """Approved trades that take effect at the next /postschedule, in order."""
+    return conn.execute(
+        "SELECT * FROM trades WHERE league_id = ? AND status = 'approved' AND applied_at IS NULL "
+        "ORDER BY trade_number",
+        (league_id,),
+    ).fetchall()
+
+
+def apply_trades(conn, league_id, week):
+    """/postschedule - put every approved trade that is waiting into effect,
+    in the order they were proposed, from `week` on.
+
+    The moderators have already decided each trade is legal, so this applies
+    them as written and reports anything it could not do rather than
+    refusing. Returns [(trade, notes)].
+    """
+    applied = []
+    for trade in waiting_trades(conn, league_id):
+        notes = _apply_trade(conn, trade)
+        conn.execute("UPDATE trades SET applied_at = ?, applied_week = ? WHERE id = ?",
+                     (database.now(), week, trade["id"]))
+        applied.append((conn.execute("SELECT * FROM trades WHERE id = ?", (trade["id"],)).fetchone(), notes))
+    conn.commit()
+    return applied
+
+
+def _apply_trade(conn, trade):
+    """Move the Pokémon and adjust budgets for one trade (not committed)."""
+    pool_id = trade["pool_id"]
+    proposer = get_player_by_id(conn, trade["proposer_id"])
+    partner = get_player_by_id(conn, trade["partner_id"]) if trade["partner_id"] else None
     drops = json.loads(trade["drops"])
     gets = json.loads(trade["gets"])
-
-    # The cap is checked again here in case other trades were approved first.
-    check_trade_limit(conn, draft, proposer)
-    if partner is not None:
-        check_trade_limit(conn, draft, partner)
 
     notes = []
     drop_total = 0
     for name in drops:
-        row = find_owner(conn, draft["id"], normalize(name))
+        row = find_owner(conn, pool_id, normalize(name))
         if row is None:
             notes.append(f"{name} was not on any roster, so nothing was removed.")
             continue
@@ -1725,14 +1852,14 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
 
     get_total = 0
     for name in gets:
-        row = find_owner(conn, draft["id"], normalize(name))
+        row = find_owner(conn, pool_id, normalize(name))
         if row is None:
             # Free agency: no roster row yet, so one is created. The cost is
             # filled in from the sheet by the caller when one is linked.
             conn.execute(
                 """INSERT INTO rosters (pool_id, player_id, pokemon, pokemon_key, cost, source)
                    VALUES (?, ?, ?, ?, 0, 'trade')""",
-                (draft["id"], proposer["id"], name.strip(), normalize(name)),
+                (pool_id, proposer["id"], name.strip(), normalize(name)),
             )
         else:
             get_total += row["cost"]
@@ -1748,13 +1875,27 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
         if partner is not None:
             conn.execute("UPDATE players SET budget_remaining = budget_remaining + ? WHERE id = ?",
                          (get_total - drop_total, partner["id"]))
+    return notes
 
-    conn.execute(
-        "UPDATE trades SET status = 'approved', resolved_at = ?, resolved_by = ? WHERE id = ?",
-        (database.now(), approver_user_id, trade["id"]),
-    )
+
+def set_current_week(conn, league_id, week):
+    conn.execute("UPDATE leagues SET current_week = ? WHERE id = ?", (week, league_id))
     conn.commit()
-    return get_trade(conn, draft["league_id"], trade_number), notes
+
+
+def record_week(conn, league_id, week, pairs):
+    """Keep a template league's posted matches (read from its sheet) as that
+    week's fixtures, so draft.ogreclan.com can show them. pairs is
+    [(home player id, away player id)]; the bot's own schedules already
+    live in fixtures and are left alone."""
+    conn.execute("DELETE FROM fixtures WHERE league_id = ? AND week = ?", (league_id, week))
+    for number, (home, away) in enumerate(pairs, 1):
+        conn.execute(
+            """INSERT INTO fixtures (league_id, week, match_number, home_player_id, away_player_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (league_id, week, number, home, away, database.now()),
+        )
+    conn.commit()
 
 
 def reject_trade(conn, draft, trade_number, approver_user_id):

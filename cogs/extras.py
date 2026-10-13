@@ -10,7 +10,6 @@ two #1s in it.
 """
 
 import asyncio
-import json
 import logging
 
 import discord
@@ -38,7 +37,7 @@ class ExtrasCog(commands.Cog):
         are in, or the only one using this admin channel.
         """
         if name:
-            return rules.require_league_by_name(self.bot.conn, interaction.guild_id, name)
+            return rules.require_season_league_by_name(self.bot.conn, interaction.guild_id, name)
 
         pool = rules.get_channel_pool(self.bot.conn, interaction.channel_id)
         if pool is not None:
@@ -77,7 +76,7 @@ class ExtrasCog(commands.Cog):
 
     @app_commands.command(name="trade", description="Propose a trade for a moderator to approve.")
     @app_commands.describe(
-        drops="Up to 5 Pokémon you are giving up, separated by commas",
+        drops="Up to 5 Pokémon you are giving up, separated by commas, or nil / 0 to give up nothing",
         gets="Up to 5 Pokémon you want, separated by commas",
         partner="The player you are trading with. Leave blank for the undrafted pool.",
         for_player="Moderators only: file this trade on somebody else's behalf",
@@ -102,7 +101,7 @@ class ExtrasCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        drop_list = rules.parse_pokemon_list(drops, config.MAX_TRADE_SIZE)
+        drop_list = rules.parse_pokemon_list(drops, config.MAX_TRADE_SIZE, allow_nothing=True)
         get_list = rules.parse_pokemon_list(gets, config.MAX_TRADE_SIZE)
 
         record, warnings = rules.propose_trade(
@@ -117,9 +116,12 @@ class ExtrasCog(commands.Cog):
             notes = "\n\n⚠️ **Worth checking**\n" + "\n".join(f"• {w}" for w in warnings)
 
         allowance = ""
-        if pool["max_trades"]:
-            used = rules.trades_used(self.bot.conn, pool["id"], record["proposer_id"])
-            allowance = f"\n• Trades used by proposer: {used} / {pool['max_trades']}"
+        if record["free"]:
+            allowance = "\n• Proposed in the free trade window: doesn't count toward the limit"
+        elif pool["max_trades"]:
+            used = rules.pickups_used(self.bot.conn, pool["id"], record["proposer_id"])
+            allowance = (f"\n• Pokémon picked up in trades by proposer: {used} / {pool['max_trades']}"
+                         f" (this trade adds {len(get_list)})")
 
         entered_by = f" *(entered by <@{interaction.user.id}>)*" if on_behalf else ""
         partner_text = partner.mention if partner else "*undrafted pool (free agency)*"
@@ -131,7 +133,7 @@ class ExtrasCog(commands.Cog):
             f"(<#{pool['channel_id']}>)\n"
             f"• Proposed by: <@{proposer_id}>{entered_by}\n"
             f"• Partner: {partner_text}\n"
-            f"• Giving up: {', '.join(drop_list)}\n"
+            f"• Giving up: {rules.trade_side(drop_list)}\n"
             f"• Receiving: {', '.join(get_list)}\n"
             f"• Proposed at: {record['created_at']} UTC"
             f"{allowance}\n\n"
@@ -145,7 +147,8 @@ class ExtrasCog(commands.Cog):
         whose = f" for {for_player.mention}" if on_behalf else ""
         await interaction.followup.send(
             f"✅ Trade **#{record['trade_number']}** submitted{whose} for approval. "
-            f"Nothing changes until a moderator approves it.",
+            f"Nothing changes until a moderator approves it, and then rosters change "
+            f"when the next week is posted.",
             ephemeral=True,
         )
 
@@ -170,26 +173,15 @@ class ExtrasCog(commands.Cog):
         record, notes = rules.approve_trade(self.bot.conn, pool, trade_id,
                                             interaction.user.id)
 
-        # A free-agency pickup has no price until the tiering list is consulted.
-        if self.bot.sheets.enabled and pool["doc_url"]:
-            for pokemon in json.loads(record["gets"]):
-                try:
-                    tab = await tiering_tab_for(self.bot, pool)
-                    entry = await asyncio.to_thread(
-                        self.bot.sheets.lookup, pool["doc_url"], pokemon, tab)
-                except Exception:
-                    log.exception("could not read the price of %s after a trade", pokemon)
-                    continue
-                if entry and entry["cost"] is not None:
-                    rules.apply_sheet_cost(self.bot.conn, pool, pokemon, entry["cost"])
-
         proposer = rules.get_player_by_id(self.bot.conn, record["proposer_id"])
         partner = (rules.get_player_by_id(self.bot.conn, record["partner_id"])
                    if record["partner_id"] else None)
-        drops = ", ".join(json.loads(record["drops"]))
-        gets = ", ".join(json.loads(record["gets"]))
+        drops = rules.trade_side(record["drops"])
+        gets = rules.trade_side(record["gets"])
+        next_week = (league["current_week"] or 0) + 1
 
-        report = f"✅ Trade #{trade_id} approved."
+        report = (f"✅ Trade #{trade_id} approved. It takes effect when week {next_week} is "
+                  f"posted with `/postschedule`.")
         if notes:
             report += "\n\nNotes:\n" + "\n".join(f"• {note}" for note in notes)
         await interaction.followup.send(report, ephemeral=True)
@@ -201,10 +193,8 @@ class ExtrasCog(commands.Cog):
             f"• **{proposer['display_name']}** receives: {gets}\n"
             + (f"• Partner: **{partner['display_name']}**\n" if partner else
                "• Traded with the undrafted pool\n")
-            + "Rosters and budgets have been updated.",
+            + f"Rosters and budgets change from week {next_week}, when it's posted.",
         )
-        # A trade moves Pokémon between rosters, so push the whole picture.
-        ui.resync_sheet(self.bot, pool["id"])
 
     # ---- /rejecttrade ---------------------------------------------------
 
@@ -242,14 +232,24 @@ class ExtrasCog(commands.Cog):
                 f"No trades have been proposed in **{league['name']}** yet.", ephemeral=True)
             return
 
-        icons = {"pending": "⏳", "approved": "✅", "rejected": "🚫"}
+        icons = {"pending": "⏳", "approved": "✅", "rejected": "🚫", "waiting": "🕒"}
         lines = [f"**{league['name']} — trades**"]
         for row in rows[-25:]:
             proposer = rules.get_player_by_id(self.bot.conn, row["proposer_id"])
+            status = row["status"]
+            if status == "approved" and row["applied_at"] is None:
+                status = "waiting"
+                label = "approved, in effect from the next posted week"
+            elif status == "approved" and row["applied_week"]:
+                label = f"in effect from week {row['applied_week']}"
+            else:
+                label = status
+            if row["free"]:
+                label += ", free window"
             lines.append(
-                f"{icons.get(row['status'], '•')} **#{row['trade_number']}** "
-                f"{proposer['display_name']}: {', '.join(json.loads(row['drops']))} → "
-                f"{', '.join(json.loads(row['gets']))} *({row['status']})*"
+                f"{icons.get(status, '•')} **#{row['trade_number']}** "
+                f"{proposer['display_name']}: {rules.trade_side(row['drops'])} → "
+                f"{rules.trade_side(row['gets'])} *({label})*"
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
