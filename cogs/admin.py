@@ -1065,6 +1065,97 @@ class AdminCog(commands.Cog):
         for message in ui.pack_messages(lines):
             await interaction.followup.send(message, ephemeral=True)
 
+    # ---- hosting on draft.ogreclan.com ----------------------------------
+
+    async def require_owner(self, interaction):
+        """Who may host on the website is the owner's call, and only theirs.
+
+        Not `require_moderator`: a moderator of any server the bot is in
+        would otherwise be deciding who publishes leagues on our site.
+        """
+        if not await self.bot.is_owner(interaction.user):
+            raise rules.DraftError(
+                "❌ Only the bot's owner decides who may host on "
+                "draft.ogreclan.com. Running a league through the bot needs "
+                "no approval from anybody."
+            )
+
+    @app_commands.command(
+        name="hostapplications",
+        description="Owner only: applications to host leagues on draft.ogreclan.com.",
+    )
+    @app_commands.describe(waiting="Only those still waiting for a decision")
+    async def hostapplications(self, interaction: discord.Interaction,
+                               waiting: bool = False):
+        await self.require_owner(interaction)
+        rows = rules.host_applications(self.bot.conn,
+                                       "pending" if waiting else None)
+        if not rows:
+            await interaction.response.send_message(
+                "Nobody has applied to host yet." if not waiting
+                else "No applications are waiting.", ephemeral=True)
+            return
+
+        marks = {"pending": "⏳", "approved": "✅", "rejected": "❌"}
+        lines = []
+        for row in rows:
+            lines.append(
+                f"{marks.get(row['status'], '•')} <@{row['user_id']}> "
+                f"**{row['display_name'] or row['user_id']}** — {row['status']}"
+                + (f"\n   *{row['about']}*" if row["about"] else ""))
+        await interaction.response.send_message(
+            "🧑‍⚖️ **Hosting applications**\n" + "\n".join(lines)
+            + "\n\n`/approvehost user:@them` or `/rejecthost user:@them`.",
+            ephemeral=True)
+
+    @app_commands.command(
+        name="approvehost",
+        description="Owner only: let somebody host leagues on draft.ogreclan.com.",
+    )
+    @app_commands.describe(user="The applicant")
+    async def approvehost(self, interaction: discord.Interaction, user: discord.User):
+        await self.require_owner(interaction)
+        rules.decide_host(self.bot.conn, user.id, True, decided_by=interaction.user.id)
+        told = await self.tell_applicant(
+            user,
+            "✅ You have been approved to host leagues on **draft.ogreclan.com**. "
+            "Go ahead and create one.")
+        await interaction.response.send_message(
+            f"✅ **{user.display_name}** may now host on draft.ogreclan.com."
+            + ("" if told else " I could not DM them, so tell them yourself."),
+            ephemeral=True)
+
+    @app_commands.command(
+        name="rejecthost",
+        description="Owner only: turn down an application to host on draft.ogreclan.com.",
+    )
+    @app_commands.describe(user="The applicant",
+                          reason="Told to them, so keep it civil")
+    async def rejecthost(self, interaction: discord.Interaction, user: discord.User,
+                         reason: str = None):
+        await self.require_owner(interaction)
+        rules.decide_host(self.bot.conn, user.id, False,
+                          decided_by=interaction.user.id, note=reason)
+        told = await self.tell_applicant(
+            user,
+            "Your application to host on **draft.ogreclan.com** was not approved."
+            + (f"\nReason: {reason}" if reason else "")
+            + "\n\nYou can still run leagues with the bot in your own server — "
+              "that needs no approval at all.")
+        await interaction.response.send_message(
+            f"❌ **{user.display_name}**'s application was turned down."
+            + ("" if told else " I could not DM them, so tell them yourself."),
+            ephemeral=True)
+
+    async def tell_applicant(self, user, message):
+        """DM the applicant. Best effort: closed DMs must not fail the command."""
+        try:
+            await user.send(message)
+            return True
+        except Exception:
+            log.info("could not DM %s about their hosting application", user.id)
+            return False
+
     # ---- /backup --------------------------------------------------------
 
     @app_commands.command(name="backup", description="Save a timestamped copy of the database.")

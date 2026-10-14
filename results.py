@@ -69,9 +69,8 @@ def find_match(conn, league_id, week, player_id):
 
 
 def player_in_league(conn, league_id, user_id):
-    row = conn.execute(
-        "SELECT players.* FROM players JOIN pools ON pools.id = players.pool_id "
-        "WHERE pools.league_id = ? AND players.user_id = ?", (league_id, user_id)).fetchone()
+    """This player's seat anywhere in the league, or a refusal."""
+    _, row = rules.player_in_league(conn, league_id, user_id)
     if row is None:
         raise rules.DraftError("❌ You aren't playing in this league.")
     return row

@@ -132,10 +132,53 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self.call("/prices")
         self.assertEqual([e["name"] for e in body["entries"]], ["Rotom-Wash", "Heatran"])
 
+    def approve_host(self, user_id=77):
+        """Hosting on the site is by approval, so a test host needs one."""
+        rules.apply_to_host(self.conn, user_id, "Host", "a league")
+        rules.decide_host(self.conn, user_id, True, decided_by=1)
+
+    async def test_hosting_on_the_site_needs_approval_first(self):
+        # The bot asks nobody's permission; the website does.
+        body = {"site_only": True, "name": "Unapproved", "mode": "full_season",
+                "budget": 100, "min_picks": 1, "max_picks": 2, "timer": 120,
+                "created_by": 77,
+                "pools": [{"players": [{"user_id": "11", "display_name": "Larry"},
+                                       {"user_id": "22", "display_name": "Alex"}]}]}
+        response = await self.client.post("/setup", json=body,
+                                          headers={"X-OgreClan-Secret": SECRET})
+        answer = await response.json()
+        self.assertFalse(answer["ok"])
+        self.assertIn("needs approval first", answer["error"])
+
+        rules.apply_to_host(self.conn, 77, "Host", "a league")
+        response = await self.client.post("/setup", json=body,
+                                          headers={"X-OgreClan-Secret": SECRET})
+        answer = await response.json()
+        self.assertIn("still being looked at", answer["error"])
+
+        rules.decide_host(self.conn, 77, True, decided_by=1)
+        response = await self.client.post("/setup", json=body,
+                                          headers={"X-OgreClan-Secret": SECRET})
+        answer = await response.json()
+        self.assertTrue(answer["ok"], answer)
+
+    async def test_an_application_can_be_made_and_read_back(self):
+        status, body = await self.call("/hosts/apply", user_id=77,
+                                       display_name="Host", about="a VGC league")
+        self.assertEqual(body["status"], "pending")
+        status, body = await self.call("/hosts/status", user_id=77)
+        self.assertEqual((body["status"], body["may_host"]), ("pending", False))
+
+        rules.decide_host(self.conn, 77, True, decided_by=1)
+        status, body = await self.call("/hosts/status", user_id=77)
+        self.assertEqual((body["status"], body["may_host"]), ("approved", True))
+
     async def test_a_site_only_league_is_made_and_started_from_the_site(self):
+        self.approve_host()
         status, body = await self.client.post("/setup", json={
             "site_only": True, "name": "Site Cup", "mode": "full_season", "budget": 100, "min_picks": 1,
             "max_picks": 2, "timer": 120, "weeks": 1, "visibility": "private",
+            "created_by": 77,
             "pools": [{"players": [{"user_id": "11", "display_name": "Larry"}, {"user_id": "22", "display_name": "Alex"}]}],
         }, headers={"X-OgreClan-Secret": SECRET}), None
         body = await status.json()
@@ -150,13 +193,16 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(pool["turn_deadline"], "its clock runs with no Discord channel")
 
         status, body = await self.call("/setup", name="Discord Cup", guild_id="1", admin_channel_id="2",
+                                       created_by=77,
                                        min_picks=1, max_picks=2, timer=120, budget=100, pools=[{"channel_id": "3"}])
         self.assertEqual(status, 400)
         self.assertIn("isn't in that Discord server", body["error"])
 
     async def test_a_site_only_season_trades_and_posts_weeks_on_the_site(self):
+        self.approve_host()
         setup = await self.client.post("/setup", json={
-            "site_only": True, "name": "Site Season", "mode": "full_season", "budget": 100, "min_picks": 1,
+            "site_only": True, "name": "Site Season", "mode": "full_season", "created_by": 77,
+            "budget": 100, "min_picks": 1,
             "max_picks": 1, "timer": 120, "weeks": 1,
             "pools": [{"players": [{"user_id": "11", "display_name": "Larry"}, {"user_id": "22", "display_name": "Alex"}]}],
         }, headers={"X-OgreClan-Secret": SECRET})

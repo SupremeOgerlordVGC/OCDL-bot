@@ -3013,3 +3013,115 @@ def status_view(conn, draft):
         "pending_makeups": [(row["display_name"], row["round"]) for row in pending],
         "tera_format": bool(draft["tera_budget"]),
     }
+
+
+# --------------------------------------------------------------------------
+# Hosting on draft.ogreclan.com
+# --------------------------------------------------------------------------
+#
+# The bot is open to anybody: /setup asks no permission from us. The website
+# is not, because a league there is published under our name, so a host
+# applies and the owner approves them before they can run one.
+
+
+def get_host_application(conn, user_id):
+    return conn.execute(
+        "SELECT * FROM host_applications WHERE user_id = ?", (user_id,)
+    ).fetchone()
+
+
+def host_status(conn, user_id):
+    """One of 'none', 'pending', 'approved' or 'rejected'."""
+    row = get_host_application(conn, user_id)
+    return row["status"] if row is not None else "none"
+
+
+def is_approved_host(conn, user_id):
+    return host_status(conn, user_id) == "approved"
+
+
+def host_applications(conn, status=None):
+    if status is None:
+        return conn.execute(
+            "SELECT * FROM host_applications ORDER BY "
+            "status = 'pending' DESC, created_at").fetchall()
+    return conn.execute(
+        "SELECT * FROM host_applications WHERE status = ? ORDER BY created_at",
+        (status,)).fetchall()
+
+
+def apply_to_host(conn, user_id, display_name=None, about=None):
+    """Ask to run leagues on the website.
+
+    Somebody turned down may apply again - circumstances change - which
+    reopens the same row rather than piling up applications.
+    """
+    existing = get_host_application(conn, user_id)
+    if existing is not None:
+        if existing["status"] == "pending":
+            raise DraftError(
+                "Your application is already waiting to be looked at."
+            )
+        if existing["status"] == "approved":
+            raise DraftError("You are already approved to host.")
+        conn.execute(
+            "UPDATE host_applications SET status = 'pending', display_name = ?, "
+            "about = ?, created_at = ?, resolved_at = NULL, resolved_by = NULL, "
+            "note = NULL WHERE id = ?",
+            (display_name, (about or "").strip() or None, database.now(), existing["id"]),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO host_applications (user_id, display_name, about, status,
+                                              created_at)
+               VALUES (?, ?, ?, 'pending', ?)""",
+            (user_id, display_name, (about or "").strip() or None, database.now()),
+        )
+    conn.commit()
+    return get_host_application(conn, user_id)
+
+
+def decide_host(conn, user_id, approved, decided_by, note=None):
+    """Approve or turn down an application. Only the owner may call this."""
+    existing = get_host_application(conn, user_id)
+    if existing is None:
+        raise DraftError("Nobody with that account has applied to host.")
+
+    status = "approved" if approved else "rejected"
+    if existing["status"] == status:
+        raise DraftError(f"That application is already {status}.")
+
+    conn.execute(
+        "UPDATE host_applications SET status = ?, resolved_at = ?, resolved_by = ?, "
+        "note = ? WHERE id = ?",
+        (status, database.now(), decided_by, (note or "").strip() or None,
+         existing["id"]),
+    )
+    conn.commit()
+    return get_host_application(conn, user_id)
+
+
+def require_approved_host(conn, user_id):
+    """Gate the website's league creation. The bot itself never calls this."""
+    if not user_id:
+        raise DraftError(
+            "Sign in before making a league here, so we know who is hosting it."
+        )
+    status = host_status(conn, user_id)
+    if status == "approved":
+        return True
+    if status == "pending":
+        raise DraftError(
+            "Your application to host is still being looked at. You will be able "
+            "to make a league here once it is approved — the Discord bot works "
+            "in the meantime, with no application needed."
+        )
+    if status == "rejected":
+        raise DraftError(
+            "Your application to host on this site was not approved. You can "
+            "still run leagues with the Discord bot, which asks no permission."
+        )
+    raise DraftError(
+        "Hosting a league on this site needs approval first. Apply to host, and "
+        "you will hear back. The Discord bot needs no application at all."
+    )

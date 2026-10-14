@@ -57,6 +57,7 @@ class WebApi:
             ("/rejecttrade", self.reject_trade), ("/gameresult", self.game_result), ("/champions", self.champions),
             ("/pokepaste", self.pokepaste), ("/cleargame", self.clear_game), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
+            ("/hosts/apply", self.apply_host), ("/hosts/status", self.host_status),
         ):
             app.router.add_post(path, self.wrap(handler))
         return app
@@ -216,6 +217,10 @@ class WebApi:
     async def setup(self, body):
         """/setup from draft.ogreclan.com: a league run on Discord (with its server and channels), or a
         site-only league (no Discord at all; the bot still runs its rules and timers)"""
+        # Hosting here is by approval; the bot itself asks nobody's permission.
+        rules.require_approved_host(
+            self.bot.conn, int(body["created_by"]) if body.get("created_by") else None)
+
         site_only = bool(body.get("site_only"))
         pools = body.get("pools") or []
         if not 1 <= len(pools) <= 2:
@@ -274,6 +279,40 @@ class WebApi:
         if not site_only:
             await self.admin_cog.announce_setup(league, pool_rows, coach_slots, shuffled, admin_channel)
         return {"league_id": league["id"], "notes": notes}
+
+    async def apply_host(self, body):
+        """Apply to host leagues on draft.ogreclan.com."""
+        user_id = int(body["user_id"])
+        record = rules.apply_to_host(
+            self.bot.conn, user_id,
+            display_name=str(body.get("display_name") or "") or None,
+            about=body.get("about"))
+        await self.tell_owner(
+            f"🧑‍⚖️ **{record['display_name'] or user_id}** (<@{user_id}>) has applied "
+            f"to host on draft.ogreclan.com.\n"
+            f"• About: {record['about'] or '*nothing said*'}\n\n"
+            f"`/approvehost user:<@{user_id}>` or `/rejecthost user:<@{user_id}>`. "
+            f"They can use the bot either way."
+        )
+        return {"status": record["status"]}
+
+    async def host_status(self, body):
+        """Where an application stands, for the site to show."""
+        user_id = int(body["user_id"])
+        return {"status": rules.host_status(self.bot.conn, user_id),
+                "may_host": rules.is_approved_host(self.bot.conn, user_id)}
+
+    async def tell_owner(self, message):
+        """Direct message the bot's owner. Best effort: never breaks a request."""
+        try:
+            info = await self.bot.application_info()
+            owner = info.owner
+            if owner is not None:
+                await owner.send(message)
+                return True
+        except Exception:
+            log.exception("could not tell the owner about a host application")
+        return False
 
     async def start_draft(self, body):
         """/draft from draft.ogreclan.com: start a pool now, or at a time (unix seconds)"""

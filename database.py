@@ -245,6 +245,21 @@ CREATE TABLE IF NOT EXISTS fixtures (
     UNIQUE (league_id, week, match_number)
 );
 
+-- Applications to host a league on draft.ogreclan.com. Running a league
+-- through the bot needs no application; the website does, and only the
+-- bot's owner decides them.
+CREATE TABLE IF NOT EXISTS host_applications (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL UNIQUE,    -- the applicant's Discord ID
+    display_name  TEXT,
+    about         TEXT,                       -- what they want to run
+    status        TEXT NOT NULL DEFAULT 'pending',  -- pending/approved/rejected
+    created_at    TEXT NOT NULL,
+    resolved_at   TEXT,
+    resolved_by   INTEGER,
+    note          TEXT                        -- the owner's reason, if any
+);
+
 -- Extension requests: a player asking for their week's match to be played
 -- next week instead. Granting one makes /postschedule list it again in the
 -- following week. A match may only be extended once (config.MAX_EXTENSION_WEEKS).

@@ -138,6 +138,8 @@ class StubPriceList:
 class FakeBot:
     """Just enough of DraftBot for ui.announce to work."""
 
+    OWNER_ID = 1
+
     def __init__(self, conn, channel):
         self.conn = conn
         self.sheets = FakeSheets()
@@ -148,6 +150,9 @@ class FakeBot:
 
     def get_channel(self, channel_id):
         return self.channel if channel_id == self.channel.id else None
+
+    async def is_owner(self, user):
+        return getattr(user, "id", None) == self.OWNER_ID
 
     async def on_timer_expired(self, pool_id, token):
         self.expired.append((pool_id, token))
@@ -1518,6 +1523,116 @@ class ExtensionCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.extras.extensions.callback(self.extras, interaction, name="Season")
         self.assertIn("#1", interaction.text)
         self.assertIn("granted", interaction.text)
+
+
+class HostApprovalTests(unittest.IsolatedAsyncioTestCase):
+    """Who may host on draft.ogreclan.com, decided by the owner alone."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9990)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.admin = AdminCog(self.bot)
+
+    def applicant(self, user_id=55, name="Hopeful"):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        return SimpleNamespace(id=user_id, display_name=name, send=send, sent=sent)
+
+    def run_as(self, user_id):
+        return FakeInteraction(self.bot, 9990, user_id, moderator=True)
+
+    async def test_the_owner_can_approve_and_the_applicant_is_told(self):
+        rules.apply_to_host(self.conn, 55, "Hopeful", "a VGC league")
+        user = self.applicant()
+
+        interaction = self.run_as(self.bot.OWNER_ID)
+        await self.admin.approvehost.callback(self.admin, interaction, user=user)
+
+        self.assertTrue(rules.is_approved_host(self.conn, 55))
+        self.assertIn("may now host", interaction.text)
+        self.assertIn("approved to host", user.sent[0])
+
+    async def test_a_server_administrator_is_not_the_owner(self):
+        # The gate is deliberately not require_moderator: an administrator of
+        # any server the bot is in would otherwise decide who publishes on
+        # our website.
+        rules.apply_to_host(self.conn, 55, "Hopeful", "a league")
+        interaction = self.run_as(424242)      # a moderator, but not the owner
+
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.admin.approvehost.callback(self.admin, interaction,
+                                                  user=self.applicant())
+        self.assertIn("bot's owner", str(caught.exception))
+        self.assertFalse(rules.is_approved_host(self.conn, 55))
+
+    async def test_rejecting_passes_on_the_reason_and_points_at_the_bot(self):
+        rules.apply_to_host(self.conn, 55, "Hopeful", "a league")
+        user = self.applicant()
+
+        interaction = self.run_as(self.bot.OWNER_ID)
+        await self.admin.rejecthost.callback(self.admin, interaction, user=user,
+                                             reason="too new to the community")
+
+        self.assertEqual(rules.host_status(self.conn, 55), "rejected")
+        self.assertIn("turned down", interaction.text)
+        self.assertIn("too new to the community", user.sent[0])
+        self.assertIn("still run leagues with the bot", user.sent[0])
+
+    async def test_closed_dms_do_not_fail_the_command(self):
+        rules.apply_to_host(self.conn, 55, "Hopeful", "a league")
+
+        async def refuse(message):
+            raise RuntimeError("cannot send messages to this user")
+
+        user = SimpleNamespace(id=55, display_name="Hopeful", send=refuse)
+        interaction = self.run_as(self.bot.OWNER_ID)
+        await self.admin.approvehost.callback(self.admin, interaction, user=user)
+
+        self.assertTrue(rules.is_approved_host(self.conn, 55))
+        self.assertIn("could not DM them", interaction.text)
+
+    async def test_the_listing_shows_who_is_waiting(self):
+        rules.apply_to_host(self.conn, 55, "Hopeful", "a VGC league")
+        rules.apply_to_host(self.conn, 66, "Settled", "another league")
+        rules.decide_host(self.conn, 66, True, decided_by=1)
+
+        interaction = self.run_as(self.bot.OWNER_ID)
+        await self.admin.hostapplications.callback(self.admin, interaction,
+                                                   waiting=True)
+        self.assertIn("Hopeful", interaction.text)
+        self.assertNotIn("Settled", interaction.text)
+
+        everyone = self.run_as(self.bot.OWNER_ID)
+        await self.admin.hostapplications.callback(self.admin, everyone)
+        self.assertIn("Hopeful", everyone.text)
+        self.assertIn("Settled", everyone.text)
+
+    async def test_somebody_turned_down_may_apply_again(self):
+        rules.apply_to_host(self.conn, 55, "Hopeful", "a league")
+        rules.decide_host(self.conn, 55, False, decided_by=1, note="not yet")
+        self.assertEqual(rules.host_status(self.conn, 55), "rejected")
+
+        record = rules.apply_to_host(self.conn, 55, "Hopeful", "a better plan")
+        self.assertEqual(record["status"], "pending")
+        self.assertEqual(record["about"], "a better plan")
+        self.assertIsNone(record["note"], "the old refusal is cleared")
+        self.assertEqual(len(rules.host_applications(self.conn)), 1,
+                         "one row per person, not a pile of applications")
+
+    async def test_applying_twice_over_is_refused(self):
+        rules.apply_to_host(self.conn, 55, "Hopeful", "a league")
+        with self.assertRaises(rules.DraftError) as caught:
+            rules.apply_to_host(self.conn, 55)
+        self.assertIn("already waiting", str(caught.exception))
+
+        rules.decide_host(self.conn, 55, True, decided_by=1)
+        with self.assertRaises(rules.DraftError) as caught:
+            rules.apply_to_host(self.conn, 55)
+        self.assertIn("already approved", str(caught.exception))
 
 
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):

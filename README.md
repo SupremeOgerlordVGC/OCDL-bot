@@ -407,6 +407,9 @@ itself is the thing that breaks.
 | `/visibility name setting` | Moderator | Whether draft.ogreclan.com shows the league to everyone (public) or only its players signed in with Discord (private). `/setup` takes it too; public by default. Works any time. |
 | `/draft` | Moderator | Run in a pool's channel: starts that pool, pings the first player and begins their timer. |
 | `/draft-moderator` | Administrator | Grants or revokes a role's access to every moderator command on the server. Run with no options to list the current roles. |
+| `/schedulechannel name channel` | Moderator | Where `/postschedule` posts each week's matchups. `/setup` takes it too, as `schedule_channel`. |
+| `/website name setting` | Moderator | Whether the league uses draft.ogreclan.com at all. |
+| `/deleteleague name` | Moderator | Deletes a league and its data outright, unlike `/archive`, which keeps it. |
 | `/canceldraft` | Moderator | Cancels a league by name. Data is kept, not deleted. |
 | `/archive` | Moderator | Closes a finished league and frees its channels. Draft-only leagues do this themselves. |
 
@@ -436,7 +439,12 @@ Nobody can use the moderator commands until an Administrator has run
 | `/pick round pokemon cost [tera_captain]` | Player on the clock (or a moderator) | Makes a pick, announces it, and moves to the next player. Names autocomplete when a document is linked. |
 | `/queuepick round pokemon [costs] [tera]` | Any player | Queues up to 5 Pokémon in priority order for one of your upcoming turns. `tera` is a matching yes/no list. |
 | `/makeuppick round pokemon cost [tera_captain]` | Any player | Resolves a round you were skipped in. Does not change whose turn it is. |
-| `/editpick round pokemon cost [tera_captain] [player]` | Own picks; moderators for anyone | Replaces a pick, correcting roster, budgets, availability and history. A moderator can also use it to *add* a pick for a round with nothing recorded. |
+| `/editpick round pokemon cost [tera_captain] [player]` | Own picks **until the next pick is made**; moderators any time | Replaces a pick, correcting roster, budgets, availability and history. A moderator can also use it to *add* a pick for a round with nothing recorded. |
+| `/myqueue [round]` | Any player | Shows what you have queued, always privately. In a league's admin channel a moderator instead gets dropdowns to look a player up. |
+| `/cancelqueue [round] [player]` | Own queue; moderators for anyone | Deletes a queue before it fires. Costs nothing: no pick undone, no clock touched, no skip counted. |
+| `/finishdrafting` | Any player | Stops your drafting early, keeping the team you have, once you are past the league's minimum. Asks you to confirm. Your later turns are passed over. |
+| `/reopendrafting player` | Moderator | Puts somebody who finished early back on the clock. |
+| `/skipturn [player] [penalty]` | Moderator | Ends the turn of whoever is on the clock, as the timer running out would. `player` refuses unless that is really who is up; `penalty:False` leaves their timer alone. |
 
 > **Guides to paste into Discord**, both in blocks sized for Discord's message
 > limit:
@@ -461,6 +469,8 @@ Both are proposed in a pool channel and sent to the league's admin channel.
 | `/approvetrade trade_id [name]` | Moderator | Approves the trade; rosters and budgets change at the next `/postschedule`. A trade can only be approved once. |
 | `/rejecttrade trade_id [name]` | Moderator | Rejects it. Nothing changes. |
 | `/trades [name]` | Anyone | Lists a league's trades and their status. |
+| `/unapprovetrade trade_id [name]` | Moderator | Takes back an approval given by mistake, while the trade is still waiting to apply. |
+| `/edittrade trade_id drops gets [name]` | Moderator | Rewrites both sides of a trade that is nearly right. Held to the same checks, and sends it back to pending. |
 | `/subrequest reason` | Anyone | Asks to leave the draft (if you are in it) or to join it (if you are not). Posted for the moderators. |
 | `/substitute out into` | Moderator | Hands a seat over: the roster, budgets and any makeup picks stay, and only the person changes. |
 
@@ -474,11 +484,27 @@ Trades are a full-season feature; a draft-only league refuses them.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/postschedule week name` | Moderator | Posts that week's matchups into the channel you run it in, pinging both players, and puts approved trades into effect. Reads the template's schedule, or the bot's own generated one. Never automatic. |
+| `/postschedule week name` | Moderator | Posts that week's matchups to the league's schedule channel — one match per message, each with 🇦 and 🇧 to vote on — pinging both players, and puts approved trades into effect. Reads the template's schedule, or the bot's own generated one. Never automatic. |
+| `/extension [reason]` | Any player | Asks for your match this week to be played next week instead. Either player may ask; it covers the match. |
+| `/grantextension [number] [player] [name]` | Moderator | Grants an extension, by request number or directly for a player's match. The match is posted again with the following week. |
+| `/rejectextension number [name]` | Moderator | Turns a request down; the match stands. |
+| `/extensions [name]` | Anyone | Lists a league's extension requests. |
 | `/reschedule name [weeks]` | Moderator | Regenerates the bot's own schedule at random. Refused when the schedule lives on a template. |
 | `/sync` | Moderator | Rewrites the coach list and every roster block from the database. |
 | `/inspectsheet` | Moderator | Reports the document's structure without changing anything. |
 | `/backup` | Moderator | Saves a timestamped copy of the database. |
+
+### Hosting on draft.ogreclan.com
+
+Running a league **through the bot needs no permission from anybody**: invite it, run `/setup`, and go. Publishing one on draft.ogreclan.com does, because it goes out under the site's name, so a host applies and the owner approves them.
+
+| Command | Who | What it does |
+| --- | --- | --- |
+| `/hostapplications [waiting]` | **Bot owner** | Lists applications to host on the site. |
+| `/approvehost user` | **Bot owner** | Lets them create leagues on the site. They are DMed. |
+| `/rejecthost user [reason]` | **Bot owner** | Turns the application down, with the reason passed on. They can still use the bot. |
+
+The site applies through `POST /hosts/apply` and reads where it stands with `POST /hosts/status`; `POST /setup` refuses anybody not approved, naming what they still need. "Bot owner" means the account that owns the application in Discord's developer portal — deliberately not *moderator*, which would let an administrator of any server the bot is in decide who publishes on the site. Somebody turned down may apply again; it reopens the same application rather than piling up new ones.
 
 ## Documents
 
@@ -764,7 +790,7 @@ turn opens again and the player is pinged.
 python3 -m unittest discover -s tests -v
 ```
 
-406 tests, no Discord connection and no network needed. They cover snake order
+415 tests, no Discord connection and no network needed. They cover snake order
 for every player count, round transitions, channel and pool isolation, timer
 halving and the makeup cascade, the snake-boundary case (one halving for two
 lost rounds, none if the queue was sniped), queued picks and the
