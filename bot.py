@@ -298,6 +298,16 @@ class DraftBot(commands.Bot):
     async def before_backup(self):
         await self.wait_until_ready()
 
+    async def owns(self, user_id):
+        """Whether a Discord ID is this bot's owner.
+
+        `is_owner` wants a user object and the web API only ever has an ID,
+        so it is handed a bare reference; only the id is ever read.
+        """
+        if not user_id:
+            return False
+        return await self.is_owner(discord.Object(id=int(user_id)))
+
     async def on_app_command_error(self, interaction, error):
         """Show rule violations to the user; log anything unexpected."""
         original = getattr(error, "original", error)

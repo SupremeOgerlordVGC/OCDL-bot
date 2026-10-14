@@ -556,7 +556,7 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
                   mode="full_season", doc_kind="none", doc_url=None,
                   tera_budget=0, max_trades=0, season_weeks=0, visibility="public",
                   coach_slots=None, website=True, site_only=False, created_by=None,
-                  schedule_channel_id=None):
+                  schedule_channel_id=None, official=False):
     """Create a league in `setup` state, with one or two pools.
 
     `pools` is [(label, channel_id, [(user_id, display_name), ...]), ...],
@@ -654,15 +654,20 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
         raise DraftError("❌ The same player was listed twice.")
     if visibility not in VISIBILITIES:
         raise DraftError("❌ A league is either public or private on the website.")
+    if official:
+        # Being official is what makes it public, so there is no way to end
+        # up with an official league hidden from the site.
+        visibility = "public"
 
     cursor = conn.execute(
         """INSERT INTO leagues (guild_id, name, admin_channel_id, schedule_channel_id,
-                                mode, doc_kind, doc_url,
+                                official, mode, doc_kind, doc_url,
                                 budget, tera_budget, min_picks, max_picks, base_timer,
                                 max_trades, season_weeks, status, created_at, visibility,
                                 website, site_only, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?, ?)""",
-        (guild_id, name, admin_channel_id, schedule_channel_id, mode, doc_kind, doc_url,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?, ?)""",
+        (guild_id, name, admin_channel_id, schedule_channel_id, 1 if official else 0,
+         mode, doc_kind, doc_url,
          budget, tera_budget,
          min_picks, max_picks, base_timer, max_trades, max(0, season_weeks),
          database.now(), visibility, 1 if website or site_only else 0, 1 if site_only else 0, created_by),
@@ -782,6 +787,12 @@ def set_visibility(conn, league_id, visibility):
     """/visibility - who sees the league on draft.ogreclan.com."""
     if visibility not in VISIBILITIES:
         raise DraftError("❌ A league is either public or private on the website.")
+    league = get_league(conn, league_id)
+    if league is not None and league["official"] and visibility != "public":
+        raise DraftError(
+            f"❌ **{league['name']}** is Ogre Clan Official, which means it is "
+            f"public on draft.ogreclan.com. That cannot be turned off."
+        )
     conn.execute("UPDATE leagues SET visibility = ? WHERE id = ?", (visibility, league_id))
     conn.commit()
     return get_league(conn, league_id)
@@ -2069,6 +2080,27 @@ def _apply_trade(conn, trade):
             conn.execute("UPDATE players SET budget_remaining = budget_remaining + ? WHERE id = ?",
                          (get_total - drop_total, partner["id"]))
     return notes
+
+
+def is_official_league(guild_id, owner):
+    """Ogre Clan Official: the owner's league, or one for the Ogre Clan server.
+
+    Kept in one place because two things follow from it - the league is
+    public, and the website gives its players Voice - and they must not
+    drift apart.
+    """
+    return bool(owner) or int(guild_id or 0) == config.OGRE_CLAN_GUILD_ID
+
+
+def set_official(conn, league_id, official):
+    """Mark a league official, which also makes it public."""
+    conn.execute(
+        "UPDATE leagues SET official = ?, visibility = CASE WHEN ? THEN 'public' "
+        "ELSE visibility END WHERE id = ?",
+        (1 if official else 0, 1 if official else 0, league_id),
+    )
+    conn.commit()
+    return get_league(conn, league_id)
 
 
 def set_schedule_channel(conn, league_id, channel_id):

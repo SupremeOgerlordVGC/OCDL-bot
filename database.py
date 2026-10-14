@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS leagues (
     -- Where /postschedule posts the week's matchups. NULL means it posts
     -- wherever the command was run.
     schedule_channel_id INTEGER,
+    -- Ogre Clan Official: made by the owner, or for the Ogre Clan server.
+    -- Always public, and the website gives its players Voice.
+    official          INTEGER NOT NULL DEFAULT 0,
     -- 'draft_only'     : run the draft, then archive it
     -- 'draft_schedule' : draft plus schedule posting, no trades
     -- 'full_season'    : draft, trades and schedule posting
@@ -378,6 +381,7 @@ SELECT pools.id               AS id,
        leagues.name             AS league_name,
        leagues.admin_channel_id AS admin_channel_id,
        leagues.schedule_channel_id AS schedule_channel_id,
+       leagues.official         AS official,
        leagues.mode             AS mode,
        leagues.doc_kind         AS doc_kind,
        leagues.doc_url          AS doc_url,
@@ -403,6 +407,7 @@ FROM pools JOIN leagues ON leagues.id = pools.league_id;
 ADDED_COLUMNS = [
     ("leagues", "season_weeks", "INTEGER NOT NULL DEFAULT 0"),
     ("leagues", "schedule_channel_id", "INTEGER"),
+    ("leagues", "official", "INTEGER NOT NULL DEFAULT 0"),
     ("players", "status", "TEXT NOT NULL DEFAULT 'active'"),
     ("players", "tera_budget_remaining", "INTEGER NOT NULL DEFAULT 0"),
     ("pools", "scheduled_start", "REAL"),

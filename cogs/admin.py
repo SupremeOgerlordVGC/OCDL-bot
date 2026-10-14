@@ -148,6 +148,9 @@ class AdminCog(commands.Cog):
         draft order and `channels` is {"A": channel_id, ...}. Returns
         (league, pool_rows, notes, coach_slots).
         """
+        # Ogre Clan Official, decided here so /setup and the website agree.
+        official = rules.is_official_league(guild_id, await self.bot.owns(created_by))
+
         if template_link and tiering_link:
             raise rules.DraftError(
                 "❌ Link a template **or** a tiering sheet, not both. The template already "
@@ -261,6 +264,7 @@ class AdminCog(commands.Cog):
             guild_id=guild_id,
             admin_channel_id=admin_channel_id,
             schedule_channel_id=schedule_channel_id,
+            official=official,
             name=name,
             pools=pools,
             budget=budget,
@@ -306,7 +310,10 @@ class AdminCog(commands.Cog):
         tera_budget = league["tera_budget"]
         summary = (
             f"📋 **{league['name']}** has been set up.\n"
-            f"• Mode: **{'full season' if league['mode'] == 'full_season' else 'draft only'}**\n"
+            + ("🏅 **Ogre Clan Official** — public on draft.ogreclan.com, and its "
+               "players get Voice on play.ogreclan.com once they link their "
+               "Showdown account.\n" if league["official"] else "")
+            + f"• Mode: **{'full season' if league['mode'] == 'full_season' else 'draft only'}**\n"
             f"• Budget: **{league['budget']}** points"
             + (f" · Tera budget **{tera_budget}** (max {config.MAX_TERA_CAPTAINS} captains)\n"
                if tera_budget else "\n")

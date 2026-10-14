@@ -154,6 +154,12 @@ class FakeBot:
     async def is_owner(self, user):
         return getattr(user, "id", None) == self.OWNER_ID
 
+    async def owns(self, user_id):
+        return bool(user_id) and int(user_id) == self.OWNER_ID
+
+    async def application_info(self):
+        return SimpleNamespace(owner=SimpleNamespace(id=self.OWNER_ID, send=None))
+
     async def on_timer_expired(self, pool_id, token):
         self.expired.append((pool_id, token))
         draft = rules.get_pool(self.conn, pool_id)
@@ -1633,6 +1639,74 @@ class HostApprovalTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(rules.DraftError) as caught:
             rules.apply_to_host(self.conn, 55)
         self.assertIn("already approved", str(caught.exception))
+
+
+class OfficialLeagueTests(unittest.IsolatedAsyncioTestCase):
+    """Ogre Clan Official: the owner's leagues, and the Ogre Clan server's."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9970)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.admin = AdminCog(self.bot)
+
+    async def build(self, guild_id, created_by):
+        league, _, _, _ = await self.admin.build_league(
+            guild_id=guild_id, admin_channel_id=1, name=f"L{guild_id}-{created_by}",
+            rosters={"A": [{"user_id": 11, "display_name": "Larry", "username": "larry"},
+                           {"user_id": 22, "display_name": "Alex", "username": "alex"}]},
+            channels={"A": 9970 + guild_id % 97 + created_by % 89},
+            min_picks=1, max_picks=2, timer=120, mode="full_season", budget=100,
+            visibility="private", created_by=created_by)
+        return league
+
+    def test_the_rule_in_one_place(self):
+        official = rules.is_official_league
+        self.assertTrue(official(config.OGRE_CLAN_GUILD_ID, owner=False))
+        self.assertTrue(official(12345, owner=True), "the owner's, in any server")
+        self.assertTrue(official(0, owner=True), "including a site-only league")
+        self.assertFalse(official(12345, owner=False))
+        self.assertFalse(official(None, owner=False))
+
+    async def test_the_ogre_clan_server_makes_a_league_official_and_public(self):
+        league = await self.build(config.OGRE_CLAN_GUILD_ID, created_by=424242)
+
+        self.assertEqual(league["official"], 1)
+        self.assertEqual(league["visibility"], "public",
+                         "asked for private, but official overrides it")
+
+    async def test_the_owners_league_is_official_anywhere(self):
+        league = await self.build(55555, created_by=self.bot.OWNER_ID)
+        self.assertEqual(league["official"], 1)
+        self.assertEqual(league["visibility"], "public")
+
+    async def test_anybody_elses_league_elsewhere_is_not(self):
+        league = await self.build(55555, created_by=424242)
+        self.assertEqual(league["official"], 0)
+        self.assertEqual(league["visibility"], "private", "their choice stands")
+
+    async def test_an_official_league_cannot_be_hidden(self):
+        league = await self.build(config.OGRE_CLAN_GUILD_ID, created_by=424242)
+        with self.assertRaises(rules.DraftError) as caught:
+            rules.set_visibility(self.conn, league["id"], "private")
+        self.assertIn("Ogre Clan Official", str(caught.exception))
+        self.assertEqual(rules.get_league(self.conn, league["id"])["visibility"],
+                         "public")
+
+    async def test_an_ordinary_league_can_still_be_hidden(self):
+        league = await self.build(55555, created_by=424242)
+        updated = rules.set_visibility(self.conn, league["id"], "private")
+        self.assertEqual(updated["visibility"], "private")
+
+    async def test_marking_one_official_makes_it_public(self):
+        league = await self.build(55555, created_by=424242)
+        updated = rules.set_official(self.conn, league["id"], True)
+        self.assertEqual((updated["official"], updated["visibility"]), (1, "public"))
+
+    async def test_the_pool_view_carries_it(self):
+        league = await self.build(config.OGRE_CLAN_GUILD_ID, created_by=424242)
+        pool = rules.get_league_pools(self.conn, league["id"])[0]
+        self.assertEqual(pool["official"], 1, "the site reads leagues through this")
 
 
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):

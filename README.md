@@ -494,6 +494,15 @@ Trades are a full-season feature; a draft-only league refuses them.
 | `/inspectsheet` | Moderator | Reports the document's structure without changing anything. |
 | `/backup` | Moderator | Saves a timestamped copy of the database. |
 
+### Ogre Clan Official leagues
+
+A league is **Ogre Clan Official** when the bot's owner created it, or when it was created for the Ogre Clan Discord server (`config.OGRE_CLAN_GUILD_ID`). Two things follow, and both are automatic:
+
+* it is **public** on draft.ogreclan.com — `/visibility private` is refused for an official league, so it cannot be hidden by accident;
+* the website turns **Voice** on for its players, so anybody who links their Showdown account gets `+` on play.ogreclan.com and voice in their division's room.
+
+The rule lives in one place, `rules.is_official_league`, and is applied in `build_league`, which both `/setup` and the website's league creation go through. `leagues.official` is what the site reads.
+
 ### Hosting on draft.ogreclan.com
 
 Running a league **through the bot needs no permission from anybody**: invite it, run `/setup`, and go. Publishing one on draft.ogreclan.com does, because it goes out under the site's name, so a host applies and the owner approves them.
@@ -790,7 +799,7 @@ turn opens again and the player is pinged.
 python3 -m unittest discover -s tests -v
 ```
 
-415 tests, no Discord connection and no network needed. They cover snake order
+423 tests, no Discord connection and no network needed. They cover snake order
 for every player count, round transitions, channel and pool isolation, timer
 halving and the makeup cascade, the snake-boundary case (one halving for two
 lost rounds, none if the queue was sniped), queued picks and the
