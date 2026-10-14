@@ -152,6 +152,8 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 **`/trade ... for_player:@Someone`** — file a trade on behalf of a player who cannot manage the command. It still needs approving.
 
+**🔁 Substitutes get 24 hours of unlimited transactions** when they take over during or after a draft. Theirs don't count against the trade cap, and they take effect when the window closes rather than at the next posted week — so approve them promptly. They can replace the team they inherited but not grow it.
+
 **The limit counts Pokémon picked up**, not dropped: each player counts what they receive. Trades proposed in the **24 hours after a pool's draft ends** (the bot pings the pool when it opens) don't count at all. A player dropping nothing types `nil` or `0` for `drops`.
 ```
 
@@ -179,6 +181,8 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 **`/postschedule week:3 name:OCDL Season 1`** — posts that week's matchups and puts every approved trade into effect (listed underneath). Reads the template's schedule, or the bot's own if there's no template. Never automatic.
 
 **Each match gets its own message, with 🇦 and 🇧 on it to vote with.** They go to the league's **schedule channel**; set one with `/schedulechannel name:OCDL Season 1 channel:#schedule`, or with `schedule_channel` in `/setup`. With none set they post wherever you run the command, and the bot tells you so. I need **Add Reactions** in that channel for the votes.
+
+**📅 Weeks post themselves.** Week 1 goes up once **both pools have finished drafting and the free-trade window after it has closed**. Every week after that is posted on **Monday at 20:00 GMT+8**, never less than seven days after the last one — so a season starting mid-week keeps a full first week (week 1 on a Tuesday means week 2 the Monday after next). If the bot is down over a Monday the week goes up as soon as it's back. When a week has no matches it assumes the season is over, stops, and tells you here; posting one by hand starts it again.
 
 **`/reschedule name:... weeks:8`** — rerolls a bot-generated schedule.
 

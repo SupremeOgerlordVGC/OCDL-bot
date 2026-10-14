@@ -1748,11 +1748,28 @@ def propose_trade(conn, draft, user_id, drops, gets, partner_user_id=None):
     if len(drops) > config.MAX_TRADE_SIZE or len(gets) > config.MAX_TRADE_SIZE:
         raise DraftError(f"❌ A trade may involve at most {config.MAX_TRADE_SIZE} Pokémon per side.")
 
-    free = in_free_trade_window(draft)
+    # A substitute may replace what they inherited, not add to it. This
+    # belongs here rather than in the caller's pre-flight checks, because
+    # the website proposes trades through this function too.
+    if in_sub_window(proposer) and len(gets) > len(drops):
+        size = roster_size(conn, draft["id"], proposer["id"])
+        raise DraftError(
+            f"❌ You can replace as many of your {size} Pokémon as you like while "
+            f"you are settling in, but not add to the team: drop one for each one "
+            f"you pick up. A {size + 1}th can only come from your own turn, with "
+            f"`/pick`."
+        )
+
+    # A substitute rebuilding their inherited team has no limit on how many
+    # transactions they make. The limit still applies to a partner, who is
+    # not the one who just took a seat over.
+    season_free = in_free_trade_window(draft)
+    rebuilding = in_sub_window(proposer)
+    free = season_free or rebuilding
     if not free:
         check_pickup_limit(conn, draft, proposer, len(gets))
-        if partner is not None:
-            check_pickup_limit(conn, draft, partner, len(drops))
+    if not season_free and partner is not None:
+        check_pickup_limit(conn, draft, partner, len(drops))
 
     warnings = trade_warnings(conn, draft, proposer, partner, drops, gets)
 
@@ -1763,17 +1780,38 @@ def propose_trade(conn, draft, user_id, drops, gets, partner_user_id=None):
         (draft["league_id"],),
     ).fetchone()["n"]
 
+    # A substitute's transactions take effect when their window closes,
+    # rather than waiting for the next week to be posted.
+    apply_at = proposer["sub_window_until"] if rebuilding else None
+
     cursor = conn.execute(
         """INSERT INTO trades (league_id, pool_id, trade_number, proposer_id, partner_id,
-                               drops, gets, status, created_at, free)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                               drops, gets, status, created_at, free, apply_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
         (draft["league_id"], draft["id"], number, proposer["id"],
          partner["id"] if partner else None,
-         json.dumps(drops), json.dumps(gets), database.now(), 1 if free else 0),
+         json.dumps(drops), json.dumps(gets), database.now(), 1 if free else 0,
+         apply_at),
     )
     conn.commit()
     record = conn.execute("SELECT * FROM trades WHERE id = ?", (cursor.lastrowid,)).fetchone()
     return record, warnings
+
+
+def in_sub_window(player, now=None):
+    """Whether a substitute is still inside their rebuilding window."""
+    until = player["sub_window_until"] if player is not None else None
+    return bool(until) and (now if now is not None else time.time()) < until
+
+
+def open_sub_window(conn, player_id, now=None):
+    """Give a substitute their 24 hours of unlimited transactions."""
+    until = (now if now is not None else time.time()) + \
+        config.SUB_TRADE_WINDOW_HOURS * 3600
+    conn.execute("UPDATE players SET sub_window_until = ? WHERE id = ?",
+                 (until, player_id))
+    conn.commit()
+    return until
 
 
 def in_free_trade_window(draft, now=None):
@@ -2007,12 +2045,46 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
 
 
 def waiting_trades(conn, league_id):
-    """Approved trades that take effect at the next /postschedule, in order."""
+    """Approved trades that take effect at the next /postschedule, in order.
+
+    A substitute's trades are not among them: those have their own moment,
+    when the window closes, so that somebody who takes a team over is not
+    left waiting until the next week to field it.
+    """
     return conn.execute(
         "SELECT * FROM trades WHERE league_id = ? AND status = 'approved' AND applied_at IS NULL "
-        "ORDER BY trade_number",
+        "AND apply_at IS NULL ORDER BY trade_number",
         (league_id,),
     ).fetchall()
+
+
+def due_sub_trades(conn, now=None):
+    """Approved substitute transactions whose window has now closed."""
+    return conn.execute(
+        "SELECT * FROM trades WHERE status = 'approved' AND applied_at IS NULL "
+        "AND apply_at IS NOT NULL AND apply_at <= ? ORDER BY apply_at, trade_number",
+        (now if now is not None else time.time(),),
+    ).fetchall()
+
+
+def apply_due_sub_trades(conn, now=None):
+    """Put every substitute's transactions into effect. Returns [(trade, notes)].
+
+    Approved after the window closed? Then it applies at once, which is
+    what "active immediately after the 24 hours" has to mean for a trade
+    the moderators were still looking at.
+    """
+    applied = []
+    for trade in due_sub_trades(conn, now):
+        notes = _apply_trade(conn, trade)
+        league = get_league(conn, trade["league_id"])
+        conn.execute(
+            "UPDATE trades SET applied_at = ?, applied_week = ? WHERE id = ?",
+            (database.now(), league["current_week"] if league else None, trade["id"]),
+        )
+        applied.append((get_trade(conn, trade["league_id"], trade["trade_number"]), notes))
+    conn.commit()
+    return applied
 
 
 def apply_trades(conn, league_id, week):
@@ -2316,6 +2388,12 @@ def substitute_player(conn, draft, out_user_id, in_user_id, in_display_name):
                               skip_count = 0 WHERE id = ?""",
         (in_user_id, in_display_name, draft["base_timer"], player["id"]),
     )
+    # Somebody taking over a team that is already picked needs a chance to
+    # make it their own, so they get a window of unlimited transactions.
+    # Before the draft starts there is nothing to rebuild - they just draft.
+    window = None
+    if draft["status"] in ("active", "complete"):
+        window = open_sub_window(conn, player["id"])
     # Any request either of them had open is now dealt with.
     conn.execute(
         "UPDATE sub_requests SET status = 'resolved', resolved_at = ? "
@@ -2332,6 +2410,7 @@ def substitute_player(conn, draft, out_user_id, in_user_id, in_display_name):
         "out_name": player["display_name"],
         "in_user_id": in_user_id,
         "in_name": in_display_name,
+        "sub_window_until": window,
         "roster": roster_view(conn, draft, get_player_by_id(conn, player["id"])),
     }
 

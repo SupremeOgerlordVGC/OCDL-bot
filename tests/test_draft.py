@@ -3344,6 +3344,138 @@ class WeeksDueTests(unittest.TestCase):
         self.assertEqual(draft.leagues_due_a_week(conn), [])
 
 
+class SubstituteWindowTests(unittest.TestCase):
+    """A substitute's day of unlimited transactions.
+
+    Somebody handed a team that is already drafted gets to make it their
+    own: as many transactions as they like, in effect the moment the
+    window closes rather than at the next posted week, and never growing
+    the team beyond what they took over.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=2500, players=2, budget=100,
+                                min_picks=1, max_picks=3, mode="full_season")
+        # Larry drafts two, Alex one, so Larry's seat has a team to inherit.
+        draft.make_pick(self.conn, self.live(), user(1), 1, "Garchomp", 10)
+        draft.make_pick(self.conn, self.live(), user(2), 1, "Heatran", 10)
+        draft.make_pick(self.conn, self.live(), user(2), 2, "Skarmory", 10)
+        draft.make_pick(self.conn, self.live(), user(1), 2, "Landorus", 10)
+
+    def live(self):
+        return draft.get_pool(self.conn, self.draft["id"])
+
+    def sub_in(self, user_id=999, name="Newcomer"):
+        return draft.substitute_player(self.conn, self.live(), user(1), user_id, name)
+
+    def player(self, user_id):
+        return draft.get_player(self.conn, self.draft["id"], user_id)
+
+    def test_subbing_in_mid_draft_opens_a_window(self):
+        result = self.sub_in()
+        self.assertIsNotNone(result["sub_window_until"])
+        self.assertTrue(draft.in_sub_window(self.player(999)))
+        expected = time.time() + config.SUB_TRADE_WINDOW_HOURS * 3600
+        self.assertAlmostEqual(result["sub_window_until"], expected, delta=5)
+
+    def test_subbing_in_before_the_draft_starts_opens_nothing(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=2501, players=2, budget=50, min_picks=1,
+                          max_picks=2, mode="full_season", start=False)
+        result = draft.substitute_player(conn, pool, user(1), 999, "Newcomer")
+        self.assertIsNone(result["sub_window_until"],
+                          "there is no team to rebuild yet - they just draft")
+        self.assertFalse(draft.in_sub_window(draft.get_player(conn, pool["id"], 999)))
+
+    def test_their_transactions_do_not_count_against_the_limit(self):
+        self.conn.execute("UPDATE leagues SET max_trades = 1")
+        self.conn.execute("UPDATE pools SET free_trades_until = NULL")
+        self.conn.commit()
+        self.sub_in()
+        live = self.live()
+
+        for pokemon in ("Alpha", "Beta", "Gamma"):
+            record, _ = draft.propose_trade(self.conn, live, 999,
+                                            ["Garchomp" if pokemon == "Alpha" else
+                                             "Landorus" if pokemon == "Beta" else "Alpha"],
+                                            [pokemon])
+            self.assertEqual(record["free"], 1, "a rebuilding sub has no cap")
+            draft.approve_trade(self.conn, live, record["trade_number"], 1)
+            draft.apply_due_sub_trades(self.conn, now=record["apply_at"] + 1)
+            live = self.live()
+
+    def test_a_window_trade_waits_for_the_window_not_the_week(self):
+        self.sub_in()
+        record, _ = draft.propose_trade(self.conn, self.live(), 999,
+                                        ["Garchomp"], ["Alpha"])
+        self.assertIsNotNone(record["apply_at"])
+        draft.approve_trade(self.conn, self.live(), record["trade_number"], 1)
+
+        self.assertEqual(draft.waiting_trades(self.conn, self.live()["league_id"]), [],
+                         "/postschedule must leave it alone")
+        self.assertEqual(draft.apply_due_sub_trades(self.conn, now=time.time()), [],
+                          "nothing happens while the window is open")
+
+        applied = draft.apply_due_sub_trades(self.conn, now=record["apply_at"] + 1)
+        self.assertEqual([t["trade_number"] for t, _ in applied], [record["trade_number"]])
+        owner = draft.find_owner(self.conn, self.draft["id"], "alpha")
+        self.assertEqual(owner["player_id"], self.player(999)["id"])
+        self.assertIsNone(draft.find_owner(self.conn, self.draft["id"], "garchomp"))
+
+    def test_approved_late_it_applies_at_once(self):
+        self.sub_in()
+        record, _ = draft.propose_trade(self.conn, self.live(), 999,
+                                        ["Garchomp"], ["Alpha"])
+        # The moderators were still looking at it when the day ran out.
+        after = record["apply_at"] + 600
+        draft.approve_trade(self.conn, self.live(), record["trade_number"], 1)
+        applied = draft.apply_due_sub_trades(self.conn, now=after)
+        self.assertEqual(len(applied), 1)
+
+    def test_an_unapproved_window_trade_never_applies(self):
+        self.sub_in()
+        record, _ = draft.propose_trade(self.conn, self.live(), 999,
+                                        ["Garchomp"], ["Alpha"])
+        self.assertEqual(draft.apply_due_sub_trades(self.conn,
+                                                     now=record["apply_at"] + 1), [],
+                          "a moderator still has to say yes")
+
+    def test_they_may_replace_the_whole_team_but_not_grow_it(self):
+        # Checked in propose_trade, so the website is held to it too.
+        self.sub_in()
+        record, _ = draft.propose_trade(self.conn, self.live(), 999,
+                                        ["Garchomp", "Landorus"], ["Alpha", "Beta"])
+        self.assertEqual(json.loads(record["gets"]), ["Alpha", "Beta"],
+                         "two for two is fine")
+
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.propose_trade(self.conn, self.live(), 999,
+                                ["Skarmory"], ["Gamma", "Delta"])
+        message = str(caught.exception)
+        self.assertIn("not add to the team", message)
+        self.assertIn("`/pick`", message, "the only way to a bigger team")
+
+    def test_dropping_more_than_they_pick_up_is_allowed(self):
+        self.sub_in()
+        record, _ = draft.propose_trade(self.conn, self.live(), 999,
+                                        ["Garchomp", "Landorus"], ["Alpha"])
+        self.assertEqual(json.loads(record["drops"]), ["Garchomp", "Landorus"])
+
+    def test_once_the_window_closes_the_normal_rules_return(self):
+        self.sub_in()
+        self.conn.execute("UPDATE players SET sub_window_until = ? WHERE user_id = ?",
+                          (time.time() - 1, 999))
+        self.conn.execute("UPDATE pools SET free_trades_until = NULL")
+        self.conn.commit()
+        self.assertFalse(draft.in_sub_window(self.player(999)))
+
+        record, _ = draft.propose_trade(self.conn, self.live(), 999,
+                                        ["Garchomp"], ["Alpha"])
+        self.assertIsNone(record["apply_at"], "back to waiting for the posted week")
+        self.assertEqual(record["free"], 0)
+
+
 class MigrationTests(unittest.TestCase):
     """An upgrade must not break an existing database.
 

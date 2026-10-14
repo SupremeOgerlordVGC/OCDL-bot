@@ -82,6 +82,11 @@ WEEK_POST_WEEKDAY = 0           # Monday, as date.weekday() counts
 WEEK_POST_HOUR = 20
 WEEK_GAP_DAYS = 7
 
+# A player who takes over a seat during or after the draft gets this long to
+# rebuild the team they inherited: unlimited transactions, which all take
+# effect when the window closes rather than waiting for the next posted week.
+SUB_TRADE_WINDOW_HOURS = 24
+
 MAX_EXTENSION_WEEKS = 1
 
 MAX_TRADE_SIZE = 5

@@ -134,6 +134,7 @@ class DraftBot(commands.Bot):
         self.automatic_backup.start()
         self.start_scheduled_drafts.start()
         self.post_due_weeks.start()
+        self.apply_due_transactions.start()
 
     # ---- command sync bookkeeping ---------------------------------------
 
@@ -321,6 +322,47 @@ class DraftBot(commands.Bot):
 
     @post_due_weeks.before_loop
     async def before_due_weeks(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=1)
+    async def apply_due_transactions(self):
+        """Put a substitute's transactions into effect when their window ends.
+
+        Everybody else's trades wait for the next posted week, which keeps
+        rosters still inside a week. Somebody who has just taken a team over
+        cannot wait that long to field it, so theirs land the moment their
+        day is up.
+        """
+        try:
+            applied = rules.apply_due_sub_trades(self.conn)
+        except Exception:
+            log.exception("could not apply substitutes' transactions")
+            return
+        if not applied:
+            return
+
+        cog = self.get_cog("AdminCog")
+        if cog is not None:
+            await cog.price_trades(applied)      # free agency pickups have no price yet
+
+        for trade, notes in applied:
+            pool = rules.get_pool(self.conn, trade["pool_id"])
+            if pool is None:
+                continue
+            proposer = rules.get_player_by_id(self.conn, trade["proposer_id"])
+            log.info("substitute trade #%s applied for %s",
+                     trade["trade_number"], proposer["display_name"])
+            lines = (f"🔁 **{proposer['display_name']}**'s transactions are in "
+                     f"effect — their settling-in window has closed.\n"
+                     f"• Gave up: {rules.trade_side(trade['drops'])}\n"
+                     f"• Received: {rules.trade_side(trade['gets'])}")
+            if notes:
+                lines += "\n" + "\n".join(f"• ⚠️ {note}" for note in notes)
+            await ui.safe_send(self.get_channel(pool["channel_id"]), lines)
+            ui.resync_sheet(self, trade["pool_id"])
+
+    @apply_due_transactions.before_loop
+    async def before_due_transactions(self):
         await self.wait_until_ready()
 
     @tasks.loop(hours=config.BACKUP_INTERVAL_HOURS)

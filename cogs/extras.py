@@ -632,7 +632,15 @@ class ExtrasCog(commands.Cog):
             f"over seat {result['seat']} from **{result['out_name']}**.\n"
             f"• Team: {team}\n"
             f"• Budget remaining: **{roster['remaining']}** of {pool['budget']}\n"
-            f"• Their timer is reset to **{ui.format_seconds(pool['base_timer'])}**.",
+            f"• Their timer is reset to **{ui.format_seconds(pool['base_timer'])}**."
+            + (f"\n• 🔁 **Unlimited transactions for "
+               f"{config.SUB_TRADE_WINDOW_HOURS} hours** (until "
+               f"<t:{int(result['sub_window_until'])}:f>, "
+               f"<t:{int(result['sub_window_until'])}:R>) to make this team their "
+               f"own. They take effect the moment the window closes, not at the "
+               f"next posted week. They can swap as many as they like but not "
+               f"grow the team."
+               if result["sub_window_until"] else ""),
         )
         # The coach name on the spreadsheet changes with the seat.
         ui.resync_sheet(self.bot, pool["id"])

@@ -89,9 +89,10 @@ A reduced timer is not permanent punishment — ask a moderator if you think it 
 
 ---
 
-## Block 4 — trades and substitutions *(skip for a draft-only league)*
+## Block 4 — trades *(skip for a draft-only league)*
 
 ```
+
 **🤝 Trades and subs**
 
 **`/trade`** — propose a trade. Up to 5 Pokémon each way.
@@ -106,11 +107,21 @@ A reduced timer is not permanent punishment — ask a moderator if you think it 
 • The bot checks your spelling against the tier list, and that you own what you are dropping and can afford what you are taking, **before** a moderator sees it. If it refuses, fix the names — `/search` finds the right spelling.
 
 **`/trades`** — see every trade and whether it was approved.
+```
+
+---
+
+## Block 5 — your match and your seat
+
+```
+**📅 Your match, and taking a seat over**
 
 **`/extension reason:...`** — ask for this week's match to be played next week instead.
 • Either player can ask; it covers the match, so you both get the same answer.
 • A moderator decides. If granted, the match is posted again with next week.
 • **One week is the most it can move** — a match already carried over has to be played.
+
+**Taking over a team?** A substitute who joins during or after the draft gets **24 hours of unlimited transactions** to make the team their own. They take effect the moment the window closes, not at the next posted week. You can replace as many as you like but not grow the team — an extra Pokémon only comes from your own turn with `/pick`.
 
 **`/subrequest reason:...`** — ask for a substitution.
 • Already drafting? This asks to **sub out**.
@@ -120,7 +131,7 @@ A reduced timer is not permanent punishment — ask a moderator if you think it 
 
 ---
 
-## Block 5 — Tera formats only
+## Block 6 — Tera formats only
 
 Only paste this if your league has a **Tera budget**. Otherwise skip it.
 
@@ -144,7 +155,7 @@ Use `/search` to see both prices. Some Pokémon have no Tera price at all — th
 
 ---
 
-## Block 6 — new: checking and cancelling your queue
+## Block 7 — new: checking and cancelling your queue
 
 ```
 **📋 Two new commands for your queue**

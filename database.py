@@ -139,6 +139,9 @@ CREATE TABLE IF NOT EXISTS players (
     tera_budget_remaining  INTEGER NOT NULL DEFAULT 0,
     current_timer          INTEGER NOT NULL,   -- personal, halved on skips
     skip_count             INTEGER NOT NULL DEFAULT 0,
+    -- When a substitute's rebuilding window closes: until then their trades
+    -- are unlimited, and they take effect the moment it does.
+    sub_window_until REAL,
     -- 'active' or 'withdrawn'. A withdrawn player keeps their seat so the
     -- snake order and turn pointer stay valid, but is passed over.
     status                 TEXT NOT NULL DEFAULT 'active',
@@ -210,6 +213,9 @@ CREATE TABLE IF NOT EXISTS trades (
     league_id     INTEGER NOT NULL REFERENCES leagues(id) ON DELETE CASCADE,
     pool_id       INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
     trade_number  INTEGER NOT NULL,       -- 1, 2, 3 ... within the league
+    -- Set for a substitute's trades: when they take effect, instead of
+    -- waiting for the next week to be posted. NULL for everything else.
+    apply_at      REAL,
     proposer_id   INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
     partner_id    INTEGER REFERENCES players(id) ON DELETE SET NULL,
     drops         TEXT NOT NULL,          -- JSON list of Pokemon names
@@ -411,6 +417,8 @@ FROM pools JOIN leagues ON leagues.id = pools.league_id;
 # the new column. Append to this list whenever you add one; it is applied on
 # every connect and is safe to run repeatedly.
 ADDED_COLUMNS = [
+    ("players", "sub_window_until", "REAL"),
+    ("trades", "apply_at", "REAL"),
     ("leagues", "season_weeks", "INTEGER NOT NULL DEFAULT 0"),
     ("leagues", "schedule_channel_id", "INTEGER"),
     ("leagues", "official", "INTEGER NOT NULL DEFAULT 0"),

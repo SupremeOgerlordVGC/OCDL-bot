@@ -487,6 +487,8 @@ Trades are a full-season feature; a draft-only league refuses them.
 | Command | Who | What it does |
 |---|---|---|
 | `/postschedule week name` | Moderator | Posts that week's matchups to the league's schedule channel — one match per message, each with 🇦 and 🇧 to vote on — pinging both players, and puts approved trades into effect. Reads the template's schedule, or the bot's own generated one. Never automatic. |
+| *(automatic)* | — | **Week 1 posts itself** once every pool has drafted and the free-trade window has closed; every week after that on **Monday 20:00 GMT+8**, never less than seven days apart. A week with no matches stops it and says so; posting one by hand arms it again. |
+| *(automatic)* | — | **A substitute who takes over during or after a draft gets 24 hours of unlimited transactions**, which take effect when the window closes rather than at the next posted week. They may replace the team they inherited but not grow it. |
 | `/extension [reason]` | Any player | Asks for your match this week to be played next week instead. Either player may ask; it covers the match. |
 | `/grantextension [number] [player] [name]` | Moderator | Grants an extension, by request number or directly for a player's match. The match is posted again with the following week. |
 | `/rejectextension number [name]` | Moderator | Turns a request down; the match stands. |
@@ -801,7 +803,7 @@ turn opens again and the player is pinged.
 python3 -m unittest discover -s tests -v
 ```
 
-423 tests, no Discord connection and no network needed. They cover snake order
+452 tests, no Discord connection and no network needed. They cover snake order
 for every player count, round transitions, channel and pool isolation, timer
 halving and the makeup cascade, the snake-boundary case (one halving for two
 lost rounds, none if the queue was sniped), queued picks and the
