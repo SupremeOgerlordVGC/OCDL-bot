@@ -1,6 +1,7 @@
 # Where things stand
 
-Last brought up to date on 2026-10-14, after the paused work was finished.
+Last brought up to date on 2026-10-14, after trades were moved off
+`/postschedule` and onto match reports.
 Everything below was verified at that point, not assumed. The bot is running
 and healthy, nothing is half-built, and what has not been started is listed
 plainly.
@@ -13,7 +14,7 @@ plainly.
 | Bot | `/home/draftbot/OCDL-Bot`, systemd unit `draftbot`, venv at `.venv/bin/python` |
 | Database | `/home/draftbot/OCDL-Bot/draft.db` (SQLite, WAL) |
 | Backups | `/home/draftbot/OCDL-Bot/backups/`, hourly plus one before each deploy |
-| Deployed commit | `15dbd3a`, which is `main` apart from documentation |
+| Deployed commit | `b8cf7d8`, which is `main` |
 
 **Deploy recipe** (what every deploy in this session used):
 
@@ -53,11 +54,51 @@ automatic post" below for when Cornerstone's falls due.
 * Scheduling channels are set for all three: Hearthflame `1497093133803196577`,
   Cornerstone `1535842881926070382`, Teal `1535843139514933370`.
 * All three are **Ogre Clan Official** (`leagues.official = 1`) and public.
-* Cornerstone has four approved trades waiting to apply (#1, #2, #4, #6) and
-  two rejected (#3, #5). They apply at its next `/postschedule`.
+* Cornerstone has eight approved trades waiting (#1, #2, #4, #6, #8, #9, #10,
+  #11) and three rejected (#3, #5, #7). They no longer apply on a posted week:
+  a moderator puts them through with `/updatetrades`, or they land as each
+  match is reported. None of them is blocked by another.
+* Cornerstone pool A was told its free-transaction window had closed when this
+  was deployed (`pools.grace_ended_at`); pool B's closes 2026-10-15 02:42 UTC
+  and will be announced then.
 * `extensions` and `host_applications` exist and are empty.
 * `current_week` is 0 everywhere: the accidental `/postschedule` on Cornerstone
   was reversed in full, and the fixtures it wrote were deleted.
+
+## When a trade takes effect
+
+This changed on 2026-10-14 and is worth reading before touching trades.
+
+Two things have to be true before an approved trade moves a Pokémon:
+
+1. a moderator approved it, and
+2. its moment has come — **its players finished the week's match**
+   (`results.trades_after_match`, reached from `/reportgame`, `/reportreplay`
+   and the site's `/gameresult`), or a moderator ran **`/updatetrades`**
+   (player, pool or whole league).
+
+`/postschedule` applies nothing now; it lists what is waiting. A substitute's
+transactions still have their own moment, when their window closes.
+
+"The match is over" means somebody has won `best_of // 2 + 1` games, which is
+why `leagues.best_of` exists (3 by default, what the template's result formula
+expects, settable in `/setup` and changeable later in `/edit`). A best-of-one
+league left at three never finishes a match by itself, so its trades only move
+on `/updatetrades` — the safe way round, but worth setting.
+
+**Ordering.** Trades go in number order, and `blocking_trade` holds one back
+while an earlier approved trade that shares a Pokémon is still waiting. That
+is what makes picking up somebody's approved-but-unapplied drop safe
+(`pending_drops`): the pickup is filed and lands after the drop. A second
+claim on the same Pokémon is refused with the trade number that has it
+(`pending_pickups`). `_apply_trade` is now defensive about ownership too — a
+drop only touches the roster of the player giving it up, and a pickup that
+does take something off another roster hands those points back — so budgets
+add up whatever order things arrive in.
+
+`ui.trades_landed` is the one place that finishes trades off: pricing a
+free-agency pickup from the sheet, telling the pool, and rewriting the
+spreadsheet. Everything that applies a trade goes through it.
 
 ## Done since the pause
 
@@ -83,6 +124,19 @@ window must drop one for each it picks up, and that check is in
 `propose_trade`, not the command's pre-flight, so the website is held to it too.
 Subbing in before a draft starts opens no window; there is nothing to rebuild.
 
+**Showdown Voice is tidy and site-managed.** Every `+` rank that had been
+added by hand with `/roomvoice` or `/globalvoice` was adopted into the Voice
+plugin's own record (`config/chat-plugins/ogreclan-voice.json`), so the site
+now looks after all of it and will take it back when a league ends. The next
+sync removed the three holders who are not league players (kirrabanana,
+lilliantherian, ryanxo) and kept the other 19, none of whom lost voice for a
+moment. Rooms stand at Teal 2, Cornerstone 11, Hearthflame 7; `~` and `@`
+ranks were not touched. **ryanxo is a real Teal player** who has never linked
+a Showdown account on draft.ogreclan.com, so the site cannot see them — they
+get voice back by themselves within five minutes of linking. Backups of
+`usergroups.csv`, `chatrooms.json` and the plugin file are stamped
+`20261014-092124`.
+
 **Applying to host** is wired end to end. The bot already refused unapproved
 hosts; the site now shows the application form instead of a dead end, says
 where an existing application stands, lets a refusal be answered by applying
@@ -93,9 +147,10 @@ again, and says plainly that none of it is needed to run a league on Discord.
 
 Cornerstone Season 1 is the only league whose draft has finished. Its grace
 period runs until **2026-10-15 02:42 UTC** (pool B's window is the later of
-the two), so its week 1 posts automatically then, applying the four approved
-trades waiting on it (#1, #2, #4 and #6). Hearthflame and Teal are still
-drafting, so nothing is due for them yet. To stop that happening, set
+the two), so its week 1 posts automatically then. It will **not** apply the
+waiting trades any more — run `/updatetrades` for each pool once the window
+closes, or let each land as its match is reported. Hearthflame and Teal are
+still drafting, so nothing is due for them yet. To stop the posting, set
 `auto_weeks = 0` on the league; to bring it forward, post week 1 by hand.
 
 ## Not started
@@ -117,14 +172,12 @@ drafting, so nothing is due for them yet. To stop that happening, set
 
 ## Open items
 
-* **Two site changes are committed but not deployed.** In
-  `/Users/Larry/Desktop/ogreclan`: `cbebb92` makes Voice follow
-  `leagues.official` rather than only the `AUTO_VOICE_DISCORD_IDS` list, and
-  `161de95` adds the apply-to-host form. That repo has **no git remote**, so
-  both are local only, and deploying the site is the other session's workflow.
-  Until they ship, an Ogre Clan server league made by somebody other than the
-  owner is official and public but gets no Voice, and the apply form is not
-  live.
+* **The site reads a field the bot no longer sends.**
+  `apps/web/src/pages/discord-matches.tsx` reads `applied` from the post-week
+  reply to say "N trades now in effect"; posting a week applies nothing now,
+  so the bot sends `waiting` instead. The field is only read for a message and
+  `undefined` is falsy, so nothing breaks — the line is simply dead until the
+  site is updated (that repo is another session's).
 * **The website's trades skip two of the bot's checks.** `/trade` resolves
   spelling against the tiering list and checks the budget before the admins
   see a trade, but those live in the cog, and `webapi.py` calls
@@ -133,11 +186,12 @@ drafting, so nothing is due for them yet. To stop that happening, set
   need the sheet, so moving them means handing `propose_trade` a price list.
 * **The 🇦/🇧 votes on posted matchups are decoration.** Nothing reads them. If
   they are meant to settle results, they could feed the existing
-  `/matchresult` and `/reportgame` rather than being counted by hand.
-* **`/postschedule` has no confirmation.** It applies trades and advances the
-  week immediately, which is how a week was posted by accident in this
-  session. A confirm button listing what is about to apply would close that,
-  the same shape as `/finishdrafting`.
+  `/matchresult` and `/reportgame` rather than being counted by hand — which
+  now matters more, because a reported match is what lets trades land.
+* **`/postschedule` has no confirmation.** It advances the week immediately,
+  which is how a week was posted by accident in this session. It no longer
+  moves any Pokémon, so an accident is much cheaper to undo than it was, but a
+  confirm button the shape of `/finishdrafting`'s would still close it.
 * **A stale pre-leagues `draft.db` sits in the repo folder on the Mac.** It has
   a `drafts` table and `picks.draft_id` from before the pools refactor, so
   `database.connect()` dies on it with `no such column: pool_id`. Only affects
