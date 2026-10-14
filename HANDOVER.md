@@ -1,7 +1,7 @@
 # Where things stand
 
 Last brought up to date on 2026-10-14, after trades were moved off
-`/postschedule` and onto match reports.
+`/postschedule` and onto match reports, and match reporting was finished.
 Everything below was verified at that point, not assumed. The bot is running
 and healthy, nothing is half-built, and what has not been started is listed
 plainly.
@@ -14,7 +14,7 @@ plainly.
 | Bot | `/home/draftbot/OCDL-Bot`, systemd unit `draftbot`, venv at `.venv/bin/python` |
 | Database | `/home/draftbot/OCDL-Bot/draft.db` (SQLite, WAL) |
 | Backups | `/home/draftbot/OCDL-Bot/backups/`, hourly plus one before each deploy |
-| Deployed commit | `b8cf7d8`, which is `main` |
+| Deployed commit | `ee8f2a3`, which is `main` |
 
 **Deploy recipe** (what every deploy in this session used):
 
@@ -100,6 +100,35 @@ add up whatever order things arrive in.
 free-agency pickup from the sheet, telling the pool, and rewriting the
 spreadsheet. Everything that applies a trade goes through it.
 
+## Reporting a match
+
+`results.py` holds the rules, `cogs/results.py` the commands, `ui.py` the
+messages, and `webapi.py` the same thing for draft.ogreclan.com. Games arrive
+four ways - a Ready battle on the Showdown server, a replay link, a player
+typing their own kills and deaths, or a Champions match reported by hand.
+
+**`results.match_score` is the one answer to "where is this match?"**: each
+player's game wins, how many are needed, who has won it, and whether it was
+awarded. The reply, the result message and the trade rule all read it, and the
+stored `match_reports.winner_id` follows the same rule, so the website shows
+the match's winner rather than whoever happens to be ahead.
+
+* A match is over when somebody has won a majority of its games
+  (`leagues.best_of`). That is when `ui.finish_match` posts the result in the
+  schedule channel and lands both players' trades - once, which is what its
+  `was_decided` argument is for.
+* A **new** game a finished match cannot have is refused (`require_open`),
+  checked before the player's Pokémon are read so the answer is "that match is
+  over" rather than "Garchomp isn't on your roster" after a trade landed.
+  Correcting a game already recorded is always allowed, and `results.reportable`
+  lets a player name what they played with even after it has left their roster.
+* **`/setresult`** awards a match nobody played out (`walkover_id` + `note`):
+  it finishes the match like any other result, trades and all. `clear:True`
+  undoes it.
+* **`/cleargame`** can reopen a finished match. Trades that already took
+  effect stay in effect - the Pokémon have changed hands - and the command
+  says so.
+
 ## Done since the pause
 
 **Automatic week posting** is finished and deployed. Week 1 goes up once every
@@ -160,7 +189,7 @@ still drafting, so nothing is due for them yet. To stop the posting, set
   matches were carried and from when. `apps/web/src/pages/discord-matches.tsx`
   is the view to extend. Another session works in that repo — coordinate.
 * **Kills and deaths written to the league spreadsheet.** Larry's lowest
-  priority. The template has been read and written up in
+  priority, and the last piece of match reporting. The template has been read and written up in
   [`KD-NOTES.md`](KD-NOTES.md): the bot would only ever write into the
   `Matches` tab, in the per-game kills/deaths columns, and every other tab
   keeps itself up to date from it. That note also lists what is worth settling

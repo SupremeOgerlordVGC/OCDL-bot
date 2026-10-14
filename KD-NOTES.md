@@ -70,8 +70,19 @@ automatic path is: tracker → site → the bot's web API → these cells.
   best-of-one league would never show a result, so either those leagues enter
   the same result twice, their template differs, or the formula needs a look.
   Larry's note says VGC is best of 3 and singles usually best of 1.
+
+  The bot now knows the answer for its own purposes: `leagues.best_of`
+  (default 3, set in `/setup`, changeable in `/edit`) decides when a match is
+  over, which is what `results.match_score` reports and what lets the week's
+  trades land. A writer should take the games per match from there rather than
+  assuming three — and a best-of-one league's template still needs checking
+  against that formula before anything is written to it.
 * **`SeasonWeeks`** is a named range and bounds how many weeks the log reads.
   A season longer than it will silently stop appearing in the standings.
+* **A walkover has no games.** `/setresult` awards a match that was never
+  played (`match_reports.walkover_id`, with `note` for the reason), so it has
+  a winner and no kills or deaths at all. Whatever writes to the sheet has to
+  put the result in without inventing game rows.
 * **Who writes the Pokémon names** — they are blank in the template, so
   presumably whoever reports the match. If a player reports by hand and the
   bot writes automatically, the two must not fight over the same six rows.
