@@ -200,3 +200,31 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 **Worth knowing:** errors only ever appear to the person who typed the command. Real events — picks, skips, expired makeup picks, approved trades — are posted publicly. If the bot can't post in a draft channel it **pauses the clock** rather than skipping players, so a permissions mistake never costs anyone their timer.
 ```
+
+---
+
+## Block 11 — what's new
+
+For moderators who already have the blocks above. Everything here is also written into them, so a moderator reading the guide fresh does not need this one.
+
+```
+**🆕 What's new for moderators**
+
+**Turns and picks**
+• **`/skipturn`** — ends the turn of whoever is on the clock, exactly as the timer running out would: makeup owed, timer reduced. Add `penalty:False` to spare their timer, or `player:@Someone` to refuse unless that really is who's up.
+• **`/reopendrafting player:@Someone`** — players can now stop early with `/finishdrafting` once past the minimum; this puts one back on the clock.
+• **`/editpick`** — players may only fix their own pick **until the next pick is made**. Anything older is your job, and you are never too late.
+
+**Queues**
+• **`/myqueue`** run *here in the admin channel* — dropdowns for the draft, pool and player, to read anybody's queue. In a draft channel it only shows your own, so players have no idea this is possible.
+• **`/cancelqueue player:@Someone`** — deletes somebody's queue before it fires. Nothing else changes.
+
+**Trades**
+• **The bot now refuses bad trades before you ever see them:** names that aren't on the tier list, Pokémon the proposer doesn't own, pickups somebody already drafted, and anything either side can't afford. Names are filed in the tier list's own spelling. Whether a trade is *fair* is still your call.
+• **`/edittrade trade_id:3 drops:Garchomp gets:Rotom-Wash`** — fixes a trade that's nearly right instead of making them retype it. It goes back to pending.
+• **`/unapprovetrade trade_id:3`** — takes back an approval, while the trade is still waiting to apply.
+
+**The season**
+• **`/postschedule`** now posts to the league's **scheduling channel**, one match per message, each with 🇦 and 🇧 to vote on. Set with `/schedulechannel` — already done for all three leagues.
+• **`/grantextension number:2`** or **`/grantextension player:@Someone`** — an extension moves a match on by one week, which is the limit. Also `/rejectextension` and `/extensions`.
+```
