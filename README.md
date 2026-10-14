@@ -137,8 +137,12 @@ works normally.
 
 5. Open **OAuth2 → URL Generator**:
    - Scopes: `bot` and `applications.commands`
-   - Bot permissions: **Send Messages**, **Embed Links**, **Read Message History**
-   - Open the generated URL and invite the bot to your server.
+   - Bot permissions: **View Channels**, **Send Messages**, **Embed Links**,
+     **Read Message History** and **Add Reactions** (the 🇦/🇧 on each match
+     `/postschedule` posts). That is permissions integer `85056`.
+   - Open the generated URL and invite the bot to your server. In private
+     channels (the admin channel, draft channels), give the bot's role the same
+     permissions there too.
 
 6. While testing, set `DEV_GUILD_ID` in `.env` to your server's ID. Commands then
    appear immediately instead of taking up to an hour to register globally.
