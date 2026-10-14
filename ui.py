@@ -14,6 +14,7 @@ import re
 import discord
 
 import draft as rules
+import results
 
 log = logging.getLogger("draftbot.ui")
 
@@ -464,6 +465,92 @@ async def grace_window_closed(bot, pool):
         f"one — what changes is that these count towards your allowance.\n"
         f"An approved trade takes effect once you have finished that week's match.")
     rules.record_grace_ended(bot.conn, pool["id"])
+
+
+# --------------------------------------------------------------------------
+# Match results
+# --------------------------------------------------------------------------
+
+
+def score_line(view, players):
+    """The series as it stands: "Larry 2 - 1 Alex · best of 3"."""
+    home, away = players
+    wins = view["wins"]
+    return (f"**{home['display_name']} {wins.get(home['id'], 0)} – "
+            f"{wins.get(away['id'], 0)} {away['display_name']}** · best of "
+            f"{view['needed'] * 2 - 1}")
+
+
+def verdict(view, players):
+    """Where the match stands in one line: won, awarded, or how far to go."""
+    name = {player["id"]: player["display_name"] for player in players}
+    winner = name.get(view["winner_id"], "Someone")
+    if view["decided"]:
+        if view["walkover"]:
+            return (f"🏅 **{winner}** was awarded the match"
+                    + (f" — {view['note']}" if view["note"] else "") + ".")
+        beaten = sorted(view["wins"].values(), reverse=True) + [0, 0]
+        return f"🏅 **{winner}** won the match {beaten[0]}-{beaten[1]}."
+    if not view["played"]:
+        return None
+    left = view["needed"] - max(view["wins"].values())
+    return f"⏳ Not over yet — {left} more game{'' if left == 1 else 's'} wins it."
+
+
+def landed_tail(outcome):
+    """What to add to a reporter's reply when their report ended the match."""
+    if not outcome["decided"]:
+        return ""
+    applied = outcome["applied"]
+    return ("\n\n🔁 That finishes the match"
+            + (f", so {len(applied)} approved trade(s) are now in effect." if applied
+               else ". Nothing was waiting to take effect."))
+
+
+async def match_note(bot, league, players, text):
+    """A note about a match, where the week's matchups were posted.
+
+    Fixtures can pair coaches from different pools, so the league's schedule
+    channel is the one place both players are reading; a league with none set
+    falls back to the first player's pool channel. A site-only league has no
+    channels at all.
+    """
+    if league["site_only"]:
+        return False
+    channel = (bot.get_channel(league["schedule_channel_id"])
+               if league["schedule_channel_id"] else None)
+    if channel is None:
+        pool = rules.get_pool(bot.conn, players[0]["pool_id"])
+        channel = bot.get_channel(pool["channel_id"]) if pool else None
+    return await safe_send(channel, text)
+
+
+async def finish_match(bot, league, week, fixture, players, was_decided):
+    """Everything that follows a match becoming decided: the result is posted
+    where the matchup was, and both players' approved trades take effect.
+
+    Returns {"decided": it has just been decided, "applied": the trades that
+    landed}. Games are reported one at a time, so this runs after each one
+    and does nothing until the match is actually over - and nothing again
+    afterwards, which is what `was_decided` is for. Everything that records a
+    result goes through here: the slash commands, the website and a battle
+    played with Ready.
+    """
+    view = results.match_view(bot.conn, league["id"], week, fixture["match_number"])
+    if was_decided or not view["decided"]:
+        return {"decided": False, "applied": []}
+
+    applied = results.trades_after_match(bot.conn, league, week, fixture["match_number"])
+    await match_note(
+        bot, league, players,
+        f"🏁 **{league['name']} — week {week}, match {fixture['match_number']}**\n"
+        f"{score_line(view, players)}\n{verdict(view, players)}")
+    if applied:
+        await trades_landed(
+            bot, applied,
+            f"**{players[0]['display_name']}** and **{players[1]['display_name']}** "
+            f"have finished their week {week} match")
+    return {"decided": True, "applied": applied}
 
 
 def when_trades_land(league):

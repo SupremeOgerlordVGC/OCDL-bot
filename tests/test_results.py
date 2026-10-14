@@ -57,15 +57,52 @@ class ResultsTests(unittest.TestCase):
         self.assertEqual(game["winner_id"], self.one["id"], "kept from the first report")
         self.assertEqual(view["totals"][self.one["id"]]["Rotom-Wash"], [1, 1])
 
-    def test_the_set_winner_is_whoever_won_more_games(self):
+    def test_the_winner_is_whoever_wins_the_games_it_takes(self):
         record = lambda game, winner: results.record_game(  # noqa: E731
             self.conn, self.league_id, 1, self.match, game, "replay", winner_id=winner, stats={})
-        self.assertEqual(record(1, self.one["id"])["winner_id"], self.one["id"])
+        view = record(1, self.one["id"])
+        self.assertIsNone(view["winner_id"], "1-0 of a best-of-three wins nothing")
+        self.assertEqual(view["wins"][self.one["id"]], 1)
         self.assertIsNone(record(2, self.two["id"])["winner_id"], "level at 1-1")
         self.assertEqual(record(3, self.two["id"])["winner_id"], self.two["id"])
+
         view = results.clear_game(self.conn, self.league_id, 1, self.match, 3)
-        self.assertIsNone(view["winner_id"])
+        self.assertIsNone(view["winner_id"], "clearing a game reopens the match")
         self.assertEqual(len(view["games"]), 2)
+
+    def test_a_game_the_match_cannot_have_is_refused(self):
+        record = lambda game, winner: results.record_game(  # noqa: E731
+            self.conn, self.league_id, 1, self.match, game, "replay", winner_id=winner, stats={})
+        with self.assertRaises(draft.DraftError) as caught:
+            record(4, self.one["id"])
+        self.assertIn("best of 3", str(caught.exception))
+
+        record(1, self.one["id"])
+        record(2, self.one["id"])
+        with self.assertRaises(draft.DraftError) as caught:
+            record(3, self.two["id"])
+        self.assertIn("already over", str(caught.exception))
+
+        # Correcting a game that is already down is always allowed: that is
+        # how a mistake gets fixed.
+        view = record(2, self.two["id"])
+        self.assertIsNone(view["winner_id"], "2-0 corrected to 1-1")
+
+    def test_a_moderator_can_award_a_match_that_was_not_played(self):
+        league = draft.get_league(self.conn, self.league_id)
+        view = results.award_match(self.conn, league, 1, self.match, self.two["id"],
+                                   "opponent never showed")
+        self.assertEqual((view["winner_id"], view["walkover"]), (self.two["id"], True))
+        self.assertEqual(view["note"], "opponent never showed")
+        self.assertTrue(results.match_finished(self.conn, league, 1, self.match))
+        self.assertEqual(
+            self.conn.execute("SELECT winner_id FROM match_reports WHERE league_id = ?",
+                              (self.league_id,)).fetchone()["winner_id"], self.two["id"],
+            "stored, so the website shows it too")
+
+        view = results.award_match(self.conn, league, 1, self.match, None)
+        self.assertEqual((view["winner_id"], view["walkover"]), (None, False))
+        self.assertFalse(results.match_finished(self.conn, league, 1, self.match))
 
     def test_champions_needs_both_players_and_takes_pokepastes(self):
         view = results.ask_champions(self.conn, self.league_id, 1, self.match, self.one["id"])

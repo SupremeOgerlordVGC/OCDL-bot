@@ -15,7 +15,7 @@ requirement.
 4. [Getting a bot token](#getting-a-bot-token)
 5. [Hosting on a Hetzner VPS](#hosting-on-a-hetzner-vps)
 6. [Backups](#backups)
-7. [Command reference](#command-reference) · to paste into Discord: [players](PLAYERS.md) · [moderators](MODERATORS.md)
+7. [Command reference](#command-reference) — setting up, drafting, trades, the season, [reporting results](#reporting-results) · to paste into Discord: [players](PLAYERS.md) · [moderators](MODERATORS.md)
 
 **Picking the work up?** [`HANDOVER.md`](HANDOVER.md) has the live system's state, what is half-built and why, and the open items.
 8. [Documents](#documents)
@@ -76,6 +76,8 @@ simple tiering sheet, or with the full league template — see
 | `cogs/admin.py` | `/setup` `/edit` `/draft` `/canceldraft` `/archive` `/draft-moderator` `/postschedule` `/sync` `/inspectsheet` `/backup` |
 | `cogs/drafting.py` | `/pick` `/queuepick` `/makeuppick` `/editpick` `/status` `/progress` `/roster` |
 | `cogs/extras.py` | `/trade` `/approvetrade` `/rejecttrade` `/trades` `/updatetrades` `/subrequest` `/substitute` `/search` `/available` |
+| `results.py` | Match results: each game's winner, kills and deaths, and when a match counts as over. |
+| `cogs/results.py` | `/reportgame` `/reportreplay` `/champions` `/pokepaste` `/matchresult` `/setresult` `/cleargame` |
 | `tests/` | Tests for the rules, the sheet mapping and the Discord layer. |
 
 The database keeps leagues and pools separate, and a SQL view called
@@ -504,6 +506,22 @@ Trades are a full-season feature; a draft-only league refuses them.
 | `/sync` | Moderator | Rewrites the coach list and every roster block from the database. |
 | `/inspectsheet` | Moderator | Reports the document's structure without changing anything. |
 | `/backup` | Moderator | Saves a timestamped copy of the database. |
+
+### Reporting results
+
+A match is played, then reported: each game's winner and each Pokémon's kills and deaths. Players report their own side, a replay or a Ready battle fills in both, and staff fix mistakes. The same is offered on draft.ogreclan.com, through the same rules.
+
+| Command | Who | What it does |
+|---|---|---|
+| `/reportgame week game kd [winner] [name]` | Either player | Your own Pokémon's kills and deaths for one game, like `Garchomp 2-0, Rotom-Wash 1-1`, and who won it. |
+| `/reportreplay week game replay [name]` | Either player | Reads both sides from a replay on replay.ogreclan.com, including the winner. |
+| `/champions week [agree] [name]` | Either player | Agree to play the match on Pokémon Champions instead. It is on once both have agreed, and then each side reports by hand. |
+| `/pokepaste week url [name]` | Either player | Your team for a match played on Champions. |
+| `/matchresult week [player] [name]` | Anyone | What has been reported for a match, with the series score. |
+| `/setresult week player [reason] [clear]` | Moderator | Awards a match that was not played out — a forfeit, a no-show, a result settled elsewhere. `clear:True` takes the award back. |
+| `/cleargame week game player [name]` | Moderator | Removes a game, so it can be reported again. It may reopen a finished match; trades that have already taken effect stay in effect. |
+
+**A match is over when somebody has won a majority of its games** — two of a best-of-three, one of a best-of-one, set per league with `best_of`. That is the moment the result is posted in the schedule channel and both players' approved trades take effect, so the bot refuses a game a finished match cannot have (there is no game 4 in a best-of-three, and nothing after 2-0) while always allowing a game already recorded to be corrected. A correction after a trade has landed still works: what a player played with stays readable in the report even once it has left their roster.
 
 ### Ogre Clan Official leagues
 

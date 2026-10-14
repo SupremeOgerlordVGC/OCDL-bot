@@ -344,8 +344,15 @@ CREATE TABLE IF NOT EXISTS match_reports (
     champions              INTEGER NOT NULL DEFAULT 0,
     -- the player IDs (comma separated) who have asked for Champions
     champions_requested_by TEXT NOT NULL DEFAULT '',
-    -- whoever has won more games (a player ID), or NULL while it's level
+    -- who won the match (a player ID), or NULL while it is undecided. A
+    -- match is decided when somebody has won a majority of its games, or
+    -- when a moderator awards it.
     winner_id              INTEGER,
+    -- set when a moderator awarded the match rather than it being played:
+    -- a forfeit, a no-show, or a result settled off the bot. It wins over
+    -- whatever the games say, and `note` is the reason players are shown.
+    walkover_id            INTEGER,
+    note                   TEXT,
     updated_at             TEXT NOT NULL,
     UNIQUE (league_id, week, match_number)
 );
@@ -429,6 +436,8 @@ FROM pools JOIN leagues ON leagues.id = pools.league_id;
 # every connect and is safe to run repeatedly.
 ADDED_COLUMNS = [
     ("leagues", "best_of", "INTEGER NOT NULL DEFAULT 3"),
+    ("match_reports", "walkover_id", "INTEGER"),
+    ("match_reports", "note", "TEXT"),
     ("pools", "grace_ended_at", "TEXT"),
     ("players", "sub_window_until", "REAL"),
     ("trades", "apply_at", "REAL"),

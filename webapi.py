@@ -55,7 +55,7 @@ class WebApi:
             ("/guilds", self.guilds), ("/setup", self.setup), ("/start", self.start_draft),
             ("/postweek", self.post_week), ("/trade", self.trade), ("/approvetrade", self.approve_trade),
             ("/rejecttrade", self.reject_trade), ("/gameresult", self.game_result), ("/champions", self.champions),
-            ("/pokepaste", self.pokepaste), ("/cleargame", self.clear_game), ("/prices", self.prices), ("/tierlist", self.tierlist),
+            ("/pokepaste", self.pokepaste), ("/cleargame", self.clear_game), ("/setresult", self.set_result), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
             ("/hosts/apply", self.apply_host), ("/hosts/status", self.host_status),
         ):
@@ -436,6 +436,7 @@ class WebApi:
         """A game's result from the site: a battle played with Ready or a replay (both sides), or a player's
         own Pokémon (source 'manual', only that player's side). stats: [{user_id, pokemon, kills, deaths}]"""
         league, week, fixture, players = self.match_of(body)
+        was_decided = results.match_finished(self.bot.conn, league, week, fixture["match_number"])
         by_discord = {str(p["user_id"]): p for p in players}
         source = str(body.get("source") or "manual")
         reporter = by_discord.get(str(body.get("user_id"))) if body.get("user_id") else None
@@ -446,7 +447,8 @@ class WebApi:
             player = by_discord.get(str(entry.get("user_id")))
             if player is None:
                 continue
-            roster = results.roster_of(self.bot.conn, player)
+            report = results.get_report(self.bot.conn, league["id"], week, fixture["match_number"])
+            roster = results.reportable(self.bot.conn, player, report)
             name = (results.parse_kd(f"{entry['pokemon']} 0-0", roster)[0][0] if source == "manual"
                     else results.roster_name(entry["pokemon"], roster))
             stats.setdefault(player["id"], []).append((name, int(entry["kills"]), int(entry["deaths"])))
@@ -454,15 +456,15 @@ class WebApi:
         view = results.record_game(self.bot.conn, league["id"], week, fixture["match_number"], int(body["game"]),
                                    source, winner_id=winner["id"] if winner else None, stats=stats,
                                    replay=body.get("replay"), only_player=reporter["id"] if source == "manual" else None)
-        # Finishing the match is what puts both players' approved trades into effect.
-        applied = results.trades_after_match(self.bot.conn, league, week, fixture["match_number"])
-        if applied:
-            await ui.trades_landed(
-                self.bot, applied,
-                f"**{players[0]['display_name']}** and **{players[1]['display_name']}** have "
-                f"finished their week {week} match")
+        # A finished match is posted where the matchup was and puts both
+        # players' approved trades into effect - the same work the slash
+        # command does, so it is the same code.
+        outcome = await ui.finish_match(self.bot, league, week, fixture, players, was_decided)
+        view = results.match_view(self.bot.conn, league["id"], week, fixture["match_number"])
         return {"match": fixture["match_number"], "winner_id": view["winner_id"],
-                "games": len(view["games"]), "trades_applied": len(applied)}
+                "wins": {str(seat): won for seat, won in view["wins"].items()},
+                "decided": view["decided"], "games": len(view["games"]),
+                "trades_applied": len(outcome["applied"])}
 
     async def champions(self, body):
         """A player agrees (or not) to play their match on Pokémon Champions"""
@@ -486,6 +488,21 @@ class WebApi:
             raise rules.DraftError("Only the match's players give a Pokepaste.")
         results.set_pokepaste(self.bot.conn, league["id"], week, fixture["match_number"], player["id"], body["url"])
         return {}
+
+    async def set_result(self, body):
+        """Staff: award a match that was not played out - a forfeit, a no-show, or a result
+        settled elsewhere. winner_user_id of nothing takes the award back."""
+        league, week, fixture, players = self.match_of(body)
+        was_decided = results.match_finished(self.bot.conn, league, week, fixture["match_number"])
+        winner = next((p for p in players
+                       if str(p["user_id"]) == str(body.get("winner_user_id") or "")), None)
+        if body.get("winner_user_id") and winner is None:
+            raise rules.DraftError("The winner has to be one of the match's two players.")
+        view = results.award_match(self.bot.conn, league, week, fixture["match_number"],
+                                   winner["id"] if winner else None, body.get("reason"))
+        await ui.finish_match(self.bot, league, week, fixture, players, was_decided)
+        return {"match": fixture["match_number"], "winner_id": view["winner_id"],
+                "walkover": view["walkover"], "note": view["note"]}
 
     async def clear_game(self, body):
         """Staff: remove a game's result"""

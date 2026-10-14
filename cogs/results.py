@@ -42,7 +42,7 @@ async def read_replay(replay, discord_ids):
 def describe(conn, league_id, view, players):
     """A match's report, for a reply"""
     name = {p["id"]: p["display_name"] for p in players}
-    lines = []
+    lines = [ui.score_line(view, players)]
     if view["champions"]:
         lines.append("🏆 Played on **Pokémon Champions**")
     for game in view["games"]:
@@ -52,9 +52,12 @@ def describe(conn, league_id, view, players):
             lines.append(f"• {name.get(player_id, 'Someone')}: " + ", ".join(f"{m} {k}-{d}" for m, k, d in mons))
     for player_id, url in view["pokepastes"].items():
         lines.append(f"📋 {name.get(player_id, 'Someone')}'s Pokepaste: {url}")
-    if view["winner_id"]:
-        lines.append(f"🏅 **{name.get(view['winner_id'], 'Someone')}** has won more games.")
-    return "\n".join(lines) or "Nothing reported yet."
+    standing = ui.verdict(view, players)
+    if standing:
+        lines.append(standing)
+    elif not view["games"]:
+        lines.append("Nothing reported yet.")
+    return "\n".join(lines)
 
 
 class ResultsCog(commands.Cog):
@@ -76,28 +79,6 @@ class ResultsCog(commands.Cog):
                    rules.get_player_by_id(self.bot.conn, fixture["away_player_id"])]
         return league, player, fixture, players
 
-    async def land_trades(self, league, week, fixture, players):
-        """A finished match puts both players' approved trades into effect.
-
-        Reported game by game, so this runs after each one and does nothing
-        until the match is actually over. Returns a line for the reply.
-        """
-        applied = results.trades_after_match(self.bot.conn, league, week, fixture["match_number"])
-        if not applied:
-            return ""
-        because = (f"**{players[0]['display_name']}** and **{players[1]['display_name']}** "
-                   f"have finished their week {week} match")
-        await ui.trades_landed(self.bot, applied, because)
-        return (f"\n\n🔁 That finishes the match, so {len(applied)} approved trade(s) are "
-                f"now in effect.")
-
-    async def announce(self, league, players, text):
-        """A short note in the players' pool channel (a league on Discord)"""
-        if league["site_only"]:
-            return
-        pool = rules.get_pool(self.bot.conn, players[0]["pool_id"])
-        await ui.safe_send(self.bot.get_channel(pool["channel_id"]), text)
-
     @app_commands.command(name="reportgame", description="Report a game of your match: your Pokémon's kills and deaths.")
     @app_commands.describe(week="The week of the match", game="Which game (1, 2, 3...)",
                            kd="Your Pokémon's kills-deaths, like: Garchomp 2-0, Rotom-Wash 1-1",
@@ -106,7 +87,10 @@ class ResultsCog(commands.Cog):
     async def reportgame(self, interaction: discord.Interaction, week: int, game: int, kd: str,
                          winner: discord.Member = None, name: str = None):
         league, player, fixture, players = self.your_match(interaction, week, name)
-        stats = results.parse_kd(kd, results.roster_of(self.bot.conn, player))
+        report = results.get_report(self.bot.conn, league["id"], week, fixture["match_number"])
+        was_decided = results.match_finished(self.bot.conn, league, week, fixture["match_number"])
+        results.require_open(self.bot.conn, league, week, fixture["match_number"], game)
+        stats = results.parse_kd(kd, results.reportable(self.bot.conn, player, report))
         winner_id = None
         if winner is not None:
             winner_player = next((p for p in players if p["user_id"] == winner.id), None)
@@ -115,7 +99,8 @@ class ResultsCog(commands.Cog):
             winner_id = winner_player["id"]
         view = results.record_game(self.bot.conn, league["id"], week, fixture["match_number"], game, "manual",
                                    winner_id=winner_id, stats={player["id"]: stats}, only_player=player["id"])
-        landed = await self.land_trades(league, week, fixture, players)
+        landed = ui.landed_tail(
+            await ui.finish_match(self.bot, league, week, fixture, players, was_decided))
         await interaction.response.send_message(
             f"✅ Game {game} of your week {week} match is reported.\n\n"
             f"{describe(self.bot.conn, league['id'], view, players)}{landed}",
@@ -127,10 +112,13 @@ class ResultsCog(commands.Cog):
                            name="The league's name, if you're not in its draft channel")
     async def reportreplay(self, interaction: discord.Interaction, week: int, game: int, replay: str, name: str = None):
         league, player, fixture, players = self.your_match(interaction, week, name)
+        was_decided = results.match_finished(self.bot.conn, league, week, fixture["match_number"])
+        results.require_open(self.bot.conn, league, week, fixture["match_number"], game)
         await interaction.response.defer(ephemeral=True)
         body = await read_replay(replay, [str(p["user_id"]) for p in players])
         view = record_replay(self.bot.conn, league["id"], week, fixture["match_number"], game, players, body)
-        landed = await self.land_trades(league, week, fixture, players)
+        landed = ui.landed_tail(
+            await ui.finish_match(self.bot, league, week, fixture, players, was_decided))
         await interaction.followup.send(
             f"✅ Game {game} of your week {week} match is reported from its replay.\n\n"
             f"{describe(self.bot.conn, league['id'], view, players)}{landed}", ephemeral=True)
@@ -146,7 +134,7 @@ class ResultsCog(commands.Cog):
             text = (f"🏆 Both players agreed: the week {week} match between **{players[0]['display_name']}** and "
                     f"**{players[1]['display_name']}** is played on Pokémon Champions. Each of you: `/pokepaste` your "
                     f"team and `/reportgame` your Pokémon's kills and deaths for each game.")
-            await self.announce(league, players, text)
+            await ui.match_note(self.bot, league, players, text)
         elif agree:
             text = f"You've asked to play on Pokémon Champions. It's on once {opponent['display_name']} agrees too (`/champions week:{week}`)."
         else:
@@ -171,6 +159,39 @@ class ResultsCog(commands.Cog):
             f"**{league['name']} — week {week}: {players[0]['display_name']} vs {players[1]['display_name']}**\n"
             f"{describe(self.bot.conn, league['id'], view, players)}", ephemeral=True)
 
+    @app_commands.command(
+        name="setresult",
+        description="Moderator only: award a match that was not played out.")
+    @app_commands.describe(week="The week", player="Who gets the win",
+                           reason="Why — both players are shown this",
+                           clear="True takes an awarded result back, leaving the games to decide",
+                           name="The league's name, if this isn't its draft channel")
+    async def setresult(self, interaction: discord.Interaction, week: int,
+                        player: discord.Member, reason: str = None,
+                        clear: bool = False, name: str = None):
+        """A forfeit, a no-show, or a match settled away from the bot. It is
+        the same decision the games would have made, so it finishes the match:
+        the result is posted and the week's trades take effect."""
+        ui.require_moderator(self.bot, interaction)
+        league, seat, fixture, players = self.your_match(interaction, week, name, player.id)
+        was_decided = results.match_finished(self.bot.conn, league, week, fixture["match_number"])
+
+        view = results.award_match(self.bot.conn, league, week, fixture["match_number"],
+                                   None if clear else seat["id"], reason)
+        landed = ui.landed_tail(
+            await ui.finish_match(self.bot, league, week, fixture, players, was_decided))
+        if clear:
+            await interaction.response.send_message(
+                f"↩️ The awarded result for that week {week} match is taken back. "
+                f"It now stands as reported.\n\n"
+                f"{describe(self.bot.conn, league['id'], view, players)}", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"🏅 Week {week}'s match is awarded to **{seat['display_name']}**"
+            + (f" — {reason}" if reason else "") + ".\n\n"
+            + describe(self.bot.conn, league["id"], view, players) + landed,
+            ephemeral=True)
+
     @app_commands.command(name="cleargame", description="Moderator only: remove a game's reported result.")
     @app_commands.describe(week="The week", game="Which game", player="One of the match's players",
                            name="The league's name, if this isn't its draft channel")
@@ -178,8 +199,13 @@ class ResultsCog(commands.Cog):
                         name: str = None):
         ui.require_moderator(self.bot, interaction)
         league, _, fixture, players = self.your_match(interaction, week, name, player.id)
-        results.clear_game(self.bot.conn, league["id"], week, fixture["match_number"], game)
-        await interaction.response.send_message(f"🧹 Game {game} of that week {week} match is cleared.", ephemeral=True)
+        view = results.clear_game(self.bot.conn, league["id"], week, fixture["match_number"], game)
+        note = ("" if view["decided"] else
+                " The match is open again — any trades that took effect when it finished "
+                "stay in effect, since the Pokémon have changed hands.")
+        await interaction.response.send_message(
+            f"🧹 Game {game} of that week {week} match is cleared.{note}\n\n"
+            f"{describe(self.bot.conn, league['id'], view, players)}", ephemeral=True)
 
 
 def record_replay(conn, league_id, week, match_number, game, players, body):

@@ -201,3 +201,25 @@ Use `/search` to see both prices. Some Pokémon have no Tera price at all — th
 
 **The end of the free-transaction window is now announced** in your draft channel, so you know when trades start counting towards your limit.
 ```
+
+---
+
+## Block 9 — reporting your match
+
+```
+**📊 Reporting your match**
+
+A match is **best of three** unless your league says otherwise, and it is over when somebody has won two games.
+
+**`/reportreplay week:1 game:1 replay:...`** — the easy way. A replay from replay.ogreclan.com fills in **both** sides' kills and deaths and the winner. Nobody has to agree it.
+
+**`/reportgame week:1 game:1 kd:Garchomp 2-0, Rotom-Wash 1-1 winner:@Alex`** — by hand. You report **your own** Pokémon: kills first, deaths second. Either player can say who won the game.
+• One command per game. `/reportgame week:1 game:2 ...` for the next one.
+• Spelling is matched against your roster, so `rotom-wash` is fine.
+
+**`/matchresult week:1`** — the score so far, every game, and both sides' kills and deaths.
+
+**When the match ends**, the result is posted in the scheduling channel and **both players' approved trades take effect**. After that the bot won't take a new game — there is no game 4 in a best of three — but a moderator can undo one with `/cleargame` if something went in wrongly. Correcting a game you already reported always works, even after a trade has changed your team.
+
+**Playing on Pokémon Champions instead?** `/champions week:1` — it is on once you both agree. Then `/pokepaste week:1 url:...` for your team, and each of you reports your own kills and deaths with `/reportgame`.
+```

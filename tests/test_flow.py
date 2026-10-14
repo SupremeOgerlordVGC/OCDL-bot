@@ -23,6 +23,7 @@ from types import SimpleNamespace   # noqa: E402
 import config       # noqa: E402
 import database     # noqa: E402
 import draft as rules   # noqa: E402
+import results as results_module    # noqa: E402
 import timers       # noqa: E402
 import ui           # noqa: E402
 from cogs.admin import AdminCog         # noqa: E402
@@ -2151,7 +2152,10 @@ class ReportedMatchTradeTests(unittest.IsolatedAsyncioTestCase):
         from cogs.results import ResultsCog
         self.conn = database.connect(":memory:")
         self.channel = FakeChannel(9700)
+        self.schedule = FakeChannel(9701)
         self.bot = FakeBot(self.conn, self.channel)
+        channels = {9700: self.channel, 9701: self.schedule}
+        self.bot.get_channel = channels.get
         self.pool_id = make_pool(self.conn, 9700, [(11, "Larry"), (22, "Alex")],
                                  max_picks=1, name="Reported")
         pool = rules.get_pool(self.conn, self.pool_id)
@@ -2159,6 +2163,7 @@ class ReportedMatchTradeTests(unittest.IsolatedAsyncioTestCase):
         rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id), 11, 1, "Garchomp", 12)
         rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id), 22, 1, "Rotom-Wash", 8)
         self.league_id = pool["league_id"]
+        rules.set_schedule_channel(self.conn, self.league_id, 9701)
         rules.generate_fixtures(self.conn, self.league_id, weeks=2)
         live = rules.get_pool(self.conn, self.pool_id)
         rules.propose_trade(self.conn, live, 11, ["Garchomp"], ["Heatran"])
@@ -2170,7 +2175,11 @@ class ReportedMatchTradeTests(unittest.IsolatedAsyncioTestCase):
         self.bot.timers.cancel_all()
 
     def player(self, user_id, name):
-        interaction = FakeInteraction(self.bot, 9700, user_id, name)
+        return FakeInteraction(self.bot, 9700, user_id, name)
+
+    def moderator(self):
+        interaction = FakeInteraction(self.bot, 9700, 99, "Mod")
+        interaction.user.guild_permissions = SimpleNamespace(administrator=True)
         return interaction
 
     async def report(self, user_id, name, game, kd, winner):
@@ -2185,20 +2194,69 @@ class ReportedMatchTradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("now in effect", first.text, "one game of three")
         self.assertIsNotNone(rules.find_owner(self.conn, self.pool_id, "garchomp"))
 
+        self.assertIn("best of 3", first.text)
+        self.assertIn("⏳ Not over yet — 1 more game wins it", first.text)
+
         second = await self.report(11, "Larry", 2, "Garchomp 1-0", (11, "Larry"))
         self.assertIn("That finishes the match", second.text)
         self.assertIn("1 approved trade(s) are now in effect", second.text)
         self.assertIsNone(rules.find_owner(self.conn, self.pool_id, "garchomp"))
         self.assertIsNotNone(rules.find_owner(self.conn, self.pool_id, "heatran"))
+
+        # The result goes where the matchups were posted; the trade goes to
+        # the pool, which is whose rosters changed.
+        self.assertIn("🏁", self.schedule.text)
+        # Home and away come out of the random round-robin either way round.
+        self.assertRegex(self.schedule.text, r"(Larry 2 – 0 Alex|Alex 0 – 2 Larry)")
+        self.assertIn("won the match 2-0", self.schedule.text)
         self.assertIn("have finished their week 1 match", self.channel.text)
 
-    async def test_reporting_more_games_does_not_apply_it_again(self):
+    async def test_the_result_is_only_announced_once(self):
         await self.report(11, "Larry", 1, "Garchomp 2-0", (11, "Larry"))
         await self.report(11, "Larry", 2, "Garchomp 1-0", (11, "Larry"))
-        third = await self.report(22, "Alex", 3, "Rotom-Wash 1-1", (22, "Alex"))
-        self.assertNotIn("now in effect", third.text)
+        self.assertEqual(self.schedule.text.count("🏁"), 1)
+        await self.report(11, "Heatran", 2, "Heatran 1-0", (11, "Larry"))
+        self.assertEqual(self.schedule.text.count("🏁"), 1, "a correction says it again")
+
+    async def test_a_moderator_can_award_a_match_nobody_played(self):
+        interaction = self.moderator()
+        await self.cog.setresult.callback(self.cog, interaction, week=1,
+                                          player=FakeMember(22, "Alex"),
+                                          reason="Larry never showed")
+        self.assertIn("awarded to **Alex**", interaction.text)
+        self.assertIn("1 approved trade(s) are now in effect", interaction.text)
+        self.assertIn("was awarded the match — Larry never showed", self.schedule.text)
+        self.assertIsNone(rules.find_owner(self.conn, self.pool_id, "garchomp"),
+                          "a decided match lands the trades, however it was decided")
+
+        taken_back = self.moderator()
+        await self.cog.setresult.callback(self.cog, taken_back, week=1,
+                                          player=FakeMember(22, "Alex"), clear=True)
+        self.assertIn("taken back", taken_back.text)
+        league = rules.get_league(self.conn, self.league_id)
+        self.assertFalse(results_module.match_finished(self.conn, league, 1, 1))
+
+    async def test_an_awarded_match_refuses_more_games(self):
+        await self.cog.setresult.callback(self.cog, self.moderator(), week=1,
+                                          player=FakeMember(22, "Alex"))
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.report(11, "Larry", 1, "Garchomp 2-0", (11, "Larry"))
+        self.assertIn("already over", str(caught.exception))
+
+    async def test_correcting_a_game_afterwards_does_not_apply_it_again(self):
+        await self.report(11, "Larry", 1, "Garchomp 2-0", (11, "Larry"))
+        await self.report(11, "Larry", 2, "Garchomp 1-0", (11, "Larry"))
+        again = await self.report(11, "Larry", 2, "Garchomp 1-1", (11, "Larry"))
+        self.assertNotIn("now in effect", again.text)
         self.assertEqual(
             [t["trade_number"] for t in rules.waiting_trades(self.conn, self.league_id)], [])
+
+    async def test_a_game_after_the_match_is_over_is_refused(self):
+        await self.report(11, "Larry", 1, "Garchomp 2-0", (11, "Larry"))
+        await self.report(11, "Larry", 2, "Garchomp 1-0", (11, "Larry"))
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.report(22, "Alex", 3, "Rotom-Wash 1-1", (22, "Alex"))
+        self.assertIn("already over", str(caught.exception))
 
 
 class GraceWindowTests(unittest.IsolatedAsyncioTestCase):

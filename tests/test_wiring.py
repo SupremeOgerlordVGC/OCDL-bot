@@ -126,6 +126,7 @@ class CommandOptionTests(unittest.TestCase):
         "pokepaste": {"week", "url", "name"},
         "matchresult": {"week", "player", "name"},
         "cleargame": {"week", "game", "player", "name"},
+        "setresult": {"week", "player", "reason", "clear", "name"},
         "removeplayer": {"player", "keep_roster"},
         "setskips": {"player", "skips", "timer"},
         "skipturn": {"player", "penalty"},

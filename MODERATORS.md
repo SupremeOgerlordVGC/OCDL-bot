@@ -193,7 +193,27 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 ---
 
-## Block 10 — ending and housekeeping
+## Block 10 — results
+
+```
+**📊 Results**
+
+Players report their own matches: `/reportreplay` (a replay fills in both sides), `/reportgame` (their own Pokémon's kills and deaths), `/champions` and `/pokepaste` for a match played on Pokémon Champions. The site offers the same.
+
+**A match is over when somebody has won a majority of its games** — two of three by default, set per league with `best_of` in `/setup` or `/edit`. That moment matters: the result is posted in the scheduling channel, and **both players' approved trades take effect**.
+
+**`/matchresult week:1 player:@Someone`** — everything reported for that match, with the score.
+
+**`/setresult week:1 player:@Alex reason:opponent never showed`** — awards a match that was not played out: a forfeit, a no-show, a result settled elsewhere. It finishes the match like any other result, so the trades land too. `clear:True` takes the award back and leaves whatever the games say.
+
+**`/cleargame week:1 game:2 player:@Someone`** — removes a game so it can be reported again. If that reopens a finished match, trades that already took effect **stay** in effect: the Pokémon have changed hands, so put them back with a fresh `/trade` if that is wrong.
+
+The bot refuses a game a finished match cannot have — no game 4 in a best of three, nothing after 2-0 — but a game already recorded can always be corrected, which is how players fix a mistake. That still works after a trade has changed their team.
+```
+
+---
+
+## Block 11 — ending and housekeeping
 
 ```
 **🗃️ Finishing up**
@@ -209,12 +229,12 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 ---
 
-## Block 11 — what's new
+## Block 12 — what's new
 
-For moderators who already have the blocks above. Everything here is also written into them, so a moderator reading the guide fresh does not need this one.
+For moderators who already have the blocks above. Everything here is also written into them, so a moderator reading the guide fresh does not need this one. It is two messages.
 
 ```
-**🆕 What's new for moderators — trades now land on match reports**
+**🆕 What's new (1/2) — trades land on match reports**
 
 **When an approved trade actually moves**
 • Not when a week is posted any more. Two things have to be true: **you approved it**, and **its players have finished that week's match** — reported with `/reportgame`, `/reportreplay` or on the site. The team that starts a match finishes it.
@@ -225,8 +245,15 @@ For moderators who already have the blocks above. Everything here is also writte
 **Dropped Pokémon can be picked up straight away**
 • A coach may now pick up something another coach has an **approved drop** for, even though it is still on their roster. The pickup is filed and lands **after** that drop does, automatically and in the right order. Nobody has to use a placeholder and wait any more.
 • Two coaches cannot both claim it: once one approved trade is taking it, the next is refused with the trade number that has it.
+```
 
-**Two smaller things**
+```
+**🆕 What's new (2/2) — finishing a match**
+
+• **A match is over when somebody has won a majority of its games** — two of three by default. **`/setup best_of:1`** or **`/edit best_of:1`** for a league that plays single games; `/edit` takes it mid-season. A best-of-one league left at three never finishes by itself, so its trades would only move on `/updatetrades`.
+• **The result is posted in the scheduling channel** when a match ends, with the score, and that is when the trades land.
+• **`/setresult week:1 player:@Alex reason:no-show`** — awards a match nobody played out. It finishes the match like a real result, trades and all; `clear:True` undoes it.
+• **`/cleargame`** now shows what is left and warns you if it reopened a finished match. Trades that already landed stay landed — the Pokémon have changed hands.
+• The bot refuses a game a finished match cannot have (no game 4 in a best of three), but a game already recorded can always be corrected.
 • **The end of a pool's free-transaction window is now announced** in its channel, saying what changes. It used to pass in silence.
-• **`/setup best_of:1`** (or `/edit best_of:1`) — games in a match, used to tell when a match is finished. **Three** unless you say otherwise, which is what the league template expects. A best-of-one league needs this set, or its trades will only move on `/updatetrades`.
 ```

@@ -260,11 +260,14 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
                                        stats=[{"user_id": "11", "pokemon": "Garchomp", "kills": 2, "deaths": 0},
                                               {"user_id": "22", "pokemon": "rotom-wash", "kills": 0, "deaths": 1}])
         self.assertEqual(status, 200, body)
+        self.assertEqual((body["wins"], body["decided"]), ({"1": 1}, False),
+                         "the series, as the site shows it")
         view = results.match_view(self.conn, self.league_id, 1, 1)
         larry = rules.get_player(self.conn, self.pool_id, 11)
         alex = rules.get_player(self.conn, self.pool_id, 22)
         self.assertEqual(view["games"][0]["stats"][alex["id"]], [("Rotom-Wash", 0, 1)], "the roster's spelling")
-        self.assertEqual(view["winner_id"], larry["id"])
+        self.assertEqual(view["wins"], {larry["id"]: 1})
+        self.assertIsNone(view["winner_id"], "1-0 of a best-of-three decides nothing")
 
         # a player's own side by hand: someone else's Pokémon are ignored
         status, body = await self.call("/gameresult", week=1, user_id="22", game=2, source="manual", winner_user_id="22",
@@ -280,6 +283,32 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body["champions"])
         status, body = await self.call("/pokepaste", week=1, user_id="11", url="https://pokepast.es/abc")
         self.assertEqual(status, 200, body)
+
+    async def test_staff_can_award_a_match_from_the_site(self):
+        import results
+        await self.start_draft()
+        await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
+        await self.call("/pick", user_id="22", round=1, pokemon="Rotom-Wash")
+        rules.generate_fixtures(self.conn, self.league_id, weeks=1)
+        alex = rules.get_player(self.conn, self.pool_id, 22)
+
+        status, body = await self.call("/setresult", week=1, match=1, winner_user_id="22",
+                                       reason="Larry never showed")
+        self.assertEqual(status, 200, body)
+        self.assertEqual((body["winner_id"], body["walkover"], body["note"]),
+                         (alex["id"], True, "Larry never showed"))
+        self.assertIn("was awarded the match — Larry never showed", self.channel.text)
+        league = rules.get_league(self.conn, self.league_id)
+        self.assertTrue(results.match_finished(self.conn, league, 1, 1))
+
+        status, body = await self.call("/setresult", week=1, match=1)
+        self.assertEqual((status, body["winner_id"], body["walkover"]), (200, None, False),
+                         "no winner given takes the award back")
+        self.assertFalse(results.match_finished(self.conn, league, 1, 1))
+
+        status, body = await self.call("/setresult", week=1, match=1, winner_user_id="77")
+        self.assertEqual(status, 400)
+        self.assertIn("one of the match's two players", body["error"])
 
     async def test_the_tier_list_shows_everything_and_who_has_it(self):
         await self.start_draft()

@@ -86,6 +86,27 @@ def roster_of(conn, player):
         "SELECT pokemon FROM rosters WHERE player_id = ? ORDER BY id", (player["id"],))]
 
 
+def reportable(conn, player, report):
+    """What a player may report kills and deaths for in a match: their roster
+    as it is now, plus anything already recorded for them in this match.
+
+    Finishing a match is what puts their approved trades into effect, so by
+    the time somebody corrects a game their team may have changed under
+    them. What they played with is still written in the report, so it counts.
+    """
+    names = roster_of(conn, player)
+    if report is None:
+        return names
+    for row in conn.execute(
+            "SELECT DISTINCT game_stats.pokemon AS pokemon FROM game_stats "
+            "JOIN game_results ON game_results.id = game_stats.result_id "
+            "WHERE game_results.report_id = ? AND game_stats.player_id = ?",
+            (report["id"], player["id"])):
+        if row["pokemon"] not in names:
+            names.append(row["pokemon"])
+    return names
+
+
 def trades_after_match(conn, league, week, match_number):
     """Both players' approved trades, put into effect because their match is over.
 
@@ -108,14 +129,47 @@ def trades_after_match(conn, league, week, match_number):
                               player_ids=seats)
 
 
+def require_open(conn, league, week, match_number, game):
+    """Refuse a report that a finished match cannot have.
+
+    Correcting a game that is already down is always allowed - that is how a
+    mistake gets fixed - so only a new game is refused. Checked before a
+    player's Pokémon are even read, because "that match is already over" is
+    the answer they need, not "Garchomp isn't on your roster" after a trade
+    took effect.
+    """
+    report = get_report(conn, league["id"], week, match_number)
+    if report is None:
+        return
+    recorded = conn.execute(
+        "SELECT 1 FROM game_results WHERE report_id = ? AND game = ?",
+        (report["id"], game)).fetchone()
+    if recorded is None and match_score(conn, league, week, match_number)["decided"]:
+        raise rules.DraftError(
+            f"❌ That match is already over, so there is no game {game} to "
+            f"report. A moderator can undo a game with `/cleargame`, or take "
+            f"back an awarded result with `/setresult`.")
+
+
 def record_game(conn, league_id, week, match_number, game, source, winner_id=None, stats=None,
                 replay=None, only_player=None):
     """Record (or correct) one game. `stats` is {player_id: [(pokemon, kills, deaths), ...]}: with
-    only_player, just that player's side is replaced (a player reporting their own Pokémon)."""
-    if not 1 <= game <= MAX_GAMES:
-        raise rules.DraftError(f"❌ Games are numbered 1 to {MAX_GAMES}.")
+    only_player, just that player's side is replaced (a player reporting their own Pokémon).
+
+    A game that the match cannot have is refused, and so is a new game once
+    the match is over - a best-of-three has no game 4, and nothing after 2-0
+    counts. Correcting a game that is already recorded is always allowed,
+    because that is how a mistake gets fixed."""
     if source not in SOURCES:
         raise rules.DraftError("❌ Unknown kind of report.")
+    league = rules.get_league(conn, league_id)
+    best_of = int((league["best_of"] if league else None) or MAX_GAMES)
+    if not 1 <= game <= min(best_of, MAX_GAMES):
+        raise rules.DraftError(
+            f"❌ This league plays **best of {best_of}**, so its games are "
+            f"numbered 1 to {min(best_of, MAX_GAMES)}.")
+    if league is not None:
+        require_open(conn, league, week, match_number, game)
     report = get_report(conn, league_id, week, match_number, create=True)
     result = conn.execute("SELECT * FROM game_results WHERE report_id = ? AND game = ?",
                           (report["id"], game)).fetchone()
@@ -145,13 +199,18 @@ def record_game(conn, league_id, week, match_number, game, source, winner_id=Non
                     "deaths = deaths + excluded.deaths",
                     (result_id, player_id, pokemon, int(kills), int(deaths)))
         conn.execute("UPDATE match_reports SET winner_id = ?, updated_at = ? WHERE id = ?",
-                     (set_winner(conn, report["id"]), database.now(), report["id"]))
+                     (set_winner(conn, report), database.now(), report["id"]))
     return match_view(conn, league_id, week, match_number)
 
 
+def wins_for(best_of):
+    """How many games win a best-of-N: a majority, so two of three."""
+    return max(1, int(best_of or 1) // 2 + 1)
+
+
 def wins_needed(league):
-    """How many games win the match: two of a best-of-three, one of a best-of-one."""
-    return max(1, int(league["best_of"] or 1) // 2 + 1)
+    """How many games win this league's match."""
+    return wins_for(league["best_of"])
 
 
 def game_wins(conn, report_id):
@@ -163,27 +222,72 @@ def game_wins(conn, report_id):
     return counts
 
 
-def match_finished(conn, league, week, match_number):
-    """Whether a match is over: somebody has won the games it takes.
+def decided_winner(conn, report, best_of):
+    """Who has won the match, or None while it is still undecided.
 
-    This is what puts a player's approved trades into effect, so it has to
-    mean the whole match and not "ahead on games" - winning game 1 of a
-    best-of-three is not the end of it, and the team that plays game 2 has
-    to be the team that played game 1.
+    A moderator's award wins over the games: a forfeit or a no-show has a
+    winner without the games to show for it.
+    """
+    if report is None:
+        return None
+    if report["walkover_id"]:
+        return report["walkover_id"]
+    needed = wins_for(best_of)
+    for player_id, won in sorted(game_wins(conn, report["id"]).items(), key=lambda i: -i[1]):
+        if won >= needed:
+            return player_id
+    return None
+
+
+def match_score(conn, league, week, match_number):
+    """How a match stands, for both the rules and the message about it:
+
+        {wins: {player_id: games won}, needed, played, winner_id, decided,
+         walkover, note}
+
+    `decided` is the whole point: it is what puts a player's approved trades
+    into effect, so it has to mean the match is over rather than somebody
+    being ahead. Winning game 1 of a best-of-three is not the end of it, and
+    the team that plays game 2 has to be the team that played game 1.
     """
     report = get_report(conn, league["id"], week, match_number)
-    if report is None:
-        return False
-    needed = wins_needed(league)
-    return any(won >= needed for won in game_wins(conn, report["id"]).values())
+    wins = game_wins(conn, report["id"]) if report is not None else {}
+    winner_id = decided_winner(conn, report, league["best_of"])
+    return {
+        "wins": wins,
+        "needed": wins_needed(league),
+        "played": sum(wins.values()),
+        "winner_id": winner_id,
+        "decided": winner_id is not None,
+        "walkover": bool(report["walkover_id"]) if report is not None else False,
+        "note": (report["note"] if report is not None else None),
+    }
 
 
-def set_winner(conn, report_id):
-    """Whoever won more games, or None while it's level"""
-    ranked = sorted(game_wins(conn, report_id).items(), key=lambda item: -item[1])
-    if not ranked or (len(ranked) > 1 and ranked[0][1] == ranked[1][1]):
-        return None
-    return ranked[0][0]
+def match_finished(conn, league, week, match_number):
+    """Whether a match is over. See match_score."""
+    return match_score(conn, league, week, match_number)["decided"]
+
+
+def set_winner(conn, report):
+    """The match's winner as things stand, for storing on the report."""
+    league = rules.get_league(conn, report["league_id"])
+    return decided_winner(conn, report, league["best_of"] if league else None)
+
+
+def award_match(conn, league, week, match_number, winner_id, note=None):
+    """Staff: award a match that was not played out - a forfeit, a no-show, a
+    result settled elsewhere. `winner_id` of None takes the award back and
+    leaves whatever the games say."""
+    report = get_report(conn, league["id"], week, match_number, create=True)
+    with conn:
+        conn.execute("UPDATE match_reports SET walkover_id = ?, note = ?, updated_at = ? "
+                     "WHERE id = ?",
+                     (winner_id, (note or "").strip() or None, database.now(), report["id"]))
+        report = get_report(conn, league["id"], week, match_number)
+        conn.execute("UPDATE match_reports SET winner_id = ? WHERE id = ?",
+                     (set_winner(conn, report), report["id"]))
+    return match_view(conn, league["id"], week, match_number)
 
 
 def parse_kd(text, roster):
@@ -245,16 +349,22 @@ def clear_game(conn, league_id, week, match_number, game):
     with conn:
         conn.execute("DELETE FROM game_results WHERE report_id = ? AND game = ?", (report["id"], game))
         conn.execute("UPDATE match_reports SET winner_id = ?, updated_at = ? WHERE id = ?",
-                     (set_winner(conn, report["id"]), database.now(), report["id"]))
+                     (set_winner(conn, report), database.now(), report["id"]))
     return match_view(conn, league_id, week, match_number)
 
 
 def match_view(conn, league_id, week, match_number):
     """Everything reported for a match: {champions, winner_id, games: [{game, winner_id, source, replay,
-    stats: {player_id: [(pokemon, kills, deaths)]}}], pokepastes: {player_id: url}, totals: {...}}"""
+    stats: {player_id: [(pokemon, kills, deaths)]}}], pokepastes: {player_id: url}, totals: {...}},
+    plus where the match stands (see match_score): wins, needed, decided, walkover, note."""
     report = get_report(conn, league_id, week, match_number)
+    league = rules.get_league(conn, league_id)
+    standing = (match_score(conn, league, week, match_number) if league is not None else
+                {"wins": {}, "needed": 1, "played": 0, "winner_id": None, "decided": False,
+                 "walkover": False, "note": None})
     if report is None:
-        return {"champions": False, "asked": [], "winner_id": None, "games": [], "pokepastes": {}, "totals": {}}
+        return {"champions": False, "asked": [], "winner_id": None, "games": [],
+                "pokepastes": {}, "totals": {}, **standing}
     games = []
     totals = {}
     for result in conn.execute("SELECT * FROM game_results WHERE report_id = ? ORDER BY game", (report["id"],)):
@@ -269,5 +379,5 @@ def match_view(conn, league_id, week, match_number):
     pastes = {row["player_id"]: row["url"] for row in conn.execute(
         "SELECT * FROM pokepastes WHERE report_id = ?", (report["id"],))}
     asked = [int(x) for x in str(report["champions_requested_by"] or "").split(",") if x]
-    return {"champions": bool(report["champions"]), "asked": asked, "winner_id": report["winner_id"],
-            "games": games, "pokepastes": pastes, "totals": totals}
+    return {"champions": bool(report["champions"]), "asked": asked,
+            "games": games, "pokepastes": pastes, "totals": totals, **standing}
