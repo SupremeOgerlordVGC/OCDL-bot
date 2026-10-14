@@ -16,6 +16,8 @@ requirement.
 5. [Hosting on a Hetzner VPS](#hosting-on-a-hetzner-vps)
 6. [Backups](#backups)
 7. [Command reference](#command-reference) · to paste into Discord: [players](PLAYERS.md) · [moderators](MODERATORS.md)
+
+**Picking the work up?** [`HANDOVER.md`](HANDOVER.md) has the live system's state, what is half-built and why, and the open items.
 8. [Documents](#documents)
 9. [Design decisions](#design-decisions)
 10. [Tests](#tests)

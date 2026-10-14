@@ -73,6 +73,15 @@ MAX_QUEUE_LENGTH = 5
 # Official: public, and the website switches Voice on for their players.
 OGRE_CLAN_GUILD_ID = 1497084427749167127
 
+# Week 1 goes up once every pool has drafted and its free-trade window has
+# closed. Every week after that is posted on a Monday at 20:00 GMT+8, and
+# never sooner than WEEK_GAP_DAYS after the previous one - so a season that
+# starts mid-week does not get a short first week.
+WEEK_POST_UTC_OFFSET_HOURS = 8
+WEEK_POST_WEEKDAY = 0           # Monday, as date.weekday() counts
+WEEK_POST_HOUR = 20
+WEEK_GAP_DAYS = 7
+
 MAX_EXTENSION_WEEKS = 1
 
 MAX_TRADE_SIZE = 5

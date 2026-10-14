@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS leagues (
     -- Ogre Clan Official: made by the owner, or for the Ogre Clan server.
     -- Always public, and the website gives its players Voice.
     official          INTEGER NOT NULL DEFAULT 0,
+    -- When the last week was posted, which sets the weekly cadence, and
+    -- whether the bot is still posting weeks by itself.
+    week_posted_at    TEXT,
+    auto_weeks        INTEGER NOT NULL DEFAULT 1,
     -- 'draft_only'     : run the draft, then archive it
     -- 'draft_schedule' : draft plus schedule posting, no trades
     -- 'full_season'    : draft, trades and schedule posting
@@ -382,6 +386,8 @@ SELECT pools.id               AS id,
        leagues.admin_channel_id AS admin_channel_id,
        leagues.schedule_channel_id AS schedule_channel_id,
        leagues.official         AS official,
+       leagues.week_posted_at   AS week_posted_at,
+       leagues.auto_weeks       AS auto_weeks,
        leagues.mode             AS mode,
        leagues.doc_kind         AS doc_kind,
        leagues.doc_url          AS doc_url,
@@ -408,6 +414,8 @@ ADDED_COLUMNS = [
     ("leagues", "season_weeks", "INTEGER NOT NULL DEFAULT 0"),
     ("leagues", "schedule_channel_id", "INTEGER"),
     ("leagues", "official", "INTEGER NOT NULL DEFAULT 0"),
+    ("leagues", "week_posted_at", "TEXT"),
+    ("leagues", "auto_weeks", "INTEGER NOT NULL DEFAULT 1"),
     ("players", "status", "TEXT NOT NULL DEFAULT 'active'"),
     ("players", "tera_budget_remaining", "INTEGER NOT NULL DEFAULT 0"),
     ("pools", "scheduled_start", "REAL"),
