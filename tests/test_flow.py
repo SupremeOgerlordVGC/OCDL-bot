@@ -44,6 +44,18 @@ def make_pool(conn, channel_id, players, **settings):
     return rules.get_live_pool(conn, channel_id)["id"]
 
 
+class FakePosted:
+    """A message the bot posted, which it can then react to."""
+
+    def __init__(self, channel, content):
+        self.channel = channel
+        self.content = content
+        self.reactions = []
+
+    async def add_reaction(self, emoji):
+        self.reactions.append(emoji)
+
+
 class FakeChannel:
     """Collects everything the bot tries to post."""
 
@@ -51,14 +63,23 @@ class FakeChannel:
         self.id = channel_id
         self.mention = f"<#{channel_id}>"
         self.messages = []
+        self.posted = []
 
     async def send(self, content):
         self.messages.append(content)
-        return content
+        message = FakePosted(self, content)
+        self.posted.append(message)
+        return message
 
     @property
     def text(self):
         return "\n".join(self.messages)
+
+    def votes_on(self, fragment):
+        """The reactions on the one posted message containing `fragment`."""
+        matches = [m for m in self.posted if fragment in m.content]
+        assert len(matches) == 1, f"{len(matches)} messages contain {fragment!r}"
+        return matches[0].reactions
 
 
 class SilentResponse:
@@ -1193,6 +1214,138 @@ class TradeValidationCommandTests(unittest.IsolatedAsyncioTestCase):
         trade = self.latest_trade()
         self.assertEqual(json.loads(trade["gets"]), ["Rotom-Mow"])
         self.assertEqual(json.loads(trade["drops"]), ["Garchomp"])
+
+
+class SchedulePostingTests(unittest.IsolatedAsyncioTestCase):
+    """Where a week is posted, and the votes on each match."""
+
+    DRAFT = 9900
+    SCHEDULE = 9901
+
+    async def asyncSetUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(self.DRAFT)
+        self.schedule_channel = FakeChannel(self.SCHEDULE)
+        self.bot = FakeBot(self.conn, self.channel)
+
+        draft_channel, schedule_channel = self.channel, self.schedule_channel
+
+        def get_channel(channel_id):
+            if channel_id == schedule_channel.id:
+                return schedule_channel
+            return draft_channel if channel_id == draft_channel.id else None
+
+        self.bot.get_channel = get_channel
+
+        self.pool_id = make_pool(self.conn, self.DRAFT,
+                                 [(11, "Larry"), (22, "Alex"), (33, "Sam"), (44, "Jo")],
+                                 max_picks=1, name="Season")
+        pool = rules.get_pool(self.conn, self.pool_id)
+        self.league_id = pool["league_id"]
+        rules.start_pool(self.conn, pool)
+        rules.generate_fixtures(self.conn, self.league_id, weeks=2)
+        self.admin = AdminCog(self.bot)
+
+    async def asyncTearDown(self):
+        self.bot.timers.cancel_all()
+
+    def moderator(self, channel_id=None):
+        interaction = FakeInteraction(self.bot, channel_id or self.DRAFT, 99, "Mod",
+                                      moderator=True)
+        return interaction
+
+    def set_schedule_channel(self, channel_id):
+        rules.set_schedule_channel(self.conn, self.league_id, channel_id)
+
+    async def post(self, week=1):
+        interaction = self.moderator()
+        await self.admin.postschedule.callback(self.admin, interaction,
+                                               week=week, name="Season")
+        return interaction
+
+    async def test_it_posts_in_the_schedule_channel(self):
+        self.set_schedule_channel(self.SCHEDULE)
+        interaction = await self.post()
+
+        self.assertIn("Week 1", self.schedule_channel.text)
+        self.assertIn("**vs**", self.schedule_channel.text)
+        self.assertEqual(self.channel.messages, [],
+                         "nothing should go to the channel the command was run in")
+        self.assertIn(f"<#{self.SCHEDULE}>", interaction.text)
+
+    async def test_each_match_is_its_own_message_with_votes_on_it(self):
+        self.set_schedule_channel(self.SCHEDULE)
+        await self.post()
+
+        matches = [m for m in self.schedule_channel.posted if "**vs**" in m.content]
+        self.assertEqual(len(matches), 2, "four players is two matches")
+        for message in matches:
+            with self.subTest(match=message.content):
+                self.assertEqual(message.reactions, list(ui.VOTE_EMOJI))
+                self.assertEqual(message.content.count("**vs**"), 1,
+                                 "one match per message, so each vote is its own")
+
+    async def test_the_header_is_not_something_to_vote_on(self):
+        self.set_schedule_channel(self.SCHEDULE)
+        await self.post()
+        header = [m for m in self.schedule_channel.posted if "Week 1" in m.content][0]
+        self.assertEqual(header.reactions, [])
+
+    async def test_without_a_schedule_channel_it_posts_where_it_was_run(self):
+        interaction = await self.post()
+
+        self.assertIn("**vs**", self.channel.text)
+        self.assertEqual(self.schedule_channel.messages, [])
+        self.assertIn("no schedule channel", interaction.text)
+        self.assertIn("/schedulechannel", interaction.text)
+        # The votes still go on, wherever it landed.
+        votes = [m.reactions for m in self.channel.posted if "**vs**" in m.content]
+        self.assertEqual(votes, [list(ui.VOTE_EMOJI)] * 2)
+
+    async def test_a_schedule_channel_it_cannot_see_falls_back_and_warns(self):
+        self.set_schedule_channel(123456789)
+        interaction = await self.post()
+
+        self.assertIn("**vs**", self.channel.text, "the week must not be lost")
+        self.assertIn("cannot see this league's schedule channel", interaction.text)
+
+    async def test_a_channel_that_refuses_reactions_is_reported(self):
+        class NoReactions(FakePosted):
+            async def add_reaction(self, emoji):
+                raise discord.Forbidden(SilentResponse(), "no reactions here")
+
+        class FussyChannel(FakeChannel):
+            async def send(self, content):
+                self.messages.append(content)
+                message = NoReactions(self, content)
+                self.posted.append(message)
+                return message
+
+        fussy = FussyChannel(self.SCHEDULE)
+        self.bot.get_channel = lambda cid: fussy if cid == self.SCHEDULE else self.channel
+        self.set_schedule_channel(self.SCHEDULE)
+
+        interaction = await self.post()
+
+        self.assertIn("**vs**", fussy.text, "the matches still get posted")
+        self.assertIn("Add Reactions", interaction.text)
+
+    async def test_a_moderator_can_set_the_channel(self):
+        interaction = self.moderator()
+        await self.admin.schedulechannel.callback(
+            self.admin, interaction, name="Season", channel=self.schedule_channel)
+
+        league = rules.get_league(self.conn, self.league_id)
+        self.assertEqual(league["schedule_channel_id"], self.SCHEDULE)
+        self.assertIn(f"<#{self.SCHEDULE}>", interaction.text)
+
+    async def test_a_player_cannot_set_the_channel(self):
+        interaction = FakeInteraction(self.bot, self.DRAFT, 11, moderator=False)
+        with self.assertRaises(rules.DraftError):
+            await self.admin.schedulechannel.callback(
+                self.admin, interaction, name="Season", channel=self.schedule_channel)
+        self.assertIsNone(
+            rules.get_league(self.conn, self.league_id)["schedule_channel_id"])
 
 
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):

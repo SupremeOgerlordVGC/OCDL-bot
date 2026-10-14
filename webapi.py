@@ -307,9 +307,10 @@ class WebApi:
         if result is None:
             raise rules.DraftError(f"No matches found for week {week}.")
         if not league["site_only"]:
-            channel = self.bot.get_channel(league["admin_channel_id"])
-            for message in ui.pack_messages(result["lines"]):
-                await ui.safe_send(channel, message)
+            # Same posting as the slash command: the league's schedule
+            # channel, one message per match, each with votes on it.
+            await self.admin_cog.publish_week(
+                league, result, self.bot.get_channel(league["admin_channel_id"]))
         return {"matches": result["matches"], "applied": result["applied"], "report": plain(result["report"])}
 
     async def trade(self, body):

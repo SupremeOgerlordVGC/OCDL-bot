@@ -290,24 +290,53 @@ def pack_messages(lines):
 # --------------------------------------------------------------------------
 
 
-async def safe_send(channel, message):
-    """Post to a channel. Returns False if Discord refused, never raises.
+# The two options people vote between on a posted matchup.
+VOTE_EMOJI = ("\U0001F1E6", "\U0001F1E7")        # 🇦 🇧
+
+
+async def safe_send_message(channel, message):
+    """Post to a channel and hand back the message, or None if refused.
 
     Public announcements are best effort on purpose. Work is written to
     SQLite before anything is announced, so a missing permission must not
     undo a pick, abort the rest of a command, or stop a timer starting.
     """
     if channel is None:
-        return False
+        return None
     try:
-        await channel.send(message)
-        return True
+        return await channel.send(message)
     except discord.Forbidden:
         log.warning("not allowed to post in channel %s - check View Channel "
                     "and Send Messages for the bot there", channel.id)
-        return False
+        return None
     except discord.DiscordException:
         log.exception("could not post to channel %s", channel.id)
+        return None
+
+
+async def safe_send(channel, message):
+    """Post to a channel. Returns False if Discord refused, never raises."""
+    return await safe_send_message(channel, message) is not None
+
+
+async def add_vote_reactions(message):
+    """Put the A and B votes on a matchup. Returns False if Discord refused.
+
+    Needs Add Reactions in that channel; without it the matchup is still
+    posted, just without anything to vote on.
+    """
+    if message is None:
+        return False
+    try:
+        for emoji in VOTE_EMOJI:
+            await message.add_reaction(emoji)
+        return True
+    except discord.Forbidden:
+        log.warning("not allowed to add reactions in channel %s - check Add "
+                    "Reactions for the bot there", getattr(message.channel, "id", "?"))
+        return False
+    except discord.DiscordException:
+        log.exception("could not add vote reactions")
         return False
 
 

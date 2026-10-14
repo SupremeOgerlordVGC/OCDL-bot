@@ -51,6 +51,7 @@ class AdminCog(commands.Cog):
     @app_commands.describe(
         name="A name for this draft. Must be unique on this server.",
         draft_channel="Channel where pool A drafts",
+        schedule_channel="Channel where /postschedule posts each week's matchups",
         players="Pool A players, @mentioned in draft order",
         players_role="Instead of listing them: a role whose members the bot shuffles",
         min_picks="Minimum Pokémon each player must draft",
@@ -74,6 +75,7 @@ class AdminCog(commands.Cog):
                            draft_channel: discord.TextChannel,
                            min_picks: int, max_picks: int, timer: int,
                            mode: app_commands.Choice[str],
+                           schedule_channel: discord.TextChannel = None,
                            players: str = None,
                            players_role: discord.Role = None,
                            budget: int = None, tera_budget: int = None,
@@ -122,6 +124,7 @@ class AdminCog(commands.Cog):
             max_trades=max_trades, template_link=template_link, tiering_link=tiering_link,
             weeks=weeks, visibility=visibility.value if visibility else "public", website=website,
             created_by=interaction.user.id,
+            schedule_channel_id=schedule_channel.id if schedule_channel else None,
         )
         await self.announce_setup(league, pool_rows, coach_slots, shuffled, interaction.channel)
 
@@ -135,7 +138,8 @@ class AdminCog(commands.Cog):
     async def build_league(self, *, guild_id, admin_channel_id, name, rosters, channels,
                            min_picks, max_picks, timer, mode, budget=None, tera_budget=None,
                            max_trades=0, template_link=None, tiering_link=None, weeks=None,
-                           visibility="public", website=True, site_only=False, created_by=None):
+                           visibility="public", website=True, site_only=False, created_by=None,
+                           schedule_channel_id=None):
         """The heart of /setup, shared with draft.ogreclan.com (webapi.py).
 
         Reads the document (a template's budgets and Coaches tab), creates the
@@ -256,6 +260,7 @@ class AdminCog(commands.Cog):
             self.bot.conn,
             guild_id=guild_id,
             admin_channel_id=admin_channel_id,
+            schedule_channel_id=schedule_channel_id,
             name=name,
             pools=pools,
             budget=budget,
@@ -603,9 +608,24 @@ class AdminCog(commands.Cog):
         if result is None:
             await interaction.followup.send(f"No matches found for week {week}.", ephemeral=True)
             return
-        for message in ui.pack_messages(result["lines"]):
-            await ui.safe_send(interaction.channel, message)
-        await interaction.followup.send(result["report"], ephemeral=True)
+
+        posting = await self.publish_week(league, result, interaction.channel)
+        report = result["report"]
+        if posting["channel"] is not None:
+            report += f"\n• Posted in <#{posting['channel'].id}>, one message per match."
+        if posting["posted"]:
+            report += f" Each has 🇦 and 🇧 on it to vote with."
+        if not posting["configured"]:
+            report += ("\n• This league has no schedule channel, so it went here. "
+                       "Set one with `/schedulechannel`.")
+        elif posting["unreachable"]:
+            report += ("\n⚠️ I cannot see this league's schedule channel, so it went "
+                       "here instead. Check my permissions there, or set a new one "
+                       "with `/schedulechannel`.")
+        if posting["votes_refused"]:
+            report += ("\n⚠️ I could not add the vote reactions — I need **Add "
+                       "Reactions** in that channel.")
+        await interaction.followup.send(report, ephemeral=True)
 
     async def post_week(self, league, week):
         """/postschedule's work, shared with draft.ogreclan.com (webapi.py): reads the week's
@@ -665,21 +685,20 @@ class AdminCog(commands.Cog):
         if applied:
             await self.price_trades(applied)
 
-        lines = [f"📅 **{league['name']} — Week {week}**", ""]
-        lines += [f"{home} **vs** {away}" for home, away in pairs]
+        extra = []
         if applied:
-            lines += ["", f"🔁 **Trades in effect from week {week}**"]
+            extra += [f"🔁 **Trades in effect from week {week}**"]
             for trade, _ in applied:
                 proposer = rules.get_player_by_id(self.bot.conn, trade["proposer_id"])
                 partner = (rules.get_player_by_id(self.bot.conn, trade["partner_id"])
                            if trade["partner_id"] else None)
-                lines.append(
+                extra.append(
                     f"• #{trade['trade_number']} **{proposer['display_name']}** gives up "
                     f"{rules.trade_side(trade['drops'])} and receives "
                     f"{rules.trade_side(trade['gets'])}"
                     + (f" (with **{partner['display_name']}**)" if partner else " (free agency)"))
         if footnote:
-            lines += ["", footnote]
+            extra.append(footnote)
 
         for pool_id in {trade["pool_id"] for trade, _ in applied}:
             ui.resync_sheet(self.bot, pool_id)
@@ -690,7 +709,49 @@ class AdminCog(commands.Cog):
             notes = [f"#{trade['trade_number']}: {note}" for trade, notes in applied for note in notes]
             if notes:
                 report += "\n\nNotes:\n" + "\n".join(f"• {note}" for note in notes)
-        return {"lines": lines, "report": report, "matches": len(pairs), "applied": len(applied)}
+        return {
+            "header": f"📅 **{league['name']} — Week {week}**",
+            "matchups": [f"{home} **vs** {away}" for home, away in pairs],
+            "extra": extra,
+            "report": report,
+            "matches": len(pairs),
+            "applied": len(applied),
+        }
+
+    async def publish_week(self, league, result, fallback=None):
+        """Post a week where the league keeps its schedule.
+
+        One matchup per message, each with A and B reactions: a vote needs
+        its own message to react to, so a single packed block would only
+        ever get one pair of votes.
+
+        Falls back to `fallback` when no schedule channel is set, or when
+        the one that is set cannot be seen, so a week is never silently
+        lost.
+        """
+        wanted = league["schedule_channel_id"]
+        channel = self.bot.get_channel(wanted) if wanted else None
+        where = channel or fallback
+
+        await ui.safe_send(where, result["header"])
+        posted, votes_refused = 0, False
+        for line in result["matchups"]:
+            message = await ui.safe_send_message(where, line)
+            if message is None:
+                continue
+            posted += 1
+            if not await ui.add_vote_reactions(message):
+                votes_refused = True
+        for message in ui.pack_messages(result["extra"]):
+            await ui.safe_send(where, message)
+
+        return {
+            "channel": where,
+            "posted": posted,
+            "votes_refused": votes_refused,
+            "configured": bool(wanted),
+            "unreachable": bool(wanted) and channel is None,
+        }
 
     async def price_trades(self, applied):
         """A free-agency pickup has no price until the tiering list is consulted."""
@@ -734,6 +795,32 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(
             f"🎲 Generated a fresh {made}-week schedule for **{league['name']}**. "
             f"Post a week with `/postschedule`.",
+            ephemeral=True,
+        )
+
+    # ---- /schedulechannel -----------------------------------------------
+
+    @app_commands.command(
+        name="schedulechannel",
+        description="Moderator only: choose where /postschedule posts each week's matchups.",
+    )
+    @app_commands.describe(name="The league's name",
+                           channel="The channel to post weeks in")
+    async def schedulechannel(self, interaction: discord.Interaction, name: str,
+                              channel: discord.TextChannel):
+        ui.require_moderator(self.bot, interaction)
+        league = rules.require_season_league_by_name(self.bot.conn, interaction.guild_id, name)
+
+        updated = rules.set_schedule_channel(self.bot.conn, league["id"], channel.id)
+
+        note = ""
+        if self.bot.get_channel(updated["schedule_channel_id"]) is None:
+            note = ("\n⚠️ I cannot see that channel. Give me **View Channel**, "
+                    "**Send Messages** and **Add Reactions** there, or weeks will "
+                    "be posted wherever `/postschedule` is run instead.")
+        await interaction.response.send_message(
+            f"📅 **{league['name']}** will post its weeks in {channel.mention}. "
+            f"Each match goes in its own message with 🇦 and 🇧 to vote on.{note}",
             ephemeral=True,
         )
 

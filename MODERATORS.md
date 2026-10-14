@@ -49,6 +49,7 @@ So: run `/setup` in your admin channel, and tell it which channel the drafting h
 • `players_role: @Season 1` — the bot shuffles that role at random
 
 **Optional:**
+• `schedule_channel` — where each week's matchups are posted. Can be set later with `/schedulechannel`.
 • `budget` — read from the template if you link one, so usually leave blank
 • `tera_budget` — non-zero turns on Tera Captains (max 3 each)
 • `max_trades` — the most Pokémon each player may pick up in trades over the season, 0 = unlimited
@@ -167,7 +168,10 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 **Who's in the draft comes from the sheet.** On the **Coaches** tab, only rows with the **In schedule** box ticked take part — a tick reserves that coach's roster block, so gaps are respected. If a ticked row already has a username, the bot matches the player to it, so your @mention order doesn't have to match the sheet.
 
-**`/postschedule week:3 name:OCDL Season 1`** — posts that week's matchups, pinging both players, and puts every approved trade into effect (listed under the matchups). Reads the template's schedule, or the bot's own if there's no template. Never automatic.
+**`/postschedule week:3 name:OCDL Season 1`** — posts that week's matchups and puts every approved trade into effect (listed underneath). Reads the template's schedule, or the bot's own if there's no template. Never automatic.
+
+**Each match gets its own message, with 🇦 and 🇧 on it to vote with.** They go to the league's **schedule channel**; set one with `/schedulechannel name:OCDL Season 1 channel:#schedule`, or with `schedule_channel` in `/setup`. With none set they post wherever you run the command, and the bot tells you so. I need **Add Reactions** in that channel for the votes.
+
 **`/reschedule name:... weeks:8`** — rerolls a bot-generated schedule.
 ```
 

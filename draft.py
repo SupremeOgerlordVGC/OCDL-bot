@@ -555,7 +555,8 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
                   budget, min_picks, max_picks, base_timer,
                   mode="full_season", doc_kind="none", doc_url=None,
                   tera_budget=0, max_trades=0, season_weeks=0, visibility="public",
-                  coach_slots=None, website=True, site_only=False, created_by=None):
+                  coach_slots=None, website=True, site_only=False, created_by=None,
+                  schedule_channel_id=None):
     """Create a league in `setup` state, with one or two pools.
 
     `pools` is [(label, channel_id, [(user_id, display_name), ...]), ...],
@@ -655,12 +656,14 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
         raise DraftError("❌ A league is either public or private on the website.")
 
     cursor = conn.execute(
-        """INSERT INTO leagues (guild_id, name, admin_channel_id, mode, doc_kind, doc_url,
+        """INSERT INTO leagues (guild_id, name, admin_channel_id, schedule_channel_id,
+                                mode, doc_kind, doc_url,
                                 budget, tera_budget, min_picks, max_picks, base_timer,
                                 max_trades, season_weeks, status, created_at, visibility,
                                 website, site_only, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?, ?)""",
-        (guild_id, name, admin_channel_id, mode, doc_kind, doc_url, budget, tera_budget,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?, ?)""",
+        (guild_id, name, admin_channel_id, schedule_channel_id, mode, doc_kind, doc_url,
+         budget, tera_budget,
          min_picks, max_picks, base_timer, max_trades, max(0, season_weeks),
          database.now(), visibility, 1 if website or site_only else 0, 1 if site_only else 0, created_by),
     )
@@ -2066,6 +2069,14 @@ def _apply_trade(conn, trade):
             conn.execute("UPDATE players SET budget_remaining = budget_remaining + ? WHERE id = ?",
                          (get_total - drop_total, partner["id"]))
     return notes
+
+
+def set_schedule_channel(conn, league_id, channel_id):
+    """Where /postschedule posts. None puts it back to the channel it is run in."""
+    conn.execute("UPDATE leagues SET schedule_channel_id = ? WHERE id = ?",
+                 (channel_id, league_id))
+    conn.commit()
+    return get_league(conn, league_id)
 
 
 def set_current_week(conn, league_id, week):
