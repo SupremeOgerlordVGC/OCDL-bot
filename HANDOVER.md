@@ -14,7 +14,7 @@ plainly.
 | Bot | `/home/draftbot/OCDL-Bot`, systemd unit `draftbot`, venv at `.venv/bin/python` |
 | Database | `/home/draftbot/OCDL-Bot/draft.db` (SQLite, WAL) |
 | Backups | `/home/draftbot/OCDL-Bot/backups/`, hourly plus one before each deploy |
-| Deployed commit | `ee8f2a3`, which is `main` |
+| Deployed commit | `main` (see `git log -1`) |
 
 **Deploy recipe** (what every deploy in this session used):
 
@@ -99,6 +99,29 @@ add up whatever order things arrive in.
 `ui.trades_landed` is the one place that finishes trades off: pricing a
 free-agency pickup from the sheet, telling the pool, and rewriting the
 spreadsheet. Everything that applies a trade goes through it.
+
+## Tera Captains after the draft
+
+A pick carries the Tera choice; a trade does not. `/teracaptain` (and the
+site's `/teracaptain`) is how a Pokémon already on a roster becomes a captain,
+which is the only route for anything that arrived in a trade.
+`rules.set_tera_captain` does the arithmetic: a captain is charged its **Tera
+price against both budgets** and the roster row carries that price, so
+nominating moves the difference on the main budget and the whole Tera price on
+the Tera budget, and taking one off reverses both. The tiering list is
+required - nobody has typed the Tera price, and the bot will not guess at a
+budget.
+
+Players may nominate their own; **taking a captaincy off is moderator-only**,
+because it frees Tera points and would otherwise let somebody shuffle captains
+mid-season. Every change is announced in the pool channel.
+
+A captaincy **does not travel with a trade**: `_apply_trade` clears the flag
+and hands the Tera points back to whoever gave it up, with a note saying so.
+That was a real hole - before it, trading a captain moved the captaincy to the
+new owner without charging their Tera budget or checking the three-captain
+limit, and the giver never got their points back. No Teal trade had happened
+yet, so nothing needed repairing.
 
 ## Reporting a match
 

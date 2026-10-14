@@ -2979,6 +2979,156 @@ class CheckTradeTests(unittest.TestCase):
         self.assertEqual((maths["refund"], maths["charge"], maths["after"]), (16, 18, 0))
 
 
+class NominateTeraCaptainTests(unittest.TestCase):
+    """Making something already on a roster a Tera Captain.
+
+    A pick carries the choice and a trade does not, so without this a Pokémon
+    that arrived in a trade could never be one - which is how it came up: a
+    Teal coach asked how to do it and there was no answer. Numbers follow the
+    real tiering list: Hydrapple COST 7 / TT 16, Grimmsnarl 7 / 7.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.pool = make_draft(self.conn, channel_id=410, players=2, budget=115,
+                               min_picks=1, max_picks=5, tera_budget=28)
+        draft.make_pick(self.conn, self.pool, user(1), 1, "Hydrapple", 7)
+        self.live = draft.get_pool(self.conn, self.pool["id"])
+        draft.make_pick(self.conn, self.live, user(2), 1, "Grimmsnarl", 7)
+        self.live = draft.get_pool(self.conn, self.pool["id"])
+
+    def player(self, seat):
+        return draft.get_player(self.conn, self.pool["id"], user(seat))
+
+    def nominate(self, seat=1, pokemon="Hydrapple", cost=7, tera_cost=16, on=True):
+        return draft.set_tera_captain(self.conn, self.live, self.player(seat),
+                                      pokemon, cost, tera_cost, on=on)
+
+    def row(self, pokemon):
+        return draft.find_owner(self.conn, self.pool["id"], draft.normalize(pokemon))
+
+    def test_nominating_charges_the_tera_price_against_both_budgets(self):
+        result = self.nominate()
+        self.assertEqual((result["was_cost"], result["cost"]), (7, 16))
+        self.assertEqual(result["captains"], 1)
+        # 115 - 7 for the pick, then the 9 difference up to the Tera price.
+        self.assertEqual(self.player(1)["budget_remaining"], 115 - 16)
+        self.assertEqual(self.player(1)["tera_budget_remaining"], 28 - 16)
+        row = self.row("Hydrapple")
+        self.assertEqual((row["cost"], row["tera_captain"]), (16, 1),
+                         "the roster carries the Tera price, which the sheet reads")
+
+    def test_taking_it_off_gives_both_back(self):
+        self.nominate()
+        result = self.nominate(on=False)
+        self.assertEqual((result["cost"], result["captains"]), (7, 0))
+        self.assertEqual(self.player(1)["budget_remaining"], 115 - 7)
+        self.assertEqual(self.player(1)["tera_budget_remaining"], 28)
+        self.assertEqual(self.row("Hydrapple")["tera_captain"], 0)
+
+    def test_a_pokemon_with_the_same_price_either_way_costs_nothing_extra(self):
+        self.nominate(seat=2, pokemon="Grimmsnarl", cost=7, tera_cost=7)
+        self.assertEqual(self.player(2)["budget_remaining"], 115 - 7)
+        self.assertEqual(self.player(2)["tera_budget_remaining"], 28 - 7)
+
+    def test_somebody_elses_pokemon_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.nominate(seat=1, pokemon="Grimmsnarl", cost=7, tera_cost=7)
+        self.assertIn("on **Player2**'s roster", str(caught.exception))
+
+    def test_an_undrafted_pokemon_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.nominate(pokemon="Miraidon")
+        self.assertIn("not on anybody's roster", str(caught.exception))
+
+    def test_doing_it_twice_is_refused(self):
+        self.nominate()
+        with self.assertRaises(draft.DraftError) as caught:
+            self.nominate()
+        self.assertIn("already one of", str(caught.exception))
+        with self.assertRaises(draft.DraftError) as caught:
+            self.nominate(seat=2, pokemon="Grimmsnarl", cost=7, tera_cost=7, on=False)
+        self.assertIn("not one of", str(caught.exception))
+
+    def test_one_that_cannot_be_a_captain_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.nominate(tera_cost=None)
+        self.assertIn("cannot be a Tera Captain", str(caught.exception))
+
+    def test_the_tera_budget_is_enforced(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.nominate(tera_cost=29)
+        self.assertIn("29 Tera points", str(caught.exception))
+        self.assertEqual(self.player(1)["budget_remaining"], 115 - 7, "nothing charged")
+        self.assertEqual(self.row("Hydrapple")["cost"], 7)
+
+    def test_the_normal_budget_has_to_cover_the_difference(self):
+        self.conn.execute("UPDATE players SET budget_remaining = 2 WHERE id = ?",
+                          (self.player(1)["id"],))
+        self.conn.commit()
+        with self.assertRaises(draft.DraftError) as caught:
+            self.nominate()
+        self.assertIn("needs 9 more points", str(caught.exception))
+
+    def wait_for_player_one(self):
+        """Filler picks until Player1 is on the clock again."""
+        for _ in range(40):
+            live = draft.get_pool(self.conn, self.pool["id"])
+            if draft.current_player(self.conn, live)["user_id"] == user(1):
+                return live
+            on_clock = draft.current_player(self.conn, live)
+            draft.make_pick(self.conn, live, on_clock["user_id"], live["current_round"],
+                            f"Filler{on_clock['id']}R{live['current_round']}", 1)
+        raise AssertionError("Player1 never came up")
+
+    def test_the_three_captain_limit_still_applies(self):
+        for index in range(config.MAX_TERA_CAPTAINS):
+            live = self.wait_for_player_one()
+            draft.make_pick(self.conn, live, user(1), live["current_round"],
+                            f"Cap{index}", 3, tera_captain=True)
+        self.live = draft.get_pool(self.conn, self.pool["id"])
+        with self.assertRaises(draft.DraftError) as caught:
+            self.nominate()
+        self.assertIn("maximum of 3", str(caught.exception))
+
+    def test_not_in_a_league_without_a_tera_format(self):
+        plain = make_draft(self.conn, channel_id=411, players=2, budget=100,
+                           min_picks=1, max_picks=3, tera_budget=0)
+        draft.make_pick(self.conn, plain, user(1), 1, "Hydrapple", 7)
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.set_tera_captain(self.conn, draft.get_pool(self.conn, plain["id"]),
+                                   draft.get_player(self.conn, plain["id"], user(1)),
+                                   "Hydrapple", 7, 16)
+        self.assertIn("not a Tera format", str(caught.exception))
+
+    def test_a_captaincy_does_not_travel_with_a_trade(self):
+        self.nominate()
+        self.assertEqual(self.player(1)["tera_budget_remaining"], 28 - 16)
+
+        # Player1 trades their captain away to Player2.
+        draft.propose_trade(self.conn, self.live, user(1), ["Hydrapple"], ["Grimmsnarl"],
+                            partner_user_id=user(2))
+        draft.approve_trade(self.conn, self.live, 1, 99)
+        applied = draft.apply_trades(self.conn, self.pool["league_id"], 1)
+        notes = applied[0][1]
+
+        self.assertEqual(self.player(1)["tera_budget_remaining"], 28,
+                         "the Tera points come back to whoever gave it up")
+        self.assertEqual(self.player(2)["tera_budget_remaining"], 28,
+                         "and the new owner is charged nothing until they nominate it")
+        row = self.row("Hydrapple")
+        self.assertEqual((row["player_id"], row["tera_captain"]), (self.player(2)["id"], 0))
+        self.assertTrue(any("does not travel with a trade" in note for note in notes), notes)
+
+    def test_a_captain_dropped_to_free_agency_gives_its_points_back(self):
+        self.nominate()
+        draft.propose_trade(self.conn, self.live, user(1), ["Hydrapple"], ["Miraidon"])
+        draft.approve_trade(self.conn, self.live, 1, 99)
+        draft.apply_trades(self.conn, self.pool["league_id"], 1)
+        self.assertEqual(self.player(1)["tera_budget_remaining"], 28)
+        self.assertIsNone(self.row("Hydrapple"))
+
+
 class PendingDropTests(unittest.TestCase):
     """Picking up something an approved trade has not got round to dropping.
 

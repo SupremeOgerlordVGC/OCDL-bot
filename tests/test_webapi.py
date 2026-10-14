@@ -310,6 +310,35 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400)
         self.assertIn("one of the match's two players", body["error"])
 
+    async def test_a_tera_captain_can_be_nominated_from_the_site(self):
+        # The site's league is not a Tera format, so this one gets its own.
+        tera_pool = make_pool(self.conn, 4343, [(11, "Larry"), (22, "Alex")], budget=100,
+                              tera_budget=28, min_picks=1, max_picks=2, base_timer=120,
+                              doc_url="https://docs.google.com/spreadsheets/d/TEST/edit")
+        league_id = rules.get_pool(self.conn, tera_pool)["league_id"]
+        rules.start_pool(self.conn, rules.get_pool(self.conn, tera_pool))
+        rules.make_pick(self.conn, rules.get_pool(self.conn, tera_pool), 11, 1, "Garchomp", 12)
+        larry = rules.get_player(self.conn, tera_pool, 11)
+
+        status, body = await self.call("/teracaptain", league_id=league_id, user_id="11",
+                                       pokemon="garchomp")
+        self.assertEqual(status, 200, body)
+        self.assertEqual((body["pokemon"], body["tera_captain"], body["cost"]),
+                         ("Garchomp", True, 11))
+        self.assertEqual(body["tera_budget_remaining"], 28 - 11)
+        self.assertEqual(
+            rules.find_owner(self.conn, tera_pool, "garchomp")["tera_captain"], 1)
+
+        status, body = await self.call("/teracaptain", league_id=league_id, user_id="11",
+                                       pokemon="garchomp", on=False)
+        self.assertEqual(status, 400, "only staff take one off")
+        status, body = await self.call("/teracaptain", league_id=league_id, user_id="11",
+                                       pokemon="garchomp", on=False, as_admin=True)
+        self.assertEqual((status, body["tera_captain"], body["cost"]), (200, False, 12))
+        self.assertEqual(
+            rules.get_player(self.conn, tera_pool, 11)["tera_budget_remaining"], 28)
+        self.assertEqual(larry["id"], rules.get_player(self.conn, tera_pool, 11)["id"])
+
     async def test_the_tier_list_shows_everything_and_who_has_it(self):
         await self.start_draft()
         await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")

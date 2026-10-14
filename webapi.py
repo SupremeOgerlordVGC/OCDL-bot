@@ -51,6 +51,7 @@ class WebApi:
         app = web.Application(client_max_size=64 * 1024)
         for path, handler in (
             ("/pick", self.pick), ("/makeup", self.makeup), ("/editpick", self.edit_pick),
+            ("/teracaptain", self.tera_captain),
             ("/archive", self.archive), ("/deleteleague", self.delete_league),
             ("/guilds", self.guilds), ("/setup", self.setup), ("/start", self.start_draft),
             ("/postweek", self.post_week), ("/trade", self.trade), ("/approvetrade", self.approve_trade),
@@ -117,6 +118,39 @@ class WebApi:
             cost = entry["tera_cost"] if tera_captain else entry["cost"]
         name = await self.cog.resolve_pokemon(draft, pokemon, int(cost) if cost is not None else None, tera_captain)
         return name, cost
+
+    async def tera_captain(self, body):
+        """/teracaptain: make a Pokémon already on a roster a Tera Captain, or (as_admin) take
+        one off. The only way something that arrived in a trade becomes one."""
+        draft = self.pool(body)
+        player = rules.require_player(self.bot.conn, draft["id"], int(body["user_id"]))
+        on = bool(body.get("on", True))
+        if not on and not body.get("as_admin"):
+            raise rules.DraftError("Only staff can take a Tera Captaincy off.")
+        status, entry = await self.cog.sheet_entry(draft, str(body["pokemon"]))
+        if status == "missing":
+            raise rules.DraftError(f"{body['pokemon']} is not in this league's tiering list.")
+        if status == "unavailable":
+            raise rules.DraftError(
+                "The price list can't be read right now, and a Tera Captain is charged its "
+                "Tera price, so try again shortly.")
+        result = rules.set_tera_captain(
+            self.bot.conn, draft, player, entry["name"], entry["cost"], entry["tera_cost"],
+            on=on, tera_banned=entry["tera_banned"])
+        if not draft["site_only"]:
+            await ui.safe_send(
+                self.bot.get_channel(draft["channel_id"]),
+                f"⭐ **{result['player']['display_name']}** has made **{result['pokemon']}** a "
+                f"**Tera Captain** *(on the website)* — charged at its Tera price "
+                f"({result['was_cost']} → {result['cost']}). Tera points remaining: "
+                f"**{result['tera_budget_remaining']}**" if on else
+                f"⭐ **{result['pokemon']}** is no longer **{result['player']['display_name']}**'s "
+                f"Tera Captain *(on the website)*, and is back to {result['cost']} points.")
+        ui.resync_sheet(self.bot, draft["id"])
+        return {"pokemon": result["pokemon"], "tera_captain": result["on"],
+                "cost": result["cost"], "captains": result["captains"],
+                "budget_remaining": result["budget_remaining"],
+                "tera_budget_remaining": result["tera_budget_remaining"]}
 
     # ---- picks ------------------------------------------------------------
 

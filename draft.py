@@ -1754,6 +1754,95 @@ def edit_pick(conn, draft, actor_user_id, round_number, pokemon, cost,
 # --------------------------------------------------------------------------
 
 
+def set_tera_captain(conn, draft, player, pokemon, cost, tera_cost, on=True,
+                     tera_banned=False):
+    """Make a Pokémon already on a roster a Tera Captain, or take it off.
+
+    This is the only way a Pokémon that arrived in a trade can become one:
+    picks carry the choice, trades do not. It is more than a flag, because a
+    captain is charged its Tera price against *both* budgets and the roster
+    carries that price - which is what the spreadsheet works each coach's
+    budget out from - so the difference between the two prices moves too.
+
+    `cost`, `tera_cost` and `tera_banned` come from the tiering list, passed
+    in to keep this free of Google. The checks are in the order a player
+    needs to hear them: whose it is first, then whether it could ever be a
+    captain, then whether they can afford it. Returns what changed, for the
+    message.
+    """
+    if not draft["tera_budget"]:
+        raise DraftError("❌ This league is not a Tera format, so there are no Tera Captains.")
+
+    row = find_owner(conn, draft["id"], normalize(pokemon))
+    if row is None:
+        raise DraftError(
+            f"❌ **{pokemon}** is not on anybody's roster in this draft. "
+            f"Check the spelling against `/search {pokemon}`.")
+    if row["player_id"] != player["id"]:
+        owner = get_player_by_id(conn, row["player_id"])
+        raise DraftError(f"❌ **{row['pokemon']}** is on **{owner['display_name']}**'s "
+                         f"roster, not **{player['display_name']}**'s.")
+
+    if on:
+        if row["tera_captain"]:
+            raise DraftError(f"❌ **{row['pokemon']}** is already one of "
+                             f"**{player['display_name']}**'s Tera Captains.")
+        if tera_banned or tera_cost is None:
+            raise DraftError(f"❌ **{row['pokemon']}** cannot be a Tera Captain in this format.")
+        already = tera_captains(conn, draft["id"], player["id"])
+        if already >= config.MAX_TERA_CAPTAINS:
+            raise DraftError(
+                f"❌ **{player['display_name']}** already has the maximum of "
+                f"{config.MAX_TERA_CAPTAINS} Tera Captains. A moderator can take one "
+                f"off with `/teracaptain on:False`.")
+
+        extra = tera_cost - row["cost"]
+        if extra > player["budget_remaining"]:
+            raise DraftError(
+                f"❌ A Tera Captain is charged its Tera price against both budgets. "
+                f"**{row['pokemon']}** costs {row['cost']} and its Tera price is "
+                f"{tera_cost}, so this needs {extra} more points and "
+                f"**{player['display_name']}** has {player['budget_remaining']}.")
+        if tera_cost > player["tera_budget_remaining"]:
+            raise DraftError(
+                f"❌ Making **{row['pokemon']}** a Tera Captain costs {tera_cost} Tera "
+                f"points and **{player['display_name']}** has "
+                f"{player['tera_budget_remaining']} left.")
+
+        conn.execute("UPDATE rosters SET cost = ?, tera_captain = 1 WHERE id = ?",
+                     (tera_cost, row["id"]))
+        conn.execute(
+            "UPDATE players SET budget_remaining = budget_remaining - ?, "
+            "tera_budget_remaining = tera_budget_remaining - ? WHERE id = ?",
+            (extra, tera_cost, player["id"]))
+    else:
+        if not row["tera_captain"]:
+            raise DraftError(f"❌ **{row['pokemon']}** is not one of "
+                             f"**{player['display_name']}**'s Tera Captains.")
+        # Back to the plain price, giving back the Tera tax and the Tera points.
+        base = row["cost"] if cost is None else cost
+        conn.execute("UPDATE rosters SET cost = ?, tera_captain = 0 WHERE id = ?",
+                     (base, row["id"]))
+        conn.execute(
+            "UPDATE players SET budget_remaining = budget_remaining + ?, "
+            "tera_budget_remaining = tera_budget_remaining + ? WHERE id = ?",
+            (row["cost"] - base, row["cost"], player["id"]))
+    conn.commit()
+
+    updated = get_player_by_id(conn, player["id"])
+    return {
+        "player": updated,
+        "pokemon": row["pokemon"],
+        "on": bool(on),
+        "cost": conn.execute("SELECT cost FROM rosters WHERE id = ?",
+                             (row["id"],)).fetchone()["cost"],
+        "was_cost": row["cost"],
+        "captains": tera_captains(conn, draft["id"], player["id"]),
+        "budget_remaining": updated["budget_remaining"],
+        "tera_budget_remaining": updated["tera_budget_remaining"],
+    }
+
+
 def propose_trade(conn, draft, user_id, drops, gets, partner_user_id=None):
     """/trade - record a pending trade for an admin to approve.
 
@@ -2284,6 +2373,7 @@ def _apply_trade(conn, trade):
     gets = json.loads(trade["gets"])
 
     notes = []
+    tera_back = []      # (player id, Tera points) - a captaincy does not travel
     drop_total = 0
     for name in drops:
         row = find_owner(conn, pool_id, normalize(name))
@@ -2296,11 +2386,19 @@ def _apply_trade(conn, trade):
                          f"{proposer['display_name']}'s, so it was left there.")
             continue
         drop_total += row["cost"]
+        if row["tera_captain"]:
+            tera_back.append((row["player_id"], row["cost"]))
+            notes.append(
+                f"{row['pokemon']} was one of {proposer['display_name']}'s Tera "
+                f"Captains. A captaincy does not travel with a trade, so they have "
+                f"their {row['cost']} Tera points back and whoever ends up with it "
+                f"can nominate it again with `/teracaptain`.")
         if partner is None:
             conn.execute("DELETE FROM rosters WHERE id = ?", (row["id"],))
         else:
-            conn.execute("UPDATE rosters SET player_id = ?, source = 'trade' WHERE id = ?",
-                         (partner["id"], row["id"]))
+            conn.execute(
+                "UPDATE rosters SET player_id = ?, source = 'trade', tera_captain = 0 "
+                "WHERE id = ?", (partner["id"], row["id"]))
 
     get_total = 0
     given_up = []
@@ -2320,6 +2418,14 @@ def _apply_trade(conn, trade):
                          f"{partner['display_name']}'s, so it was left there.")
         else:
             get_total += row["cost"]
+            if row["tera_captain"]:
+                giver = get_player_by_id(conn, row["player_id"])
+                tera_back.append((row["player_id"], row["cost"]))
+                notes.append(
+                    f"{row['pokemon']} was one of {giver['display_name']}'s Tera "
+                    f"Captains. A captaincy does not travel with a trade, so they have "
+                    f"their {row['cost']} Tera points back and "
+                    f"{proposer['display_name']} can nominate it with `/teracaptain`.")
             if partner is None and row["player_id"] != proposer["id"]:
                 # A free-agency pickup of something still sitting on another
                 # roster: the trade dropping it has not landed yet, so this
@@ -2331,10 +2437,15 @@ def _apply_trade(conn, trade):
                     f"{row['pokemon']} was still on {loser['display_name']}'s roster, "
                     f"waiting for the trade that drops it; it has moved across and "
                     f"they have their {row['cost']} points back.")
-            conn.execute("UPDATE rosters SET player_id = ?, source = 'trade' WHERE id = ?",
-                         (proposer["id"], row["id"]))
+            conn.execute(
+                "UPDATE rosters SET player_id = ?, source = 'trade', tera_captain = 0 "
+                "WHERE id = ?", (proposer["id"], row["id"]))
 
     if config.TRADE_ADJUSTS_BUDGET:
+        for player_id, points in tera_back:
+            conn.execute(
+                "UPDATE players SET tera_budget_remaining = tera_budget_remaining + ? "
+                "WHERE id = ?", (points, player_id))
         for player_id, cost in given_up:
             conn.execute("UPDATE players SET budget_remaining = budget_remaining + ? WHERE id = ?",
                          (cost, player_id))

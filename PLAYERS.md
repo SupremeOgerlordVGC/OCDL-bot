@@ -151,6 +151,10 @@ Add `tera_captain: True` to a pick to make it a captain:
 
 Use `/search` to see both prices. Some Pokémon have no Tera price at all — they are **Tera banned** and can never be captains.
 
+**Already have it on your team?** `/teracaptain pokemon:Great Tusk` makes something on your roster a captain — including anything you **traded** for, which is the only way those can become one. You are charged the Tera price then: the difference from your normal budget, and the whole Tera price from your Tera budget. Your pool is told, because who has a captain is public.
+
+**Taking one off** frees Tera points, so ask a moderator — they can do it with `/teracaptain on:False`.
+
 `/roster` shows your Tera budget and which of your team are captains.
 ```
 

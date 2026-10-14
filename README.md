@@ -74,7 +74,7 @@ simple tiering sheet, or with the full league template — see
 | `sheets.py` | Optional Google Sheets reading and writing. |
 | `ui.py` | Turns draft events into Discord messages. |
 | `cogs/admin.py` | `/setup` `/edit` `/draft` `/canceldraft` `/archive` `/draft-moderator` `/postschedule` `/sync` `/inspectsheet` `/backup` |
-| `cogs/drafting.py` | `/pick` `/queuepick` `/makeuppick` `/editpick` `/status` `/progress` `/roster` |
+| `cogs/drafting.py` | `/pick` `/queuepick` `/makeuppick` `/editpick` `/teracaptain` `/status` `/progress` `/roster` |
 | `cogs/extras.py` | `/trade` `/approvetrade` `/rejecttrade` `/trades` `/updatetrades` `/subrequest` `/substitute` `/search` `/available` |
 | `results.py` | Match results: each game's winner, kills and deaths, and when a match counts as over. |
 | `cogs/results.py` | `/reportgame` `/reportreplay` `/champions` `/pokepaste` `/matchresult` `/setresult` `/cleargame` |
@@ -448,6 +448,7 @@ Nobody can use the moderator commands until an Administrator has run
 | `/queuepick round pokemon [costs] [tera]` | Any player | Queues up to 5 Pokémon in priority order for one of your upcoming turns. `tera` is a matching yes/no list. |
 | `/makeuppick round pokemon cost [tera_captain]` | Any player | Resolves a round you were skipped in. Does not change whose turn it is. |
 | `/editpick round pokemon cost [tera_captain] [player]` | Own picks **until the next pick is made**; moderators any time | Replaces a pick, correcting roster, budgets, availability and history. A moderator can also use it to *add* a pick for a round with nothing recorded. |
+| `/teracaptain pokemon [on] [for_player]` | Any player, for their own team | Tera formats: makes a Pokémon already on your roster a Tera Captain, charged its Tera price against both budgets. The only way one that arrived in a trade can become a captain. `on:False` (moderators) takes a captaincy off and gives the points back. |
 | `/myqueue [round]` | Any player | Shows what you have queued, always privately. In a league's admin channel a moderator instead gets dropdowns to look a player up. |
 | `/cancelqueue [round] [player]` | Own queue; moderators for anyone | Deletes a queue before it fires. Costs nothing: no pick undone, no clock touched, no skip counted. |
 | `/finishdrafting` | Any player | Stops your drafting early, keeping the team you have, once you are past the league's minimum. Asks you to confirm. Your later turns are passed over. |
@@ -657,6 +658,17 @@ That is exactly what the template's own formula does: the Rosters tab subtracts
 every row, and the Tera budget subtracts only the ticked ones. In a Tera format
 the bot writes to the **`Tera Rosters`** tab; otherwise to **`Rosters`**.
 
+**A pick carries the choice; a trade does not.** `/pick` takes `tera_captain`,
+but a Pokémon that arrives in a trade has no pick behind it, so
+**`/teracaptain pokemon:...`** is how it becomes one: the Tera price is charged
+against both budgets then, and the roster's cost changes from the normal price
+to the Tera price (which is what the spreadsheet works a budget out from). A
+captaincy **does not travel with a trade** — whoever gives one up has their
+Tera points back, and the coach receiving it nominates it themselves if they
+want it and can afford it. Taking a captaincy off frees Tera points, so that is
+a moderator's call (`on:False`), and either way the pool channel is told,
+because who has a captain is public.
+
 ### Connecting a document
 
 1. In the [Google Cloud console](https://console.cloud.google.com/), create a
@@ -726,8 +738,10 @@ does not increase.
 **Tera Captains are priced from the Tera column, against both budgets.** The
 Tera price replaces the normal one rather than adding to it, and may be lower.
 A Pokémon with no Tera price cannot be a captain. Maximum three per team, no
-minimum. This works with no document at all, since `/pick` carries the price —
-a mistake is fixed with `/editpick`.
+minimum. Picking works with no document at all, since `/pick` carries the price
+— a mistake is fixed with `/editpick`. Nominating one afterwards with
+`/teracaptain` does need the tiering list, because nobody has typed the Tera
+price and the bot will not guess at a budget.
 
 **Trades are judged by moderators, not by the bot.** `/trade` records what was
 asked for and sends it to the admin channel; the only hard limits are the size

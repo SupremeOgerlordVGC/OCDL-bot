@@ -106,6 +106,7 @@ class CommandOptionTests(unittest.TestCase):
         "pick": {"round", "pokemon", "cost", "tera_captain"},
         "makeuppick": {"round", "pokemon", "cost", "tera_captain"},
         "editpick": {"round", "pokemon", "cost", "tera_captain", "player"},
+        "teracaptain": {"pokemon", "on", "for_player"},
         "queuepick": {"round", "pokemon", "costs", "tera"},
         "cancelqueue": {"round", "player"},
         # No player option on purpose: a declared option is visible to

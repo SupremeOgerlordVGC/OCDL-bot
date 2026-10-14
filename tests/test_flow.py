@@ -2143,6 +2143,112 @@ class TradeEffectCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.owner("Garchomp"), "Alex")
 
 
+class TeraCaptainCommandTests(unittest.IsolatedAsyncioTestCase):
+    """/teracaptain, which is how anything that arrived in a trade becomes one.
+
+    Garchomp is 12 to draft and 11 as a captain in the stub list, so the
+    difference goes the other way too; Rotom-Wash cannot be a captain at all.
+    """
+
+    async def asyncSetUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9900)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.bot.sheets = StubPriceList()
+        self.pool_id = make_pool(self.conn, 9900, [(11, "Larry"), (22, "Alex")],
+                                 budget=100, tera_budget=28, max_picks=2, name="Tera",
+                                 doc_url="https://docs.google.com/spreadsheets/d/T/edit")
+        pool = rules.get_pool(self.conn, self.pool_id)
+        rules.start_pool(self.conn, pool)
+        rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id), 11, 1,
+                        "Garchomp", 12)
+        rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id), 22, 1,
+                        "Rotom-Wash", 8)
+        self.cog = DraftingCog(self.bot)
+
+    async def asyncTearDown(self):
+        self.bot.timers.cancel_all()
+
+    def player(self, user_id=11, name="Larry"):
+        return FakeInteraction(self.bot, 9900, user_id, name)
+
+    def moderator(self):
+        interaction = FakeInteraction(self.bot, 9900, 99, "Mod")
+        interaction.user.guild_permissions = SimpleNamespace(administrator=True)
+        return interaction
+
+    def larry(self):
+        return rules.get_player(self.conn, self.pool_id, 11)
+
+    def row(self, pokemon):
+        return rules.find_owner(self.conn, self.pool_id, rules.normalize(pokemon))
+
+    async def test_a_player_nominates_one_of_their_own(self):
+        interaction = self.player()
+        await self.cog.teracaptain.callback(self.cog, interaction, pokemon="garchomp")
+        self.assertIn("is now a Tera Captain", interaction.text)
+        self.assertIn("12 → 11", interaction.text)
+        self.assertEqual(self.larry()["tera_budget_remaining"], 28 - 11)
+        self.assertEqual(self.larry()["budget_remaining"], 100 - 11)
+        self.assertEqual(self.row("Garchomp")["tera_captain"], 1)
+        # Captains are public: the channel is told, not just the player.
+        self.assertIn("has made **Garchomp** a **Tera Captain**", self.channel.text)
+
+    async def test_somebody_elses_pokemon_is_refused(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.cog.teracaptain.callback(self.cog, self.player(), pokemon="rotom-wash")
+        self.assertIn("**Alex**'s roster", str(caught.exception))
+
+    async def test_one_that_cannot_be_a_captain_is_refused(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.cog.teracaptain.callback(
+                self.cog, self.player(22, "Alex"), pokemon="rotom-wash")
+        self.assertIn("cannot be a Tera Captain", str(caught.exception))
+
+    async def test_a_name_that_is_not_on_the_list_is_refused(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.cog.teracaptain.callback(self.cog, self.player(), pokemon="Garchmop")
+        self.assertIn("not on this league's tiering list", str(caught.exception))
+
+    async def test_only_a_moderator_takes_a_captaincy_off(self):
+        await self.cog.teracaptain.callback(self.cog, self.player(), pokemon="garchomp")
+        with self.assertRaises(rules.DraftError):
+            await self.cog.teracaptain.callback(self.cog, self.player(),
+                                                pokemon="garchomp", on=False)
+        self.assertEqual(self.row("Garchomp")["tera_captain"], 1, "nothing changed")
+
+        interaction = self.moderator()
+        await self.cog.teracaptain.callback(self.cog, interaction, pokemon="garchomp",
+                                            on=False, for_player=FakeMember(11, "Larry"))
+        self.assertIn("no longer a Tera Captain", interaction.text)
+        self.assertEqual(self.row("Garchomp")["tera_captain"], 0)
+        self.assertEqual(self.larry()["tera_budget_remaining"], 28)
+        self.assertEqual(self.larry()["budget_remaining"], 100 - 12, "back to its draft price")
+
+    async def test_a_player_cannot_nominate_for_somebody_else(self):
+        with self.assertRaises(rules.DraftError):
+            await self.cog.teracaptain.callback(self.cog, self.player(), pokemon="rotom-wash",
+                                                for_player=FakeMember(22, "Alex"))
+
+    async def test_a_traded_pokemon_can_be_made_a_captain(self):
+        """The case this was written for: it arrived in a trade, so no pick
+        carries the choice."""
+        pool = rules.get_pool(self.conn, self.pool_id)
+        rules.propose_trade(self.conn, pool, 11, ["Garchomp"], ["Rotom-Wash"],
+                            partner_user_id=22)
+        rules.approve_trade(self.conn, pool, 1, 99)
+        rules.apply_trades(self.conn, pool["league_id"], 1)
+        self.assertEqual(self.row("Rotom-Wash")["player_id"], self.larry()["id"])
+
+        # Rotom-Wash cannot be one, but Garchomp - now Alex's - can.
+        interaction = self.player(22, "Alex")
+        await self.cog.teracaptain.callback(self.cog, interaction, pokemon="Garchomp")
+        self.assertIn("is now a Tera Captain", interaction.text)
+        alex = rules.get_player(self.conn, self.pool_id, 22)
+        self.assertEqual(alex["tera_budget_remaining"], 28 - 11)
+        self.assertEqual(self.row("Garchomp")["tera_captain"], 1)
+
+
 class ReportedMatchTradeTests(unittest.IsolatedAsyncioTestCase):
     """Reporting a match is what puts that week's approved trades into effect,
     through the command a player actually uses."""

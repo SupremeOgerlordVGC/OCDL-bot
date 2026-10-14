@@ -568,6 +568,78 @@ class DraftingCog(commands.Cog):
         # An edit can free up the old Pokémon, so push the whole picture.
         ui.resync_sheet(self.bot, draft["id"])
 
+    # ---- /teracaptain ---------------------------------------------------
+
+    @app_commands.command(
+        name="teracaptain",
+        description="Tera formats: make a Pokémon on your team a Tera Captain.")
+    @app_commands.describe(
+        pokemon="One of your Pokémon",
+        on="Moderators only: False takes a captaincy off again",
+        for_player="Moderators only: do this for somebody else")
+    @app_commands.autocomplete(pokemon=pokemon_autocomplete)
+    async def teracaptain(self, interaction: discord.Interaction, pokemon: str,
+                          on: bool = True, for_player: discord.Member = None):
+        """A pick carries the choice; a trade does not. This is how anything
+        that arrived in a trade becomes a Tera Captain - and the only way one
+        comes off, which is a moderator's call because it frees Tera points."""
+        draft = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
+        await interaction.response.defer(ephemeral=True)
+
+        whose = interaction.user.id
+        if for_player is not None and for_player.id != interaction.user.id:
+            ui.require_moderator(self.bot, interaction)
+            whose = for_player.id
+        if not on:
+            ui.require_moderator(self.bot, interaction)
+        player = rules.require_player(self.bot.conn, draft["id"], whose)
+
+        state, entry = await lookup_price(self.bot, draft, pokemon)
+        if state == "unavailable":
+            raise rules.DraftError(
+                "❌ I cannot read this league's tiering list, and a Tera Captain is "
+                "charged its Tera price, so I will not guess. Try again shortly.")
+        if state == "missing":
+            raise rules.DraftError(
+                f"❌ **{pokemon}** is not on this league's tiering list. "
+                f"`/search {pokemon}` finds the right spelling.")
+        result = rules.set_tera_captain(
+            self.bot.conn, draft, player, entry["name"], entry["cost"],
+            entry["tera_cost"], on=on, tera_banned=entry["tera_banned"])
+
+        by = (f" *(by <@{interaction.user.id}>)*"
+              if whose != interaction.user.id or not on else "")
+        if on:
+            await interaction.followup.send(
+                f"⭐ **{result['pokemon']}** is now a Tera Captain "
+                f"({result['captains']} of {config.MAX_TERA_CAPTAINS}).\n"
+                f"• Charged at its Tera price: **{result['was_cost']} → "
+                f"{result['cost']}** points\n"
+                f"• Budget left: **{result['budget_remaining']}** · Tera points left: "
+                f"**{result['tera_budget_remaining']}**", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                f"✅ **{result['pokemon']}** is no longer a Tera Captain, and is back "
+                f"to **{result['cost']}** points.\n"
+                f"• Budget left: **{result['budget_remaining']}** · Tera points left: "
+                f"**{result['tera_budget_remaining']}**", ephemeral=True)
+
+        # Captains are public: they are on the spreadsheet, and who has one is
+        # part of knowing what you are up against.
+        await ui.safe_send(
+            interaction.channel,
+            (f"⭐ **{result['player']['display_name']}** has made **{result['pokemon']}** "
+             f"a **Tera Captain**{by} — charged at its Tera price "
+             f"({result['was_cost']} → {result['cost']}).\n"
+             f"Budget remaining: **{result['budget_remaining']}** · Tera points "
+             f"remaining: **{result['tera_budget_remaining']}**"
+             if on else
+             f"⭐ **{result['pokemon']}** is no longer **{result['player']['display_name']}**'s "
+             f"Tera Captain{by}, and is back to {result['cost']} points.\n"
+             f"Budget remaining: **{result['budget_remaining']}** · Tera points "
+             f"remaining: **{result['tera_budget_remaining']}**"))
+        ui.resync_sheet(self.bot, draft["id"])
+
     # ---- /status --------------------------------------------------------
 
     @app_commands.command(name="status", description="Show the current state of this draft.")

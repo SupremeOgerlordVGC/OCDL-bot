@@ -154,6 +154,8 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 **`/trade ... for_player:@Someone`** — file a trade on behalf of a player who cannot manage the command. It still needs approving.
 
+**⭐ A Tera Captaincy does not travel with a trade** *(Tera formats)*. Whoever gives one up has their Tera points back; the coach receiving it makes it a captain themselves with **`/teracaptain pokemon:...`**, which charges the Tera price against both budgets. That command is also the only way a Pokémon somebody traded for can ever become a captain. **Taking one off is yours**: `/teracaptain pokemon:... on:False for_player:@Someone`, which gives both budgets their points back.
+
 **🔁 Substitutes get 24 hours of unlimited transactions** when they take over during or after a draft. Theirs don't count against the trade cap, and they take effect when the window closes — there is no match of their own to wait for, so approve them promptly. They can replace the team they inherited but not grow it.
 
 **The limit counts Pokémon picked up**, not dropped: each player counts what they receive. Trades proposed in the **24 hours after a pool's draft ends** (the bot pings the pool when it opens) don't count at all. A player dropping nothing types `nil` or `0` for `drops`.
@@ -248,7 +250,13 @@ For moderators who already have the blocks above. Everything here is also writte
 ```
 
 ```
-**🆕 What's new (2/2) — finishing a match**
+**🆕 What's new (2/2) — finishing a match, and Tera Captains**
+
+**Tera Captains for a traded Pokémon**
+• **`/teracaptain pokemon:...`** — a player makes something already on their roster a Tera Captain, charged its Tera price against both budgets. A pick carried that choice and a trade never did, so until now a Pokémon somebody traded for could not be one at all. It is announced in the pool.
+• A captaincy **does not travel with a trade**: whoever gives one up has their Tera points back, and the new owner nominates it themselves. Taking one off is yours — `on:False`, plus `for_player:` for somebody else.
+
+**Finishing a match**
 
 • **A match is over when somebody has won a majority of its games** — two of three by default. **`/setup best_of:1`** or **`/edit best_of:1`** for a league that plays single games; `/edit` takes it mid-season. A best-of-one league left at three never finishes by itself, so its trades would only move on `/updatetrades`.
 • **The result is posted in the scheduling channel** when a match ends, with the score, and that is when the trades land.
