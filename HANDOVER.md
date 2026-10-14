@@ -105,8 +105,12 @@ drafting, so nothing is due for them yet. To stop that happening, set
   matches were carried and from when. `apps/web/src/pages/discord-matches.tsx`
   is the view to extend. Another session works in that repo — coordinate.
 * **Kills and deaths written to the league spreadsheet.** Larry's lowest
-  priority, and he wants to study the template first, so it is deliberately
-  untouched.
+  priority. The template has been read and written up in
+  [`KD-NOTES.md`](KD-NOTES.md): the bot would only ever write into the
+  `Matches` tab, in the per-game kills/deaths columns, and every other tab
+  keeps itself up to date from it. That note also lists what is worth settling
+  before building, including that best-of-three is baked into the result
+  formula. No code yet.
 * **Showdown-room leagues** need a live check of the draft pages in the real
   client, and the auto points for the format reviewing. Playoffs and a
   standings export are possible extras. That is Showdown and site work.
