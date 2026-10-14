@@ -118,33 +118,45 @@ A queue costs a player nothing to lose — it is only a plan for a turn they mig
 
 ---
 
-## Block 6 — trades
+## Block 6 — trades: deciding them
 
 ```
 **🤝 Trades** *(full-season drafts only)*
 
-Players propose with `/trade` in their draft channel. It lands in the **admin channel** with a number.
+Players propose with `/trade` in their draft channel. It lands in the **admin channel** with a number, the budget arithmetic, and any warnings.
 
 **`/approvetrade trade_id:3`** — approves it. Rosters and budgets change at the **next `/postschedule`**, so a roster never changes mid-week. Only works once.
+
 **`/rejecttrade trade_id:3`** — declines it. Nothing changes.
-**`/unapprovetrade trade_id:3`** — takes back an approval given by mistake, putting the trade back to pending so you can decide again. Only works while it is still waiting: approving moves nothing, so there is nothing to undo. Once a week has been posted the Pokémon have changed hands and you need a fresh `/trade` to move them back. The channel is told, since the approval was announced there.
 
 **`/trades`** — lists every trade and its status.
 
-Add `name:OCDL Season 1` to any of these if your admin channel runs more than one draft.
+Add `name:OCDL Season 1` to any of these if your admin channel runs more than one draft. Trade numbers are **per draft**, so two leagues sharing an admin channel never both have a #1.
 
-**The limit counts Pokémon picked up**, not dropped: each player counts what they receive. Trades proposed in the **24 hours after a pool's draft ends** (the bot pings the pool when it opens) don't count at all. A player dropping nothing types `nil` or `0` for `drops`.
+**What the bot refuses before you ever see it:** a name that is not on the tiering list, a Pokémon with no price, one the proposer does not own, a free-agency pickup that somebody has already drafted, and anything either side cannot afford. Names are stored in the tiering list's own spelling, so `rotom-mow` is filed as `Rotom-Mow`.
 
-**The bot does not judge trades — you do.** It only checks the size limit and each player's trade cap. Anything odd — trading a Pokémon they don't own, claiming one already drafted — is attached to the message as a ⚠️ warning for you to read, not blocked.
-
-**`/trade ... for_player:@Someone`** — file a trade on behalf of a player who can't manage the command. It still needs approving.
-
-Trade numbers are **per draft**, so two leagues sharing an admin channel never both have a #1.
+**What is still yours to judge:** whether a trade is *fair*. Oddities — a roster going over size, somebody dropping nothing, a partner receiving nothing — are attached as ⚠️ warnings, not blocked.
 ```
 
 ---
 
-## Block 7 — spreadsheet and season
+## Block 7 — trades: fixing them
+
+```
+**🔧 When a trade needs fixing**
+
+**`/edittrade trade_id:3 drops:Garchomp gets:Rotom-Wash`** — rewrites both sides of a trade that is nearly right, instead of making the player retype it. The edit is held to all the same rules, and an edited trade **goes back to pending** — you approved the Pokémon in front of you, so changed ones need a fresh decision. Both channels are told.
+
+**`/unapprovetrade trade_id:3`** — takes back an approval given by mistake, putting it back to pending. Only works while it is still waiting: approving moves nothing, so there is nothing to undo. Once a week has been posted the Pokémon have changed hands and you need a fresh `/trade` to move them back.
+
+**`/trade ... for_player:@Someone`** — file a trade on behalf of a player who cannot manage the command. It still needs approving.
+
+**The limit counts Pokémon picked up**, not dropped: each player counts what they receive. Trades proposed in the **24 hours after a pool's draft ends** (the bot pings the pool when it opens) don't count at all. A player dropping nothing types `nil` or `0` for `drops`.
+```
+
+---
+
+## Block 8 — spreadsheet and season
 
 ```
 **📊 Spreadsheet and schedule**
@@ -161,7 +173,7 @@ Trade numbers are **per draft**, so two leagues sharing an admin channel never b
 
 ---
 
-## Block 8 — ending and housekeeping
+## Block 9 — ending and housekeeping
 
 ```
 **🗃️ Finishing up**

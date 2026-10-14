@@ -19,7 +19,7 @@ from discord.ext import commands
 import config
 import draft as rules
 import ui
-from cogs.drafting import pokemon_autocomplete, tiering_tab_for
+from cogs.drafting import lookup_price, pokemon_autocomplete, tiering_tab_for
 
 log = logging.getLogger("draftbot.extras")
 
@@ -74,6 +74,51 @@ class ExtrasCog(commands.Cog):
 
     # ---- /trade ---------------------------------------------------------
 
+    async def resolve_trade_sides(self, pool, drop_list, get_list):
+        """Check both sides of a trade against the league's tiering list.
+
+        A trade is typed out by hand, and a misspelling that reaches the
+        admins gets approved and then applied as nonsense: the name
+        matches nothing on a roster, so nothing moves. So the names are
+        rewritten in place to the list's own spelling, which is also what
+        the spreadsheet needs to price them.
+
+        Returns {normalised name: cost} for the budget check. With no
+        document, or with Google unreachable, there is nothing to check
+        against and the names are simply tidied up.
+        """
+        prices, unknown, unobtainable = {}, [], []
+        for names, receiving in ((drop_list, False), (get_list, True)):
+            for index, name in enumerate(names):
+                status, entry = await lookup_price(self.bot, pool, name)
+                if status == "missing":
+                    unknown.append(name)
+                    continue
+                if status != "ok":
+                    names[index] = rules.tidy_name(name)
+                    continue
+                names[index] = entry["name"]        # the list's own spelling
+                if entry["cost"] is None:
+                    if receiving:
+                        unobtainable.append(entry["name"])
+                else:
+                    prices[rules.normalize(entry["name"])] = entry["cost"]
+
+        if unknown:
+            raise rules.DraftError(
+                "❌ Not in this league's tiering list: "
+                + ", ".join(f"**{name}**" for name in unknown)
+                + ".\nCheck the spelling — `/search` finds the right name, and "
+                  "the list's spelling is what the spreadsheet needs."
+            )
+        if unobtainable:
+            raise rules.DraftError(
+                "❌ Not draftable in this league: "
+                + ", ".join(f"**{name}**" for name in unobtainable)
+                + ". They have no price on the tiering list."
+            )
+        return prices
+
     @app_commands.command(name="trade", description="Propose a trade for a moderator to approve.")
     @app_commands.describe(
         drops="Up to 5 Pokémon you are giving up, separated by commas, or nil / 0 to give up nothing",
@@ -104,6 +149,18 @@ class ExtrasCog(commands.Cog):
         drop_list = rules.parse_pokemon_list(drops, config.MAX_TRADE_SIZE, allow_nothing=True)
         get_list = rules.parse_pokemon_list(gets, config.MAX_TRADE_SIZE)
 
+        prices = await self.resolve_trade_sides(pool, drop_list, get_list)
+
+        # Then the mechanical rules, so the admins only ever judge a trade
+        # that could actually go through.
+        if partner is not None and partner.id == proposer_id:
+            raise rules.DraftError("❌ You cannot trade with yourself.")
+        proposer = rules.require_player(self.bot.conn, pool["id"], proposer_id)
+        partner_player = (rules.require_player(self.bot.conn, pool["id"], partner.id)
+                          if partner is not None else None)
+        maths = rules.check_trade(self.bot.conn, pool, proposer, partner_player,
+                                  drop_list, get_list, prices)
+
         record, warnings = rules.propose_trade(
             self.bot.conn, pool, proposer_id, drop_list, get_list,
             partner_user_id=partner.id if partner else None,
@@ -123,6 +180,14 @@ class ExtrasCog(commands.Cog):
             allowance = (f"\n• Pokémon picked up in trades by proposer: {used} / {pool['max_trades']}"
                          f" (this trade adds {len(get_list)})")
 
+        budget_line = (
+            f"\n• Budget: **{proposer['budget_remaining']} → {maths['after']}** "
+            f"(back {maths['refund']}, costs {maths['charge']})")
+        if maths["partner_after"] is not None:
+            budget_line += (f"\n• Partner's budget: "
+                            f"**{partner_player['budget_remaining']} → "
+                            f"{maths['partner_after']}**")
+
         entered_by = f" *(entered by <@{interaction.user.id}>)*" if on_behalf else ""
         partner_text = partner.mention if partner else "*undrafted pool (free agency)*"
 
@@ -136,7 +201,7 @@ class ExtrasCog(commands.Cog):
             f"• Giving up: {rules.trade_side(drop_list)}\n"
             f"• Receiving: {', '.join(get_list)}\n"
             f"• Proposed at: {record['created_at']} UTC"
-            f"{allowance}\n\n"
+            f"{budget_line}{allowance}\n\n"
             f"Approve with `/approvetrade trade_id:{record['trade_number']} "
             f"name:{league['name']}` or reject with `/rejecttrade`."
             f"{notes}"
@@ -150,6 +215,66 @@ class ExtrasCog(commands.Cog):
             f"Nothing changes until a moderator approves it, and then rosters change "
             f"when the next week is posted.",
             ephemeral=True,
+        )
+
+    # ---- /edittrade -----------------------------------------------------
+
+    @app_commands.command(name="edittrade",
+                          description="Moderator only: fix the Pokémon in a trade before it applies.")
+    @app_commands.describe(
+        trade_id="The trade number",
+        drops="What the proposer gives up, separated by commas, or nil / 0 for nothing",
+        gets="What the proposer receives, separated by commas",
+        name="The league's name, if this channel runs more than one")
+    async def edittrade(self, interaction: discord.Interaction, trade_id: int,
+                        drops: str, gets: str, name: str = None):
+        ui.require_moderator(self.bot, interaction)
+        league = self.resolve_league(interaction, name)
+
+        await interaction.response.defer(ephemeral=True)
+
+        trade = rules.get_trade(self.bot.conn, league["id"], trade_id)
+        if trade is None:
+            raise rules.DraftError(f"❌ There is no trade #{trade_id} in **{league['name']}**.")
+        pool = rules.get_pool(self.bot.conn, trade["pool_id"])
+        proposer = rules.get_player_by_id(self.bot.conn, trade["proposer_id"])
+        partner = (rules.get_player_by_id(self.bot.conn, trade["partner_id"])
+                   if trade["partner_id"] else None)
+
+        drop_list = rules.parse_pokemon_list(drops, config.MAX_TRADE_SIZE, allow_nothing=True)
+        get_list = rules.parse_pokemon_list(gets, config.MAX_TRADE_SIZE)
+
+        # The edited trade is held to exactly the same rules as a new one.
+        prices = await self.resolve_trade_sides(pool, drop_list, get_list)
+        maths = rules.check_trade(self.bot.conn, pool, proposer, partner,
+                                  drop_list, get_list, prices)
+
+        record, before = rules.edit_trade(self.bot.conn, pool, trade_id,
+                                          drop_list, get_list)
+
+        was_approved = before["status"] == "approved"
+        await interaction.followup.send(
+            f"✏️ Trade #{trade_id} updated"
+            + (" and sent back for approval, since you approved the old version."
+               if was_approved else ".")
+            + f"\n• Giving up: {rules.trade_side(before['drops'])} → "
+              f"**{rules.trade_side(record['drops'])}**"
+            + f"\n• Receiving: {rules.trade_side(before['gets'])} → "
+              f"**{rules.trade_side(record['gets'])}**"
+            + f"\n• Budget: **{proposer['budget_remaining']} → {maths['after']}**"
+            + f"\n\nApprove with `/approvetrade trade_id:{trade_id} name:{league['name']}`.",
+            ephemeral=True,
+        )
+
+        await ui.safe_send(
+            self.bot.get_channel(pool["channel_id"]),
+            f"✏️ **Trade #{trade_id} was corrected by a moderator.**\n"
+            f"• **{proposer['display_name']}** gives up: "
+            f"{rules.trade_side(record['drops'])}\n"
+            f"• **{proposer['display_name']}** receives: "
+            f"{rules.trade_side(record['gets'])}\n"
+            + ("It needs approving again before it takes effect."
+               if was_approved else "It is still waiting for a decision."),
         )
 
     # ---- /approvetrade --------------------------------------------------

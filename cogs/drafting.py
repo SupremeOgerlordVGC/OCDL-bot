@@ -43,6 +43,27 @@ async def tiering_tab_for(bot, draft):
     return cached
 
 
+async def lookup_price(bot, draft, pokemon):
+    """Look a Pokémon up in a league's price list.
+
+    Returns one of:
+      ("unavailable", None) - no document, or Google is not responding.
+                              The draft carries on with no cost check.
+      ("missing", None)     - the list works but has no such Pokémon.
+      ("ok", entry)         - found.
+    """
+    if not bot.sheets.enabled or not draft["doc_url"]:
+        return "unavailable", None
+    try:
+        tab = await tiering_tab_for(bot, draft)
+        entry = await asyncio.to_thread(
+            bot.sheets.lookup, draft["doc_url"], pokemon, tab)
+    except Exception:
+        log.exception("price lookup failed; continuing without a cost check")
+        return "unavailable", None
+    return ("ok", entry) if entry else ("missing", None)
+
+
 async def pokemon_autocomplete(interaction: discord.Interaction, current: str):
     """Suggest Pokémon from the linked price list as the user types.
 
@@ -78,24 +99,8 @@ class DraftingCog(commands.Cog):
     # ---- Google Sheets helpers -----------------------------------------
 
     async def sheet_entry(self, draft, pokemon):
-        """Look a Pokémon up in the league's price list.
-
-        Returns one of:
-          ("unavailable", None) - no document, or Google is not responding.
-                                  The draft carries on with no cost check.
-          ("missing", None)     - the list works but has no such Pokémon.
-          ("ok", entry)         - found.
-        """
-        if not self.bot.sheets.enabled or not draft["doc_url"]:
-            return "unavailable", None
-        try:
-            tab = await tiering_tab_for(self.bot, draft)
-            entry = await asyncio.to_thread(
-                self.bot.sheets.lookup, draft["doc_url"], pokemon, tab)
-        except Exception:
-            log.exception("price lookup failed; continuing without a cost check")
-            return "unavailable", None
-        return ("ok", entry) if entry else ("missing", None)
+        """This cog's shorthand for lookup_price."""
+        return await lookup_price(self.bot, draft, pokemon)
 
     async def resolve_pokemon(self, draft, pokemon, cost, tera_captain=False):
         """Check a Pokémon against the price list and return its proper name.

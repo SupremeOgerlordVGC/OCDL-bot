@@ -93,12 +93,34 @@ def parse_start_time(raw, now=None):
 NOTHING = {"nil", "0", "none", "nothing", "-"}
 
 
+def tidy_name(name):
+    """Capitalise a Pokémon name the way the tiering lists write them.
+
+    The lists themselves are the authority on spelling, so this is only
+    the fallback for a league with no document: it means "rotom-mow"
+    still reaches a roster, a spreadsheet and the admins as "Rotom-Mow".
+
+    Each word and each hyphenated part is capitalised, and nothing else is
+    touched, so "Porygon-Z", "Mega Charizard Y" and "Farfetch'd" survive.
+    An all-capitals name is lowered first, so "ROTOM-MOW" tidies up too.
+    """
+    name = str(name).strip()
+    if name and not any(character.islower() for character in name):
+        name = name.lower()
+    parts = re.split(r"([ \-])", name)
+    return "".join(part if part in " -" else part[:1].upper() + part[1:]
+                   for part in parts)
+
+
 def parse_pokemon_list(raw, limit, allow_nothing=False):
     """Split a comma separated list into clean names, rejecting duplicates.
     With allow_nothing, "nil" or "0" (see NOTHING) is an empty list."""
     if allow_nothing and str(raw).strip().lower() in NOTHING:
         return []
     names = [part.strip() for part in str(raw).split(",")]
+    # "Sinistcha, Salamence, and Decidueye-Hisui" is how people write lists,
+    # and the trailing "and " used to become part of the name.
+    names = [re.sub(r"^and\s+", "", n, flags=re.IGNORECASE).strip() for n in names]
     names = [n for n in names if n]
     if not names:
         raise DraftError("❌ You need to name at least one Pokémon.")
@@ -1813,6 +1835,89 @@ def trade_warnings(conn, draft, proposer, partner, drops, gets):
     return notes
 
 
+def check_trade(conn, draft, proposer, partner, drops, gets, prices):
+    """Refuse a trade that cannot work, before an admin is asked to judge it.
+
+    Only the mechanical facts are checked here: that each side owns what it
+    is giving up, that a free-agency pickup is really undrafted, and that
+    the budget covers it. Whether a trade is *fair* is still the admins'
+    call, and anything merely odd stays a warning.
+
+    `prices` is {normalised name: cost} from the tiering list, passed in so
+    this stays free of Google. A name with no price is treated as costing
+    nothing, which is the same assumption the sheet makes.
+
+    Returns the budget arithmetic for the message the admins see.
+    """
+    def owned_by(player, names):
+        """The roster rows for these Pokemon, refusing anything they lack."""
+        rows = []
+        for name in names:
+            row = find_owner(conn, draft["id"], normalize(name))
+            if row is None:
+                raise DraftError(
+                    f"❌ **{name}** is not on anybody's roster in this draft. "
+                    f"Check the spelling against `/search {name}`."
+                )
+            if row["player_id"] != player["id"]:
+                owner = get_player_by_id(conn, row["player_id"])
+                raise DraftError(
+                    f"❌ **{row['pokemon']}** belongs to "
+                    f"**{owner['display_name']}**, not "
+                    f"**{player['display_name']}**."
+                )
+            rows.append(row)
+        return rows
+
+    def value(rows):
+        return sum(row["cost"] for row in rows)
+
+    def listed(names):
+        return sum(prices.get(normalize(name), 0) for name in names)
+
+    proposer_out = owned_by(proposer, drops)
+
+    if partner is None:
+        # Free agency: everything received must still be undrafted.
+        for name in gets:
+            row = find_owner(conn, draft["id"], normalize(name))
+            if row is not None:
+                owner = get_player_by_id(conn, row["player_id"])
+                raise DraftError(
+                    f"❌ **{row['pokemon']}** is already drafted by "
+                    f"**{owner['display_name']}**, so it cannot be picked up "
+                    f"from the undrafted pool. Trade with them instead by "
+                    f"adding `partner:`."
+                )
+        proposer_in = listed(gets)
+        partner_change = None
+    else:
+        partner_out = owned_by(partner, gets)
+        proposer_in = value(partner_out)
+        partner_change = partner["budget_remaining"] + proposer_in - value(proposer_out)
+        if partner_change < 0:
+            raise DraftError(
+                f"❌ **{partner['display_name']}** cannot afford their side: "
+                f"{partner['budget_remaining']} points, giving up {proposer_in} "
+                f"and taking on {value(proposer_out)}, which leaves "
+                f"{partner_change}."
+            )
+
+    refund = value(proposer_out)
+    after = proposer["budget_remaining"] + refund - proposer_in
+    if after < 0:
+        raise DraftError(
+            f"❌ That is over budget. **{proposer['display_name']}** has "
+            f"{proposer['budget_remaining']} points"
+            + (f", gets {refund} back for {trade_side(drops)}" if drops else "")
+            + f", and {trade_side(gets)} costs {proposer_in} — which leaves "
+            f"{after}."
+        )
+
+    return {"refund": refund, "charge": proposer_in, "after": after,
+            "partner_after": partner_change}
+
+
 def apply_sheet_cost(conn, draft, pokemon, cost):
     """Correct a roster entry's cost from the Pokédex, adjusting the budget.
 
@@ -1981,6 +2086,51 @@ def record_week(conn, league_id, week, pairs):
             (league_id, week, number, home, away, database.now()),
         )
     conn.commit()
+
+
+def edit_trade(conn, draft, trade_number, drops, gets):
+    """Moderator only: rewrite the two sides of a trade before it applies.
+
+    For a trade that is nearly right - a misspelling, or the wrong Pokemon
+    named - so it can be fixed in place instead of rejected and retyped by
+    the player.
+
+    An edited trade loses any approval it had. The admins approve the
+    Pokemon in front of them, so changing them has to send it back for a
+    fresh decision.
+    """
+    trade = get_trade(conn, draft["league_id"], trade_number)
+    if trade is None:
+        raise DraftError(f"❌ There is no trade #{trade_number} in this draft.")
+    if trade["applied_at"] is not None:
+        raise DraftError(
+            f"❌ Trade #{trade_number} is already in effect — it was applied in "
+            f"week {trade['applied_week']}, so it can no longer be changed."
+        )
+    if trade["status"] == "rejected":
+        raise DraftError(
+            f"❌ Trade #{trade_number} was rejected. The player can propose a "
+            f"replacement with `/trade`."
+        )
+    if not gets:
+        raise DraftError("❌ A trade needs at least one Pokémon to receive.")
+    if len(drops) > config.MAX_TRADE_SIZE or len(gets) > config.MAX_TRADE_SIZE:
+        raise DraftError(
+            f"❌ A trade may involve at most {config.MAX_TRADE_SIZE} Pokémon per side."
+        )
+
+    before = {
+        "drops": json.loads(trade["drops"]),
+        "gets": json.loads(trade["gets"]),
+        "status": trade["status"],
+    }
+    conn.execute(
+        "UPDATE trades SET drops = ?, gets = ?, status = 'pending', "
+        "resolved_at = NULL, resolved_by = NULL WHERE id = ?",
+        (json.dumps(drops), json.dumps(gets), trade["id"]),
+    )
+    conn.commit()
+    return get_trade(conn, draft["league_id"], trade_number), before
 
 
 def unapprove_trade(conn, draft, trade_number):

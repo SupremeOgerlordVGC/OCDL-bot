@@ -16,6 +16,7 @@ import random
 import sys
 import tempfile
 import time
+import json
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2850,6 +2851,213 @@ class UnapproveTradeTests(unittest.TestCase):
     def test_an_unknown_trade_number_is_refused(self):
         with self.assertRaises(draft.DraftError):
             draft.unapprove_trade(self.conn, self.live, 99)
+
+
+class CheckTradeTests(unittest.TestCase):
+    """The mechanical checks a trade must pass before admins see it.
+
+    Written after a league ran a week early and found trades that had been
+    approved with misspelled names: they matched nothing, so nothing moved.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=2100, players=2, budget=100,
+                                min_picks=1, max_picks=4)
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 60)
+        self.live = draft.get_pool(self.conn, self.draft["id"])
+        draft.make_pick(self.conn, self.live, user(2), 1, "Heatran", 30)
+        self.live = draft.get_pool(self.conn, self.draft["id"])
+        self.prices = {"rotom-wash": 25, "landorus": 90, "skarmory": 5}
+
+    def player(self, seat):
+        return draft.get_player(self.conn, self.draft["id"], user(seat))
+
+    def check(self, drops, gets, seat=1, partner_seat=None, prices=None):
+        return draft.check_trade(
+            self.conn, self.live, self.player(seat),
+            self.player(partner_seat) if partner_seat else None,
+            drops, gets, self.prices if prices is None else prices)
+
+    def test_a_free_agency_trade_within_budget_is_allowed(self):
+        # Player1 has 40 left, drops a 60 and picks up a 25.
+        maths = self.check(["Garchomp"], ["Rotom-Wash"])
+        self.assertEqual((maths["refund"], maths["charge"], maths["after"]), (60, 25, 75))
+        self.assertIsNone(maths["partner_after"])
+
+    def test_over_budget_is_refused_with_the_numbers(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check([], ["Landorus"])        # 90 against 40 left
+        message = str(caught.exception)
+        self.assertIn("over budget", message)
+        self.assertIn("40 points", message)
+        self.assertIn("90", message)
+
+    def test_dropping_somebody_elses_pokemon_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(["Heatran"], ["Skarmory"])
+        self.assertIn("belongs to **Player2**", str(caught.exception))
+
+    def test_dropping_something_nobody_owns_is_refused(self):
+        # The misspelling case: "Sinestcha" is on no roster, so applying the
+        # trade would quietly remove nothing.
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(["Sinestcha"], ["Skarmory"])
+        message = str(caught.exception)
+        self.assertIn("not on anybody's roster", message)
+        self.assertIn("/search", message)
+
+    def test_picking_up_a_drafted_pokemon_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(["Garchomp"], ["Heatran"])
+        message = str(caught.exception)
+        self.assertIn("already drafted by **Player2**", message)
+        self.assertIn("partner:", message)
+
+    def test_a_partner_trade_checks_both_sides(self):
+        # Player1 gives Garchomp (60) for Player2's Heatran (30).
+        maths = self.check(["Garchomp"], ["Heatran"], partner_seat=2)
+        self.assertEqual(maths["after"], 40 + 60 - 30)
+        self.assertEqual(maths["partner_after"], 70 + 30 - 60)
+
+    def test_a_partner_who_cannot_afford_it_is_refused(self):
+        # Player2 has 70 and would take on a 60 while giving up a 30.
+        draft.make_pick(self.conn, self.live, user(2), 2, "Cheap", 65)
+        self.live = draft.get_pool(self.conn, self.draft["id"])
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(["Garchomp"], ["Heatran"], partner_seat=2)
+        self.assertIn("Player2** cannot afford", str(caught.exception))
+
+    def test_a_partner_must_own_what_they_give_up(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(["Garchomp"], ["Skarmory"], partner_seat=2)
+        self.assertIn("not on anybody's roster", str(caught.exception))
+
+    def test_a_pokemon_with_no_listed_price_costs_nothing(self):
+        # Matches what the spreadsheet assumes, rather than crashing.
+        maths = self.check(["Garchomp"], ["Mystery"], prices={})
+        self.assertEqual((maths["charge"], maths["after"]), (0, 100))
+
+    def test_the_live_case_that_prompted_this(self):
+        # hidea: 2 points left, dropped three worth 16, picked up three
+        # worth 18. It should be allowed, landing exactly on zero.
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=2101, players=2, budget=18,
+                          min_picks=1, max_picks=4)
+        for seat, (name, cost) in ((1, ("Sceptile", 2)), (2, ("Other", 1))):
+            draft.make_pick(conn, draft.get_pool(conn, pool["id"]), user(seat), 1, name, cost)
+        live = draft.get_pool(conn, pool["id"])
+        draft.make_pick(conn, live, user(2), 2, "Filler", 1)
+        live = draft.get_pool(conn, pool["id"])
+        draft.make_pick(conn, live, user(1), 2, "Delphox", 5)
+        live = draft.get_pool(conn, pool["id"])
+        draft.make_pick(conn, live, user(1), 3, "Rotom-Heat", 9)
+        live = draft.get_pool(conn, pool["id"])
+
+        one = draft.get_player(conn, pool["id"], user(1))
+        self.assertEqual(one["budget_remaining"], 2)
+        maths = draft.check_trade(
+            conn, live, one, None,
+            ["Sceptile", "Rotom-Heat", "Delphox"],
+            ["Swampert", "Alakazam", "Rotom-Mow"],
+            {"swampert": 7, "alakazam": 4, "rotom-mow": 7})
+        self.assertEqual((maths["refund"], maths["charge"], maths["after"]), (16, 18, 0))
+
+
+class TidyNameTests(unittest.TestCase):
+    """The fallback capitalisation, for leagues with no tiering list."""
+
+    def test_lower_case_is_capitalised_part_by_part(self):
+        self.assertEqual(draft.tidy_name("rotom-mow"), "Rotom-Mow")
+        self.assertEqual(draft.tidy_name("ogerpon-wellspring"), "Ogerpon-Wellspring")
+        self.assertEqual(draft.tidy_name("great tusk"), "Great Tusk")
+
+    def test_shouting_is_calmed_down(self):
+        self.assertEqual(draft.tidy_name("ROTOM-MOW"), "Rotom-Mow")
+        self.assertEqual(draft.tidy_name("MEGA GARCHOMP Z"), "Mega Garchomp Z")
+
+    def test_names_that_are_already_right_are_left_alone(self):
+        for name in ("Porygon-Z", "Mega Charizard Y", "Farfetch'd", "Ho-Oh",
+                     "Mr. Mime", "Type: Null", "Indeedee-F"):
+            with self.subTest(name=name):
+                self.assertEqual(draft.tidy_name(name), name)
+
+    def test_surrounding_space_goes(self):
+        self.assertEqual(draft.tidy_name("  tinkaton  "), "Tinkaton")
+
+    def test_an_empty_name_does_not_crash(self):
+        self.assertEqual(draft.tidy_name(""), "")
+
+
+class EditTradeTests(unittest.TestCase):
+    """A moderator correcting a trade instead of rejecting it."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=2200, players=2, budget=100,
+                                min_picks=1, max_picks=4)
+        draft.make_pick(self.conn, self.draft, user(1), 1, "Garchomp", 12)
+        self.live = draft.get_pool(self.conn, self.draft["id"])
+        draft.make_pick(self.conn, self.live, user(2), 1, "Heatran", 10)
+        self.live = draft.get_pool(self.conn, self.draft["id"])
+        draft.propose_trade(self.conn, self.live, user(1), ["Garchomp"], ["Sinestcha"])
+
+    def trade(self):
+        return draft.get_trade(self.conn, self.live["league_id"], 1)
+
+    def test_both_sides_can_be_rewritten(self):
+        record, before = draft.edit_trade(self.conn, self.live, 1,
+                                          ["Garchomp"], ["Sinistcha"])
+        self.assertEqual(before["gets"], ["Sinestcha"])
+        self.assertEqual(json.loads(record["gets"]), ["Sinistcha"])
+        self.assertEqual(json.loads(record["drops"]), ["Garchomp"])
+
+    def test_an_approved_trade_has_to_be_approved_again(self):
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        record, before = draft.edit_trade(self.conn, self.live, 1,
+                                          ["Garchomp"], ["Sinistcha"])
+
+        self.assertEqual(before["status"], "approved")
+        self.assertEqual(record["status"], "pending")
+        self.assertIsNone(record["resolved_by"])
+        self.assertEqual(draft.waiting_trades(self.conn, self.live["league_id"]), [],
+                         "it must not apply on the old approval")
+
+    def test_the_edited_pokemon_are_what_take_effect(self):
+        draft.edit_trade(self.conn, self.live, 1, ["Garchomp"], ["Sinistcha"])
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        draft.apply_trades(self.conn, self.live["league_id"], week=1)
+
+        p1 = draft.get_player(self.conn, self.draft["id"], user(1))
+        self.assertEqual([name for name, _ in
+                          draft.roster_view(self.conn, self.live, p1)["pokemon"]],
+                         ["Sinistcha"])
+
+    def test_a_trade_in_effect_cannot_be_edited(self):
+        draft.approve_trade(self.conn, self.live, 1, approver_user_id=42)
+        draft.apply_trades(self.conn, self.live["league_id"], week=2)
+
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.edit_trade(self.conn, self.live, 1, ["Garchomp"], ["Sinistcha"])
+        message = str(caught.exception)
+        self.assertIn("already in effect", message)
+        self.assertIn("week 2", message)
+        self.assertEqual(json.loads(self.trade()["gets"]), ["Sinestcha"],
+                         "the refusal changed nothing")
+
+    def test_a_rejected_trade_cannot_be_edited(self):
+        draft.reject_trade(self.conn, self.live, 1, approver_user_id=42)
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.edit_trade(self.conn, self.live, 1, ["Garchomp"], ["Sinistcha"])
+        self.assertIn("propose a replacement", str(caught.exception))
+
+    def test_a_trade_must_still_receive_something(self):
+        with self.assertRaises(draft.DraftError):
+            draft.edit_trade(self.conn, self.live, 1, ["Garchomp"], [])
+
+    def test_an_unknown_trade_number_is_refused(self):
+        with self.assertRaises(draft.DraftError):
+            draft.edit_trade(self.conn, self.live, 99, ["Garchomp"], ["Sinistcha"])
 
 
 class MigrationTests(unittest.TestCase):

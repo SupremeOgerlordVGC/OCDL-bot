@@ -8,6 +8,7 @@ recovery.
 """
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -25,6 +26,7 @@ import timers       # noqa: E402
 import ui           # noqa: E402
 from cogs.admin import AdminCog         # noqa: E402
 from cogs.drafting import DraftingCog   # noqa: E402
+from cogs.extras import ExtrasCog       # noqa: E402
 
 
 def make_pool(conn, channel_id, players, **settings):
@@ -1044,6 +1046,153 @@ class FinishDraftingCommandTests(unittest.IsolatedAsyncioTestCase):
             await self.admin.reopendrafting.callback(
                 self.admin, interaction, SimpleNamespace(id=11, display_name="Larry"))
         self.assertEqual(self.player(11)["status"], rules.FINISHED)
+
+
+class TradeValidationCommandTests(unittest.IsolatedAsyncioTestCase):
+    """/trade checked against the tiering list before admins see it."""
+
+    CHANNEL = 9800
+    ADMIN = 1
+
+    class PriceList(StubPriceList):
+        """The stub list plus a spare Pokémon to trade for."""
+
+        ENTRIES = StubPriceList.ENTRIES + [
+            {"key": "skarmory", "name": "Skarmory", "cost": 5, "tera_cost": None,
+             "banned": False, "tera_banned": True, "row": 9},
+        ]
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(self.CHANNEL)
+        self.admin_channel = FakeChannel(self.ADMIN)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.bot.sheets = self.PriceList()
+
+        draft_channel = self.channel
+        admin_channel = self.admin_channel
+
+        def get_channel(channel_id):
+            if channel_id == admin_channel.id:
+                return admin_channel
+            return draft_channel if channel_id == draft_channel.id else None
+
+        self.bot.get_channel = get_channel
+
+        self.pool_id = make_pool(
+            self.conn, self.CHANNEL, [(11, "Larry"), (22, "Alex")],
+            budget=100, min_picks=1, max_picks=4, mode="full_season",
+            doc_url="https://docs.google.com/spreadsheets/d/TEST/edit")
+        rules.start_pool(self.conn, self.pool())
+        # Larry owns Garchomp (12); Rotom-Wash (8) is undrafted.
+        rules.make_pick(self.conn, self.pool(), 11, 1, "Garchomp", 12)
+        self.cog = ExtrasCog(self.bot)
+
+    def pool(self):
+        return rules.get_pool(self.conn, self.pool_id)
+
+    async def propose(self, drops, gets, user_id=11, **kwargs):
+        interaction = FakeInteraction(self.bot, self.CHANNEL, user_id)
+        await self.cog.trade.callback(self.cog, interaction, drops, gets, **kwargs)
+        self.bot.timers.cancel_all()
+        return interaction
+
+    def latest_trade(self):
+        league_id = self.pool()["league_id"]
+        return rules.get_trade(self.conn, league_id, 1)
+
+    async def test_a_misspelling_is_refused_and_named(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.propose("Garchomp", "Rotom-Wsah")
+        message = str(caught.exception)
+        self.assertIn("Rotom-Wsah", message)
+        self.assertIn("tiering list", message)
+        self.assertIsNone(self.latest_trade(), "nothing may be filed")
+
+    async def test_the_lists_spelling_is_what_gets_filed(self):
+        await self.propose("  garchomp ", "rotom-wash")
+
+        trade = self.latest_trade()
+        self.assertEqual(json.loads(trade["drops"]), ["Garchomp"])
+        self.assertEqual(json.loads(trade["gets"]), ["Rotom-Wash"])
+
+    async def test_an_and_in_the_list_is_understood(self):
+        # "X, Y, and Z" is how people write lists.
+        rules.make_pick(self.conn, self.pool(), 22, 1, "Rotom-Wash", 8)
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.propose("Garchomp, and Rotom-Wash", "Skarmory")
+        # Refused for being Alex's Pokémon, not for being called
+        # "and Rotom-Wash", which would have been "not on anybody's roster".
+        self.assertIn("belongs to", str(caught.exception))
+
+    async def test_a_banned_pokemon_cannot_be_picked_up(self):
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.propose("Garchomp", "Bulbasaur")
+        self.assertIn("Not draftable", str(caught.exception))
+
+    async def test_over_budget_is_refused(self):
+        # Larry has 88 left; drop nothing and ask for a 12-point Garchomp
+        # they already own is impossible, so use the budget directly.
+        self.conn.execute("UPDATE players SET budget_remaining = 2 WHERE user_id = 11")
+        self.conn.commit()
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.propose("nil", "Rotom-Wash")
+        self.assertIn("over budget", str(caught.exception))
+
+    async def test_the_admins_are_shown_the_arithmetic(self):
+        await self.propose("Garchomp", "Rotom-Wash")
+        self.assertIn("Budget: **88 → 92**", self.admin_channel.text)
+        self.assertIn("back 12, costs 8", self.admin_channel.text)
+
+    async def test_a_moderator_can_correct_the_spelling(self):
+        # The live case: a trade filed as "rotom-wsah" is nearly right, so a
+        # moderator fixes it rather than making the player retype it.
+        await self.propose("Garchomp", "Rotom-Wash")
+        interaction = FakeInteraction(self.bot, self.CHANNEL, 777, moderator=True)
+        await self.cog.edittrade.callback(self.cog, interaction, 1,
+                                          "garchomp", "skarmory")
+        self.bot.timers.cancel_all()
+
+        trade = self.latest_trade()
+        self.assertEqual(json.loads(trade["drops"]), ["Garchomp"])
+        self.assertEqual(json.loads(trade["gets"]), ["Skarmory"],
+                         "the list's capitalisation is what gets stored")
+        self.assertIn("Trade #1 updated", interaction.text)
+        self.assertIn("corrected by a moderator", self.channel.text)
+
+    async def test_an_edit_is_held_to_the_same_rules(self):
+        await self.propose("Garchomp", "Rotom-Wash")
+        self.conn.execute("UPDATE players SET budget_remaining = 0 WHERE user_id = 11")
+        self.conn.commit()
+
+        interaction = FakeInteraction(self.bot, self.CHANNEL, 777, moderator=True)
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.cog.edittrade.callback(self.cog, interaction, 1,
+                                              "nil", "Rotom-Wash")
+        self.assertIn("over budget", str(caught.exception))
+        self.assertEqual(json.loads(self.latest_trade()["drops"]), ["Garchomp"],
+                         "a refused edit changes nothing")
+
+    async def test_a_player_cannot_edit_trades(self):
+        await self.propose("Garchomp", "Rotom-Wash")
+        interaction = FakeInteraction(self.bot, self.CHANNEL, 22, moderator=False)
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.cog.edittrade.callback(self.cog, interaction, 1,
+                                              "Garchomp", "Skarmory")
+        self.assertIn("draft moderators", str(caught.exception))
+
+    async def test_a_name_is_tidied_when_there_is_no_list(self):
+        # No document: nothing to check against, but "rotom-mow" should not
+        # reach a roster or a spreadsheet in lower case.
+        self.bot.sheets = FakeSheets()
+        self.bot.tiering_tabs.clear()
+        self.conn.execute("UPDATE leagues SET doc_kind = 'none', doc_url = NULL")
+        self.conn.commit()
+
+        await self.propose("garchomp", "rotom-mow")
+        trade = self.latest_trade()
+        self.assertEqual(json.loads(trade["gets"]), ["Rotom-Mow"])
+        self.assertEqual(json.loads(trade["drops"]), ["Garchomp"])
 
 
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):

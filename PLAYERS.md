@@ -103,6 +103,8 @@ A reduced timer is not permanent punishment — ask a moderator if you think it 
 • The league's limit counts the **Pokémon you pick up**, not the ones you drop.
 • For **24 hours after the draft ends** (the bot pings everyone), trades are unlimited and don't count toward the limit.
 
+• The bot checks your spelling against the tier list, and that you own what you are dropping and can afford what you are taking, **before** a moderator sees it. If it refuses, fix the names — `/search` finds the right spelling.
+
 **`/trades`** — see every trade and whether it was approved.
 
 **`/subrequest reason:...`** — ask for a substitution.
