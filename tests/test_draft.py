@@ -1627,10 +1627,24 @@ class LeagueNameTests(unittest.TestCase):
             draft.set_visibility(self.conn, league["id"], "secret")
 
     def test_several_leagues_share_one_admin_channel(self):
-        make_draft(self.conn, channel_id=506, players=2, name="One")
+        one = make_draft(self.conn, channel_id=506, players=2, name="One")
         make_draft(self.conn, channel_id=507, players=2, name="Two")
         rows = draft.leagues_in_admin_channel(self.conn, 999)
         self.assertEqual([r["name"] for r in rows], ["One", "Two"])
+
+        # A league is 'complete' from the end of its draft, which is when its
+        # season starts: the trade commands still have to find it here.
+        self.conn.execute("UPDATE leagues SET status = 'complete' WHERE id = ?",
+                          (one["league_id"],))
+        self.conn.commit()
+        self.assertEqual([r["name"] for r in draft.leagues_in_admin_channel(self.conn, 999)],
+                         ["One", "Two"])
+
+        self.conn.execute("UPDATE leagues SET status = 'archived' WHERE id = ?",
+                          (one["league_id"],))
+        self.conn.commit()
+        self.assertEqual([r["name"] for r in draft.leagues_in_admin_channel(self.conn, 999)],
+                         ["Two"], "an archived league is past caring")
 
 
 class SubstitutionTests(unittest.TestCase):

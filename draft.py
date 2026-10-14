@@ -820,10 +820,16 @@ def get_league_pools(conn, league_id):
 
 
 def leagues_in_admin_channel(conn, channel_id):
-    """Unfinished leagues whose trades are approved in this channel."""
+    """Leagues whose trades are approved in this channel.
+
+    'complete' counts: a league is complete the moment its drafting ends,
+    which is when its season - and most of its trading - starts. Leaving it
+    out meant a moderator in the admin channel of a drafted league was told
+    "no draft is running here" by the very commands they needed.
+    """
     return conn.execute(
-        "SELECT * FROM leagues WHERE admin_channel_id = ? AND status IN ('setup', 'active') "
-        "ORDER BY name",
+        "SELECT * FROM leagues WHERE admin_channel_id = ? "
+        "AND status IN ('setup', 'active', 'complete') ORDER BY name",
         (channel_id,),
     ).fetchall()
 
