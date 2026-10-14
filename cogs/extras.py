@@ -462,11 +462,44 @@ class ExtrasCog(commands.Cog):
     @app_commands.command(
         name="grantextension",
         description="Moderator only: grant an extension, moving the match to next week.")
-    @app_commands.describe(number="The extension number",
-                           name="The league's name, if this channel runs more than one")
-    async def grantextension(self, interaction: discord.Interaction, number: int,
+    @app_commands.describe(
+        number="The extension number, if a player asked for one",
+        player="Or give this player's match an extension with nobody having asked",
+        name="The league's name, if this channel runs more than one")
+    async def grantextension(self, interaction: discord.Interaction,
+                             number: int = None, player: discord.Member = None,
                              name: str = None):
-        await self.decide_extension(interaction, number, name, granted=True)
+        if (number is None) == (player is None):
+            raise rules.DraftError(
+                "❌ Give either `number`, to decide a request, or `player`, to "
+                "grant an extension nobody asked for."
+            )
+        if number is not None:
+            await self.decide_extension(interaction, number, name, granted=True)
+            return
+
+        # Granted unasked: moderators often know before the players do.
+        ui.require_moderator(self.bot, interaction)
+        league = self.resolve_league(interaction, name)
+        await interaction.response.defer(ephemeral=True)
+
+        pool, seat = rules.player_in_league(self.bot.conn, league["id"], player.id)
+        if seat is None:
+            raise rules.DraftError(
+                f"❌ **{player.display_name}** is not a player in **{league['name']}**."
+            )
+
+        record, home, away = rules.grant_extension_for_player(
+            self.bot.conn, pool, player.id, interaction.user.id)
+        next_week = record["week"] + config.MAX_EXTENSION_WEEKS
+
+        await interaction.followup.send(
+            f"✅ Extension **#{record['number']}** granted for **{home['display_name']}** "
+            f"vs **{away['display_name']}** — nobody had to ask. The match will be "
+            f"posted again with week {next_week}.",
+            ephemeral=True,
+        )
+        await self.announce_extension(league, pool, record, home, away, granted=True)
 
     @app_commands.command(
         name="rejectextension",
@@ -495,8 +528,11 @@ class ExtrasCog(commands.Cog):
                if granted else "turned down."),
             ephemeral=True,
         )
+        await self.announce_extension(league, pool, record, home, away, granted)
 
-        # Both players need to know, so it goes where the schedule lives.
+    async def announce_extension(self, league, pool, record, home, away, granted):
+        """Tell both players, where the schedule lives."""
+        next_week = record["week"] + config.MAX_EXTENSION_WEEKS
         where = (self.bot.get_channel(league["schedule_channel_id"])
                  if league["schedule_channel_id"] else None)
         await ui.safe_send(
@@ -506,8 +542,7 @@ class ExtrasCog(commands.Cog):
              f"{next_week}. It will be posted again then."
              if granted else
              f"⏳ **Extension turned down** — <@{home['user_id']}> vs "
-             f"<@{away['user_id']}> still has to be played in week {record['week']}."),
-        )
+             f"<@{away['user_id']}> still has to be played in week {record['week']}."))
 
     # ---- /extensions ----------------------------------------------------
 

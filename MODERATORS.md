@@ -157,7 +157,7 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 ---
 
-## Block 8 — spreadsheet and season
+## Block 8 — the spreadsheet
 
 ```
 **📊 Spreadsheet and schedule**
@@ -167,6 +167,14 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 **`/sync`** — rewrites the coach list and every roster block from the bot's database. The database is always the source of truth; a failed sync never changes local data.
 
 **Who's in the draft comes from the sheet.** On the **Coaches** tab, only rows with the **In schedule** box ticked take part — a tick reserves that coach's roster block, so gaps are respected. If a ticked row already has a username, the bot matches the player to it, so your @mention order doesn't have to match the sheet.
+```
+
+---
+
+## Block 9 — the season
+
+```
+**📅 Running the season**
 
 **`/postschedule week:3 name:OCDL Season 1`** — posts that week's matchups and puts every approved trade into effect (listed underneath). Reads the template's schedule, or the bot's own if there's no template. Never automatic.
 
@@ -174,12 +182,12 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 **`/reschedule name:... weeks:8`** — rerolls a bot-generated schedule.
 
-**⏳ Extensions.** A player runs `/extension` for their current week's match and it arrives here with a number. **`/grantextension number:2 name:...`** posts that match again with the following week; **`/rejectextension`** leaves it where it is. Either way both players are told in the schedule channel. **`/extensions`** lists every request. One week is the limit, so a match that has already been carried over cannot be put off again.
+**⏳ Extensions.** A player runs `/extension` for their current week's match; it arrives here with a number. **`/grantextension number:2 name:...`** posts that match again with the following week, **`/rejectextension`** leaves it where it is, and both players are told in the schedule channel either way. You don't need a request: **`/grantextension player:@Someone name:...`** extends that player's match for this week outright. **`/extensions`** lists them all. One week is the limit, so a carried-over match can't be put off again.
 ```
 
 ---
 
-## Block 9 — ending and housekeeping
+## Block 10 — ending and housekeeping
 
 ```
 **🗃️ Finishing up**

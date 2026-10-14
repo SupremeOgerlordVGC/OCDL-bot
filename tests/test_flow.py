@@ -1446,6 +1446,71 @@ class ExtensionCommandTests(unittest.IsolatedAsyncioTestCase):
                          "and it can be voted on like any other match")
         self.assertIn("carried over on an extension", posting.text)
 
+    async def test_a_moderator_can_grant_one_nobody_asked_for(self):
+        interaction = FakeInteraction(self.bot, self.ADMIN, 99, "Mod", moderator=True)
+        await self.extras.grantextension.callback(
+            self.extras, interaction, player=SimpleNamespace(id=11, display_name="Larry"),
+            name="Season")
+
+        record = rules.get_extension(self.conn, self.league_id, 1)
+        self.assertEqual(record["status"], "granted")
+        self.assertEqual(record["week"], 1)
+        self.assertEqual(record["resolved_by"], 99)
+        self.assertIn("nobody had to ask", interaction.text)
+        self.assertIn("Extension granted", self.schedule_channel.text)
+
+    async def test_an_unasked_grant_is_posted_again_next_week(self):
+        interaction = FakeInteraction(self.bot, self.ADMIN, 99, "Mod", moderator=True)
+        await self.extras.grantextension.callback(
+            self.extras, interaction, player=SimpleNamespace(id=22, display_name="Alex"),
+            name="Season")
+
+        posting = FakeInteraction(self.bot, self.DRAFT, 99, "Mod", moderator=True)
+        await self.admin.postschedule.callback(self.admin, posting, week=2,
+                                               name="Season")
+        extended = [m for m in self.schedule_channel.posted
+                    if "extended from week 1" in m.content]
+        self.assertEqual(len(extended), 1)
+
+    async def test_it_will_not_grant_twice_for_the_same_match(self):
+        interaction = FakeInteraction(self.bot, self.ADMIN, 99, "Mod", moderator=True)
+        await self.extras.grantextension.callback(
+            self.extras, interaction, player=SimpleNamespace(id=11, display_name="Larry"),
+            name="Season")
+
+        # The opponent's match is the same match.
+        again = FakeInteraction(self.bot, self.ADMIN, 99, "Mod", moderator=True)
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.extras.grantextension.callback(
+                self.extras, again, player=SimpleNamespace(id=22, display_name="Alex"),
+                name="Season")
+        self.assertIn("already been put off", str(caught.exception))
+
+    async def test_a_pending_request_must_be_decided_by_its_number(self):
+        await self.ask()
+        interaction = FakeInteraction(self.bot, self.ADMIN, 99, "Mod", moderator=True)
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.extras.grantextension.callback(
+                self.extras, interaction,
+                player=SimpleNamespace(id=11, display_name="Larry"), name="Season")
+        self.assertIn("decide that one by its number", str(caught.exception))
+
+    async def test_it_needs_one_of_number_or_player(self):
+        interaction = FakeInteraction(self.bot, self.ADMIN, 99, "Mod", moderator=True)
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.extras.grantextension.callback(self.extras, interaction,
+                                                      name="Season")
+        self.assertIn("either `number`", str(caught.exception))
+
+    async def test_a_player_cannot_grant_one_unasked(self):
+        interaction = FakeInteraction(self.bot, self.ADMIN, 11, moderator=False)
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.extras.grantextension.callback(
+                self.extras, interaction,
+                player=SimpleNamespace(id=11, display_name="Larry"), name="Season")
+        self.assertIn("draft moderators", str(caught.exception))
+        self.assertIsNone(rules.get_extension(self.conn, self.league_id, 1))
+
     async def test_the_listing_shows_every_request(self):
         await self.ask()
         await self.decide(1, granted=True)

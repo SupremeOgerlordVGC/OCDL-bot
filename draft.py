@@ -2616,11 +2616,27 @@ def league_extensions(conn, league_id):
     ).fetchall()
 
 
-def request_extension(conn, draft, user_id, reason=None):
-    """/extension - ask for this week's match to be played next week instead.
+def player_in_league(conn, league_id, user_id):
+    """Find a player and their pool anywhere in a league, or (None, None).
 
-    Either player may ask, and it covers the match rather than the person:
-    one request, one decision, both players told.
+    Moderators act from the admin channel, where there is no pool to go on.
+    """
+    for pool in get_league_pools(conn, league_id):
+        player = get_player(conn, pool["id"], user_id)
+        if player is not None:
+            return pool, player
+    return None, None
+
+
+def extendable_match(conn, draft, user_id):
+    """The player's match this week, refusing if it cannot be put off.
+
+    Shared by a player asking and a moderator granting one unasked, so both
+    are held to the same rules: a week has to have been posted, the player
+    has to have a match in it, and that match must not already have an
+    extension of its own.
+
+    Returns (league, week, player, home, away).
     """
     league = get_league(conn, draft["league_id"])
     if league["mode"] not in config.SCHEDULE_MODES:
@@ -2638,9 +2654,9 @@ def request_extension(conn, draft, user_id, reason=None):
     match = fixture_for(conn, league["id"], week, player["id"])
     if match is None:
         raise DraftError(
-            f"❌ You have no match recorded for week {week}. If the schedule is on "
-            f"the spreadsheet, a moderator may need to run `/sync` so your name "
-            f"there matches your Discord account."
+            f"❌ **{player['display_name']}** has no match recorded for week {week}. "
+            f"If the schedule is on the spreadsheet, a moderator may need to run "
+            f"`/sync` so the names there match Discord accounts."
         )
     home, away = match
 
@@ -2656,7 +2672,7 @@ def request_extension(conn, draft, user_id, reason=None):
         if existing["status"] == "pending":
             raise DraftError(
                 f"❌ Extension **#{existing['number']}** is already waiting for a "
-                f"decision on this match."
+                f"decision on this match — decide that one by its number."
             )
         if existing["status"] == "granted":
             raise DraftError(
@@ -2664,8 +2680,7 @@ def request_extension(conn, draft, user_id, reason=None):
                 f"{week + config.MAX_EXTENSION_WEEKS}."
             )
         raise DraftError(
-            f"❌ Extension **#{existing['number']}** for this match was turned down. "
-            f"Talk to a moderator."
+            f"❌ Extension **#{existing['number']}** for this match was turned down."
         )
 
     # One week is the limit, so a match that arrived here on an extension
@@ -2678,19 +2693,51 @@ def request_extension(conn, draft, user_id, reason=None):
             f"It has to be played in week {week}."
         )
 
+    return league, week, player, home, away
+
+
+def _record_extension(conn, draft, league, week, player, home, away,
+                      reason, status, resolved_by=None):
     number = conn.execute(
         "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM extensions WHERE league_id = ?",
         (league["id"],),
     ).fetchone()["n"]
     conn.execute(
         """INSERT INTO extensions (league_id, pool_id, number, week, home_player_id,
-                                   away_player_id, requested_by, reason, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                                   away_player_id, requested_by, reason, status,
+                                   created_at, resolved_at, resolved_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (league["id"], draft["id"], number, week, home["id"], away["id"],
-         player["id"], (reason or "").strip() or None, database.now()),
+         player["id"], (reason or "").strip() or None, status, database.now(),
+         database.now() if resolved_by is not None else None, resolved_by),
     )
     conn.commit()
-    return get_extension(conn, league["id"], number), home, away
+    return get_extension(conn, league["id"], number)
+
+
+def grant_extension_for_player(conn, draft, user_id, moderator_user_id, reason=None):
+    """Give a match an extension without anybody having asked for one.
+
+    Moderators often know before the players do - somebody is away, or a
+    battle cannot be arranged - so an extension does not have to start as a
+    request. The same limits apply either way.
+    """
+    league, week, player, home, away = extendable_match(conn, draft, user_id)
+    record = _record_extension(conn, draft, league, week, player, home, away,
+                               reason, "granted", resolved_by=moderator_user_id)
+    return record, home, away
+
+
+def request_extension(conn, draft, user_id, reason=None):
+    """/extension - ask for this week's match to be played next week instead.
+
+    Either player may ask, and it covers the match rather than the person:
+    one request, one decision, both players told.
+    """
+    league, week, player, home, away = extendable_match(conn, draft, user_id)
+    record = _record_extension(conn, draft, league, week, player, home, away,
+                               reason, "pending")
+    return record, home, away
 
 
 def _decide_extension(conn, league_id, number, moderator_user_id, status):

@@ -140,7 +140,7 @@ class CommandOptionTests(unittest.TestCase):
         "edittrade": {"trade_id", "drops", "gets", "name"},
         "postschedule": {"week", "name"},
         "extension": {"reason"},
-        "grantextension": {"number", "name"},
+        "grantextension": {"number", "player", "name"},
         "rejectextension": {"number", "name"},
         "extensions": {"name"},
         "schedulechannel": {"name", "channel"},
