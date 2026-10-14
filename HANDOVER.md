@@ -1,8 +1,9 @@
 # Where things stand
 
-Written when work was paused on 2026-10-14. Everything below was verified at
-that point, not assumed. The bot is running and healthy; one feature is
-half-built and is described in full so it can be picked up cold.
+Last brought up to date on 2026-10-14, after the paused work was finished.
+Everything below was verified at that point, not assumed. The bot is running
+and healthy, nothing is half-built, and what has not been started is listed
+plainly.
 
 ## The live system
 
@@ -12,7 +13,7 @@ half-built and is described in full so it can be picked up cold.
 | Bot | `/home/draftbot/OCDL-Bot`, systemd unit `draftbot`, venv at `.venv/bin/python` |
 | Database | `/home/draftbot/OCDL-Bot/draft.db` (SQLite, WAL) |
 | Backups | `/home/draftbot/OCDL-Bot/backups/`, hourly plus one before each deploy |
-| Deployed commit | `8d626c8` — one behind `main`, and the difference is `MODERATORS.md` only, so there is nothing to deploy |
+| Deployed commit | `15dbd3a`, which is `main` apart from documentation |
 
 **Deploy recipe** (what every deploy in this session used):
 
@@ -46,6 +47,9 @@ real breakage twice.
 | Cornerstone Season 1 | both complete (league complete) | 0 | official, public |
 | Teal Season 1 | A and B drafting | 0 | official, public; the only Tera-format league |
 
+Week 1 posts itself for each league as its grace period ends — see "the first
+automatic post" below for when Cornerstone's falls due.
+
 * Scheduling channels are set for all three: Hearthflame `1497093133803196577`,
   Cornerstone `1535842881926070382`, Teal `1535843139514933370`.
 * All three are **Ogre Clan Official** (`leagues.official = 1`) and public.
@@ -55,74 +59,74 @@ real breakage twice.
 * `current_week` is 0 everywhere: the accidental `/postschedule` on Cornerstone
   was reversed in full, and the fixtures it wrote were deleted.
 
-## Paused mid-change: automatic week posting
+## Done since the pause
 
-**What was asked.** Week 1 posts automatically once both pools have finished
-drafting and their grace periods have ended. Every week after that posts in
-all leagues at **Monday 20:00 GMT+8**, and week 1 is "extended to the
-following Monday" — if the grace period ends on a Tuesday and week 1 goes up
-then, week 2 is *not* the next Monday but the one after, so a week is never
-cut short.
+**Automatic week posting** is finished and deployed. Week 1 goes up once every
+pool has drafted and the free-trade window after it has closed; every week
+after that on the first Monday 20:00 GMT+8 that is at least seven days later,
+so a season starting mid-week keeps a full first week. The schedule is read
+from the database, so being down over a Monday does not lose a week. A week
+with no matches stops automatic posting and says so in the admin channel;
+posting one by hand arms it again. `AdminCog.post_week_due` holds the
+per-league work so it can be tested, and `bot.post_due_weeks` is only the loop.
 
-**Done and committed** (inert: nothing reads these yet):
+One thing to know: the due-leagues query covers leagues whose status is
+`complete` as well as `active`, because a league is marked complete when its
+*drafting* finishes — which is exactly when its season starts.
 
-* `config.WEEK_POST_UTC_OFFSET_HOURS = 8`, `WEEK_POST_WEEKDAY = 0` (Monday),
-  `WEEK_POST_HOUR = 20`, `WEEK_GAP_DAYS = 7`.
-* `leagues.week_posted_at` (TEXT) and `leagues.auto_weeks` (INTEGER, default 1),
-  in the table, in `ADDED_COLUMNS` and in `pool_view`.
+**Substitutes get a day of unlimited transactions.** Somebody taking a seat
+over during or after a draft gets `SUB_TRADE_WINDOW_HOURS` (24) of transactions
+that do not count against the trade cap, and which take effect the moment the
+window closes rather than at the next posted week (`bot.apply_due_transactions`).
+They may replace the team they inherited but not grow it — a trade in the
+window must drop one for each it picks up, and that check is in
+`propose_trade`, not the command's pre-flight, so the website is held to it too.
+Subbing in before a draft starts opens no window; there is nothing to rebuild.
 
-**Still to write**, with the decisions already made:
+**Applying to host** is wired end to end. The bot already refused unapproved
+hosts; the site now shows the application form instead of a dead end, says
+where an existing application stands, lets a refusal be answered by applying
+again, and says plainly that none of it is needed to run a league on Discord.
+`GET /api/hosts/me` and `POST /api/hosts/apply` pass through to the bot.
 
-1. `rules.grace_over(conn, league_id, now)` — true once every pool of the
-   league has `status = 'complete'` **and** its `free_trades_until` has passed.
-   One-pool leagues are the same rule. A `draft_schedule` league has no trade
-   window, so `free_trades_until` is NULL and only the draft matters.
-2. `rules.next_week_time(after)` — the first Monday 20:00 GMT+8 that is at
-   least `WEEK_GAP_DAYS` after `after`. GMT+8 never changes offset, so a fixed
-   `timezone(timedelta(hours=8))` is correct; no DST handling needed. Worked
-   example to test against: week 1 posted Tuesday → the next Monday is only
-   six days later, so it is skipped and week 2 lands on the Monday after,
-   thirteen days on. A week 1 posted Monday 19:00 is due the next Monday 20:00
-   (seven days); posted Monday 21:00, the Monday after that.
-3. `rules.leagues_due_a_week(conn, now)` — active leagues in a schedule mode
-   with `auto_weeks = 1`, returning `[(league_row, week_number)]`. With
-   `current_week = 0` it is week 1 and the test is `grace_over`; otherwise it
-   is `current_week + 1` when `now >= next_week_time(week_posted_at)`. A league
-   with no `week_posted_at` (every league today) is left alone until a week is
-   posted once — a manual `/postschedule` sets the cadence going.
-4. `rules.record_week_posted(conn, league_id)` — stamps `week_posted_at` and
-   sets `auto_weeks = 1`. Call it from `AdminCog.post_week`, which both
-   `/postschedule` and the web API already go through, so a manual post also
-   sets the cadence and re-arms automatic posting.
-5. `rules.stop_auto_weeks(conn, league_id)`.
-6. A `@tasks.loop(minutes=1)` in `bot.py` beside `start_scheduled_drafts`
-   (copy its shape, including the `before_loop` wait and the try/except around
-   the lookup). For each due league: `cog = self.get_cog("AdminCog")`, then
-   `await cog.post_week(league, week)`; a `None` result means the schedule has
-   run out, so call `stop_auto_weeks`, say so in the admin channel, and carry
-   on. Otherwise `await cog.publish_week(league, result, self.get_channel(league["admin_channel_id"]))`
-   — the admin channel is the fallback because there is no interaction channel.
-7. Tests. `next_week_time` is pure and deserves a table of cases, including
-   the Tuesday example above. `leagues_due_a_week` can be driven by writing
-   `week_posted_at` directly and passing an explicit `now`, so no clock games.
+### The first automatic post
 
-**Not started: the second half of that request** — "a place in the league UI
-for players to view their past/extended matchups". That is the website
-(`apps/web` and `apps/api` in `/Users/Larry/Desktop/ogreclan`), not the bot.
-The data is all there and already mirrored to the site: `fixtures` holds every
-week, and `extensions` says which matches were carried and from which week.
-The site already has a bot-league Matches view to extend. **Another session is
-actively working in that repo**, so coordinate rather than editing blind.
+Cornerstone Season 1 is the only league whose draft has finished. Its grace
+period runs until **2026-10-15 02:42 UTC** (pool B's window is the later of
+the two), so its week 1 posts automatically then, applying the four approved
+trades waiting on it (#1, #2, #4 and #6). Hearthflame and Teal are still
+drafting, so nothing is due for them yet. To stop that happening, set
+`auto_weeks = 0` on the league; to bring it forward, post week 1 by hand.
+
+## Not started
+
+* **A page on the site for past and extended matchups.** The data is ready and
+  already mirrored: `fixtures` holds every week, and `extensions` says which
+  matches were carried and from when. `apps/web/src/pages/discord-matches.tsx`
+  is the view to extend. Another session works in that repo — coordinate.
+* **Kills and deaths written to the league spreadsheet.** Larry's lowest
+  priority, and he wants to study the template first, so it is deliberately
+  untouched.
+* **Showdown-room leagues** need a live check of the draft pages in the real
+  client, and the auto points for the format reviewing. Playoffs and a
+  standings export are possible extras. That is Showdown and site work.
 
 ## Open items
 
-* **The site change for Voice is committed but not deployed.** `cbebb92` in
-  `/Users/Larry/Desktop/ogreclan` makes Voice follow `leagues.official`
-  instead of only the `AUTO_VOICE_DISCORD_IDS` list. That repo has **no git
-  remote**, so the commit is local only, and deploying the site and restarting
-  Showdown is the other session's workflow. Until it ships, an Ogre Clan server
-  league created by somebody other than the owner will be official and public
-  but will not get Voice.
+* **Two site changes are committed but not deployed.** In
+  `/Users/Larry/Desktop/ogreclan`: `cbebb92` makes Voice follow
+  `leagues.official` rather than only the `AUTO_VOICE_DISCORD_IDS` list, and
+  `161de95` adds the apply-to-host form. That repo has **no git remote**, so
+  both are local only, and deploying the site is the other session's workflow.
+  Until they ship, an Ogre Clan server league made by somebody other than the
+  owner is official and public but gets no Voice, and the apply form is not
+  live.
+* **The website's trades skip two of the bot's checks.** `/trade` resolves
+  spelling against the tiering list and checks the budget before the admins
+  see a trade, but those live in the cog, and `webapi.py` calls
+  `rules.propose_trade` directly. The no-growth rule for substitutes was put
+  in `propose_trade` for exactly this reason; the spelling and budget checks
+  need the sheet, so moving them means handing `propose_trade` a price list.
 * **The 🇦/🇧 votes on posted matchups are decoration.** Nothing reads them. If
   they are meant to settle results, they could feed the existing
   `/matchresult` and `/reportgame` rather than being counted by hand.
