@@ -697,6 +697,9 @@ class AdminCog(commands.Cog):
         # Approved trades change rosters from the week that's posted next.
         applied = rules.apply_trades(self.bot.conn, league["id"], week)
         rules.set_current_week(self.bot.conn, league["id"], week)
+        # Sets the weekly cadence, and re-arms automatic posting if a
+        # moderator is posting by hand after it gave up.
+        rules.record_week_posted(self.bot.conn, league["id"])
         if league["doc_kind"] == "template":
             rules.record_week(self.bot.conn, league["id"], week, matched)
         if applied:
@@ -736,6 +739,41 @@ class AdminCog(commands.Cog):
             "matches": len(pairs),
             "applied": len(applied),
         }
+
+    async def post_week_due(self, league, week):
+        """Post a week the clock says is due, and report what happened.
+
+        Lives here rather than in the loop so it can be tested: the loop is
+        then only "for each league that is due".
+        """
+        admin_channel = self.bot.get_channel(league["admin_channel_id"])
+        try:
+            result = await self.post_week(league, week)
+        except rules.DraftError as error:
+            rules.stop_auto_weeks(self.bot.conn, league["id"])
+            await ui.safe_send(
+                admin_channel,
+                f"⚠️ I could not post week {week} of **{league['name']}**: {error}\n"
+                f"Automatic posting is off for this league until you post a week "
+                f"yourself with `/postschedule`.")
+            return {"posted": False, "reason": "refused", "error": str(error)}
+
+        if result is None:
+            # The schedule has run out. Stop rather than trying every minute,
+            # and say so: a season can be extended, and posting a week by
+            # hand turns this back on.
+            rules.stop_auto_weeks(self.bot.conn, league["id"])
+            await ui.safe_send(
+                admin_channel,
+                f"🏁 **{league['name']}** has no matches for week {week}, so that "
+                f"looks like the end of the season. I have stopped posting weeks "
+                f"by myself. If there are more to come, add them and run "
+                f"`/postschedule week:{week} name:{league['name']}` — I will take "
+                f"it from there.")
+            return {"posted": False, "reason": "no matches"}
+
+        posting = await self.publish_week(league, result, admin_channel)
+        return {"posted": True, "matches": posting["posted"], "week": week}
 
     async def publish_week(self, league, result, fallback=None):
         """Post a week where the league keeps its schedule.

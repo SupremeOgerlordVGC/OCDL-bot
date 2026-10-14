@@ -133,6 +133,7 @@ class DraftBot(commands.Bot):
 
         self.automatic_backup.start()
         self.start_scheduled_drafts.start()
+        self.post_due_weeks.start()
 
     # ---- command sync bookkeeping ---------------------------------------
 
@@ -283,6 +284,43 @@ class DraftBot(commands.Bot):
 
     @start_scheduled_drafts.before_loop
     async def before_scheduled_drafts(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=1)
+    async def post_due_weeks(self):
+        """Post each league's week when it falls due.
+
+        Week 1 waits for every pool to finish drafting and for the free
+        trade window after it to close; the weeks after it go up on Monday
+        evenings, GMT+8. The schedule is worked out from the database, so a
+        restart - or the bot being down over a Monday - does not lose a
+        week: it is posted as soon as the bot is back.
+        """
+        try:
+            due = rules.leagues_due_a_week(self.conn)
+        except Exception:
+            log.exception("could not work out which weeks are due")
+            return
+
+        cog = self.get_cog("AdminCog")
+        if cog is None or not due:
+            return
+
+        for league, week in due:
+            try:
+                outcome = await cog.post_week_due(league, week)
+            except Exception:
+                log.exception("week %s for %s failed", week, league["name"])
+                continue
+            if outcome["posted"]:
+                log.info("week %s of %s posted automatically (%s match(es))",
+                         week, league["name"], outcome["matches"])
+            else:
+                log.info("week %s of %s not posted (%s); automatic posting off",
+                         week, league["name"], outcome["reason"])
+
+    @post_due_weeks.before_loop
+    async def before_due_weeks(self):
         await self.wait_until_ready()
 
     @tasks.loop(hours=config.BACKUP_INTERVAL_HOURS)

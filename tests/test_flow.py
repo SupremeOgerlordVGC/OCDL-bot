@@ -1232,21 +1232,18 @@ class SchedulePostingTests(unittest.IsolatedAsyncioTestCase):
 
     DRAFT = 9900
     SCHEDULE = 9901
+    ADMIN = 1
 
     async def asyncSetUp(self):
         self.conn = database.connect(":memory:")
         self.channel = FakeChannel(self.DRAFT)
         self.schedule_channel = FakeChannel(self.SCHEDULE)
+        self.admin_channel = FakeChannel(self.ADMIN)
         self.bot = FakeBot(self.conn, self.channel)
 
-        draft_channel, schedule_channel = self.channel, self.schedule_channel
-
-        def get_channel(channel_id):
-            if channel_id == schedule_channel.id:
-                return schedule_channel
-            return draft_channel if channel_id == draft_channel.id else None
-
-        self.bot.get_channel = get_channel
+        channels = {c.id: c for c in (self.channel, self.schedule_channel,
+                                      self.admin_channel)}
+        self.bot.get_channel = channels.get
 
         self.pool_id = make_pool(self.conn, self.DRAFT,
                                  [(11, "Larry"), (22, "Alex"), (33, "Sam"), (44, "Jo")],
@@ -1340,6 +1337,50 @@ class SchedulePostingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("**vs**", fussy.text, "the matches still get posted")
         self.assertIn("Add Reactions", interaction.text)
+
+    async def test_a_due_week_posts_itself(self):
+        rules.set_schedule_channel(self.conn, self.league_id, self.SCHEDULE)
+        league = rules.get_league(self.conn, self.league_id)
+
+        outcome = await self.admin.post_week_due(league, 1)
+
+        self.assertTrue(outcome["posted"])
+        self.assertEqual(outcome["matches"], 2)
+        self.assertIn("Week 1", self.schedule_channel.text)
+        matches = [m for m in self.schedule_channel.posted if "**vs**" in m.content]
+        self.assertEqual([m.reactions for m in matches], [list(ui.VOTE_EMOJI)] * 2,
+                         "an automatic week still gets its votes")
+        self.assertEqual(rules.get_league(self.conn, self.league_id)["current_week"], 1)
+
+    async def test_the_cadence_starts_from_the_posting(self):
+        league = rules.get_league(self.conn, self.league_id)
+        await self.admin.post_week_due(league, 1)
+        posted = rules.get_league(self.conn, self.league_id)["week_posted_at"]
+        self.assertIsNotNone(posted, "the next week is due a week after this one")
+
+    async def test_running_out_of_weeks_stops_it_and_says_so(self):
+        league = rules.get_league(self.conn, self.league_id)
+        outcome = await self.admin.post_week_due(league, 9)      # beyond the schedule
+
+        self.assertFalse(outcome["posted"])
+        self.assertEqual(outcome["reason"], "no matches")
+        self.assertEqual(rules.get_league(self.conn, self.league_id)["auto_weeks"], 0)
+        self.assertIn("end of the season", self.admin_channel.text)
+        self.assertIn("/postschedule week:9", self.admin_channel.text,
+                      "tells them how to carry on")
+
+    async def test_a_refusal_stops_it_rather_than_retrying_every_minute(self):
+        self.conn.execute("UPDATE leagues SET mode = 'draft_only' WHERE id = ?",
+                          (self.league_id,))
+        self.conn.commit()
+        league = rules.get_league(self.conn, self.league_id)
+
+        outcome = await self.admin.post_week_due(league, 1)
+
+        self.assertFalse(outcome["posted"])
+        self.assertEqual(outcome["reason"], "refused")
+        self.assertEqual(rules.get_league(self.conn, self.league_id)["auto_weeks"], 0)
+        self.assertIn("could not post week 1", self.admin_channel.text)
 
     async def test_a_moderator_can_set_the_channel(self):
         interaction = self.moderator()

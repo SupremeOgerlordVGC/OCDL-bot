@@ -16,6 +16,7 @@ import random
 import sys
 import tempfile
 import time
+import datetime
 import json
 import unittest
 
@@ -3203,6 +3204,144 @@ class ExtensionTests(unittest.TestCase):
     def test_an_unknown_number_is_refused(self):
         with self.assertRaises(draft.DraftError):
             draft.grant_extension(self.conn, self.league_id, 99, 999)
+
+
+class WeekScheduleTests(unittest.TestCase):
+    """When each week goes up: week 1 after the grace period, the rest on
+    Monday evenings GMT+8, never less than a week apart."""
+
+    def utc(self, *parts):
+        return datetime.datetime(*parts, tzinfo=datetime.timezone.utc)
+
+    def test_a_tuesday_start_pushes_week_two_to_the_monday_after_next(self):
+        # Larry's example: grace ends Tuesday, so week 2 is not the Monday
+        # six days later but the one after it.
+        posted = self.utc(2026, 10, 13, 6)          # Tuesday 14:00 GMT+8
+        due = draft.next_week_time(posted)
+        self.assertEqual(due.strftime("%A %H:%M"), "Monday 20:00")
+        self.assertEqual((due - posted).days, 13)
+
+    def test_a_full_week_is_exactly_seven_days_when_it_fits(self):
+        posted = self.utc(2026, 10, 12, 11)         # Monday 19:00 GMT+8
+        due = draft.next_week_time(posted)
+        self.assertEqual((due - posted).days, 7)
+        self.assertEqual(due.strftime("%A %H:%M"), "Monday 20:00")
+
+    def test_just_after_the_hour_waits_a_fortnight(self):
+        posted = self.utc(2026, 10, 12, 13)         # Monday 21:00 GMT+8
+        self.assertEqual((draft.next_week_time(posted) - posted).days, 13)
+
+    def test_it_is_always_monday_evening_in_gmt8(self):
+        for day in range(1, 29):
+            posted = self.utc(2026, 10, day, 3)
+            due = draft.next_week_time(posted)
+            with self.subTest(day=day):
+                self.assertEqual(due.weekday(), config.WEEK_POST_WEEKDAY)
+                self.assertEqual((due.hour, due.minute), (config.WEEK_POST_HOUR, 0))
+                self.assertGreaterEqual((due - posted).days, config.WEEK_GAP_DAYS)
+
+    def test_a_stored_timestamp_is_understood(self):
+        # week_posted_at is kept as text, like every other time in the bot.
+        due = draft.next_week_time("2026-10-13T06:00:00+00:00")
+        self.assertEqual(due.strftime("%A"), "Monday")
+
+
+class WeeksDueTests(unittest.TestCase):
+    """Which leagues want a week posting right now."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.pool = make_draft(self.conn, channel_id=2400, players=2, budget=50,
+                               min_picks=1, max_picks=1, mode="full_season")
+        self.league_id = self.pool["league_id"]
+        draft.generate_fixtures(self.conn, self.league_id, weeks=3)
+
+    def finish_drafting(self, free_until=None):
+        for _ in range(2):
+            live = draft.get_pool(self.conn, self.pool["id"])
+            current = draft.current_player(self.conn, live)
+            if current is None:
+                break
+            draft.make_pick(self.conn, live, current["user_id"], 1,
+                            f"M{current['id']}", 5)
+        self.conn.execute("UPDATE pools SET free_trades_until = ? WHERE league_id = ?",
+                          (free_until, self.league_id))
+        self.conn.commit()
+
+    def due(self, now=None):
+        return [(l["name"], week) for l, week in
+                draft.leagues_due_a_week(self.conn, now)]
+
+    def test_week_one_waits_for_the_draft(self):
+        self.assertEqual(self.due(), [], "still drafting")
+
+    def test_week_one_waits_for_the_grace_period(self):
+        later = time.time() + 3600
+        self.finish_drafting(free_until=later)
+        self.assertEqual(self.due(), [], "the free trade window is still open")
+
+    def test_week_one_is_due_once_the_grace_period_ends(self):
+        self.finish_drafting(free_until=time.time() - 60)
+        self.assertEqual(self.due(), [("League 2400", 1)])
+
+    def test_a_league_with_no_trade_window_only_waits_for_the_draft(self):
+        self.finish_drafting(free_until=None)
+        self.assertEqual(self.due(), [("League 2400", 1)])
+
+    def test_the_next_week_waits_for_its_monday(self):
+        self.finish_drafting(free_until=None)
+        draft.set_current_week(self.conn, self.league_id, 1)
+        draft.record_week_posted(self.conn, self.league_id,
+                                 when="2026-10-13T06:00:00+00:00")
+
+        just_before = datetime.datetime(2026, 10, 26, 11, 59,
+                                        tzinfo=datetime.timezone.utc)
+        self.assertEqual(self.due(just_before), [], "Monday 20:00 GMT+8 has not come")
+
+        on_time = datetime.datetime(2026, 10, 26, 12, 0,
+                                    tzinfo=datetime.timezone.utc)
+        self.assertEqual(self.due(on_time), [("League 2400", 2)])
+
+    def test_a_missed_monday_is_posted_as_soon_as_the_bot_is_back(self):
+        self.finish_drafting(free_until=None)
+        draft.set_current_week(self.conn, self.league_id, 1)
+        draft.record_week_posted(self.conn, self.league_id,
+                                 when="2026-10-13T06:00:00+00:00")
+        late = datetime.datetime(2026, 10, 28, 9, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual(self.due(late), [("League 2400", 2)],
+                         "being down over a Monday must not lose a week")
+
+    def test_nothing_is_posted_once_it_has_been_switched_off(self):
+        self.finish_drafting(free_until=None)
+        draft.stop_auto_weeks(self.conn, self.league_id)
+        self.assertEqual(self.due(), [])
+
+    def test_posting_a_week_by_hand_arms_it_again(self):
+        self.finish_drafting(free_until=None)
+        draft.stop_auto_weeks(self.conn, self.league_id)
+        draft.record_week_posted(self.conn, self.league_id)
+        self.assertEqual(draft.get_league(self.conn, self.league_id)["auto_weeks"], 1)
+
+    def test_a_finished_draft_is_when_the_season_starts(self):
+        # The league's own status goes to 'complete' when the drafting
+        # finishes, which is precisely when week 1 is wanted.
+        self.finish_drafting(free_until=None)
+        self.assertEqual(draft.get_league(self.conn, self.league_id)["status"],
+                         "complete")
+        self.assertEqual(self.due(), [("League 2400", 1)])
+
+    def test_an_archived_league_is_left_alone(self):
+        self.finish_drafting(free_until=None)
+        self.conn.execute("UPDATE leagues SET status = 'archived' WHERE id = ?",
+                          (self.league_id,))
+        self.conn.commit()
+        self.assertEqual(self.due(), [])
+
+    def test_a_draft_only_league_never_posts_weeks(self):
+        conn = database.connect(":memory:")
+        make_draft(conn, channel_id=2401, players=2, budget=50, min_picks=1,
+                   max_picks=1, mode="draft_only")
+        self.assertEqual(draft.leagues_due_a_week(conn), [])
 
 
 class MigrationTests(unittest.TestCase):

@@ -11,6 +11,7 @@ not allowed. Because the check happens before any INSERT, a rejected command
 can never leave a half-finished change in the database.
 """
 
+import datetime
 import json
 import random
 import re
@@ -2795,6 +2796,111 @@ def grant_extension(conn, league_id, number, moderator_user_id):
 
 def reject_extension(conn, league_id, number, moderator_user_id):
     return _decide_extension(conn, league_id, number, moderator_user_id, "rejected")
+
+# --------------------------------------------------------------------------
+# Posting weeks by themselves
+# --------------------------------------------------------------------------
+
+
+WEEK_ZONE = datetime.timezone(
+    datetime.timedelta(hours=config.WEEK_POST_UTC_OFFSET_HOURS))
+
+
+def grace_over(conn, league_id, now=None):
+    """True once every pool has drafted and its free-trade window has closed.
+
+    This is what week 1 waits for: the draft finished and the rush of
+    free trades after it settled.
+    """
+    pools = get_league_pools(conn, league_id)
+    if not pools:
+        return False
+    now = time.time() if now is None else now
+    for pool in pools:
+        if pool["status"] != "complete":
+            return False
+        until = pool["free_trades_until"]
+        if until and now < until:
+            return False
+    return True
+
+
+def next_week_time(after):
+    """When the week after one posted at `after` is due.
+
+    The first Monday at WEEK_POST_HOUR, GMT+8, that is at least
+    WEEK_GAP_DAYS later. A week always gets its full seven days, so a
+    season whose first week goes up on a Tuesday does not get a five-day
+    week 1: the Monday three days later is skipped and week 2 lands on the
+    Monday after it.
+
+    GMT+8 keeps the same offset all year, so a fixed offset is right and
+    there is no daylight saving to think about.
+    """
+    if isinstance(after, str):
+        after = datetime.datetime.fromisoformat(after)
+    if after.tzinfo is None:
+        after = after.replace(tzinfo=datetime.timezone.utc)
+
+    earliest = (after + datetime.timedelta(days=config.WEEK_GAP_DAYS)).astimezone(WEEK_ZONE)
+    due = earliest.replace(hour=config.WEEK_POST_HOUR, minute=0, second=0, microsecond=0)
+    due += datetime.timedelta(days=(config.WEEK_POST_WEEKDAY - due.weekday()) % 7)
+    if due < earliest:
+        due += datetime.timedelta(days=7)
+    return due
+
+
+def record_week_posted(conn, league_id, when=None):
+    """Remember when a week went up, which sets the weekly cadence.
+
+    Also re-arms automatic posting: a moderator posting a week by hand is
+    saying the season is still going, so the bot picks it up again.
+    """
+    conn.execute(
+        "UPDATE leagues SET week_posted_at = ?, auto_weeks = 1 WHERE id = ?",
+        (when or database.now(), league_id),
+    )
+    conn.commit()
+
+
+def stop_auto_weeks(conn, league_id):
+    """Stop posting weeks by themselves, when the schedule has run out."""
+    conn.execute("UPDATE leagues SET auto_weeks = 0 WHERE id = ?", (league_id,))
+    conn.commit()
+
+
+def leagues_due_a_week(conn, now=None):
+    """Leagues whose next week should go up now, as [(league, week)].
+
+    Week 1 waits for every pool's draft and free-trade window to finish.
+    Every week after that is due on the first Monday 20:00 GMT+8 at least
+    a week after the last one went up.
+
+    A league that has never had a week posted and is still drafting is
+    left alone: posting week 1 is what starts the cadence.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc) if now is None else now
+    due = []
+    # 'complete' means the drafting finished, which is exactly when a season
+    # starts - so weeks are posted for those too, and only an archived
+    # league is past caring.
+    for league in conn.execute(
+            "SELECT * FROM leagues WHERE status IN ('active', 'complete') "
+            "AND auto_weeks = 1"):
+        if league["mode"] not in config.SCHEDULE_MODES:
+            continue
+        week = league["current_week"] or 0
+        if week < 1:
+            if grace_over(conn, league["id"], now.timestamp()):
+                due.append((league, 1))
+            continue
+        if not league["week_posted_at"]:
+            continue        # from before the bot tracked this; a manual post starts it
+        if now >= next_week_time(league["week_posted_at"]):
+            due.append((league, week + 1))
+    return due
+
+
 
 
 # post.
