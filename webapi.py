@@ -338,7 +338,8 @@ class WebApi:
         return league
 
     async def post_week(self, body):
-        """/postschedule from draft.ogreclan.com: the week's matches, and approved trades into effect.
+        """/postschedule from draft.ogreclan.com: the week's matches. Approved trades are not
+        applied here - they land when their players' matches are reported, or on /updatetrades.
         A league on Discord gets the post in its trade approvals channel."""
         league = self.league(body)
         week = int(body["week"])
@@ -350,7 +351,7 @@ class WebApi:
             # channel, one message per match, each with votes on it.
             await self.admin_cog.publish_week(
                 league, result, self.bot.get_channel(league["admin_channel_id"]))
-        return {"matches": result["matches"], "applied": result["applied"], "report": plain(result["report"])}
+        return {"matches": result["matches"], "waiting": result["waiting"], "report": plain(result["report"])}
 
     async def trade(self, body):
         """/trade from draft.ogreclan.com: user_id proposes; with partner_user_id it's a swap,
@@ -398,7 +399,7 @@ class WebApi:
                 f"• **{proposer['display_name']}** gives up: {rules.trade_side(record['drops'])}\n"
                 f"• **{proposer['display_name']}** receives: {rules.trade_side(record['gets'])}\n"
                 + (f"• Partner: **{partner['display_name']}**\n" if partner else "• Traded with the undrafted pool\n")
-                + f"Rosters and budgets change from week {next_week}, when it's posted.")
+                + f"Rosters and budgets change {ui.when_trades_land(league)}.")
         return {"week": next_week, "notes": [plain(note) for note in notes]}
 
     async def reject_trade(self, body):
@@ -453,7 +454,15 @@ class WebApi:
         view = results.record_game(self.bot.conn, league["id"], week, fixture["match_number"], int(body["game"]),
                                    source, winner_id=winner["id"] if winner else None, stats=stats,
                                    replay=body.get("replay"), only_player=reporter["id"] if source == "manual" else None)
-        return {"match": fixture["match_number"], "winner_id": view["winner_id"], "games": len(view["games"])}
+        # Finishing the match is what puts both players' approved trades into effect.
+        applied = results.trades_after_match(self.bot.conn, league, week, fixture["match_number"])
+        if applied:
+            await ui.trades_landed(
+                self.bot, applied,
+                f"**{players[0]['display_name']}** and **{players[1]['display_name']}** have "
+                f"finished their week {week} match")
+        return {"match": fixture["match_number"], "winner_id": view["winner_id"],
+                "games": len(view["games"]), "trades_applied": len(applied)}
 
     async def champions(self, body):
         """A player agrees (or not) to play their match on Pokémon Champions"""

@@ -100,7 +100,8 @@ A reduced timer is not permanent punishment — ask a moderator if you think it 
 • With `partner` it is a swap with that player.
 • **Without** `partner` it is free agency: you drop Pokémon back into the pool and pick up undrafted ones.
 • Dropping nothing? Put `nil` or `0` in `drops` to pay for a pickup with the points you have left: `/trade drops:nil gets:Heatran`
-• Nothing changes until a moderator approves it, and then **rosters change when the next week is posted**, so nothing moves in the middle of a week. You will see the trade number.
+• Nothing changes until a moderator approves it, and then **it takes effect when you have finished that week's match** — report it with `/reportgame` or `/reportreplay` and your new team is yours. Nothing moves under a match you are still playing.
+• Picking up something another coach has already been approved to drop is fine: your pickup simply lands after their drop does.
 • The league's limit counts the **Pokémon you pick up**, not the ones you drop.
 • For **24 hours after the draft ends** (the bot pings everyone), trades are unlimited and don't count toward the limit.
 
@@ -121,7 +122,7 @@ A reduced timer is not permanent punishment — ask a moderator if you think it 
 • A moderator decides. If granted, the match is posted again with next week.
 • **One week is the most it can move** — a match already carried over has to be played.
 
-**Taking over a team?** A substitute who joins during or after the draft gets **24 hours of unlimited transactions** to make the team their own. They take effect the moment the window closes, not at the next posted week. You can replace as many as you like but not grow the team — an extra Pokémon only comes from your own turn with `/pick`.
+**Taking over a team?** A substitute who joins during or after the draft gets **24 hours of unlimited transactions** to make the team their own. They take effect the moment the window closes — there is no match of their own to wait for. You can replace as many as you like but not grow the team — an extra Pokémon only comes from your own turn with `/pick`.
 
 **`/subrequest reason:...`** — ask for a substitution.
 • Already drafting? This asks to **sub out**.
@@ -178,4 +179,25 @@ Use `/search` to see both prices. Some Pokémon have no Tera price at all — th
 **Worth knowing:** `/queuepick` now checks your costs against the tier list and refuses a wrong price instead of quietly drafting at it. Leave `costs` out entirely and the bot fills in the list's own prices.
 
 **Also changed:** `/editpick` now only works until the next pick is made. After that, ask a moderator — they can fix anything at any time.
+```
+
+---
+
+## Block 8 — new: when your trade actually happens
+
+```
+**🔁 New: your approved trade lands when you finish your match**
+
+**Report your match and your new team is yours.** An approved trade used to sit until the next week was posted. Now it takes effect as soon as **both** players have finished that week's match — `/reportgame`, `/reportreplay`, or on draft.ogreclan.com. Nothing changes under a match you are still playing: the team that starts a match finishes it.
+
+**Not played yet?** Nothing has moved, and that is on purpose. A moderator can put trades through early if your week's match isn't going to be played.
+
+**Before week 1** there is no match to finish, so the moderators put that first rush of transactions through themselves. The bot tells you exactly which it is waiting for when you ask.
+
+**You can now pick up a Pokémon somebody has been approved to drop**, even while it is still sitting on their roster. Just ask for it by name in `/trade` — the bot files your pickup and it lands the moment their drop does, in the right order. No more placeholders.
+• Only one of you can claim it: if another approved trade is already taking it, the bot says which.
+
+**`/trades`** shows where each one is: *waiting for their match*, *waiting for #6* (an earlier trade has to go first), or *in effect from week N*.
+
+**The end of the free-transaction window is now announced** in your draft channel, so you know when trades start counting towards your limit.
 ```

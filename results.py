@@ -13,15 +13,20 @@ They arrive four ways, and all end up in the same tables:
 
 Each player reports their own side; a replay or a battle fills in both. Nothing needs the opponent to confirm it:
 staff correct mistakes. The tables are new ones, added alongside the bot's own (see database.SCHEMA).
+
+Finishing a match does one thing besides recording it: both players' approved trades take effect
+(`match_finished`, and `bot.trades_after_match`), because the team that played the match is the team the
+match was played with.
 """
 
 import re
 
+import config
 import database
 import draft as rules
 
 SOURCES = ("battle", "replay", "manual")
-MAX_GAMES = 5
+MAX_GAMES = config.MAX_GAMES_PER_MATCH
 
 
 def _tokens(name):
@@ -81,6 +86,28 @@ def roster_of(conn, player):
         "SELECT pokemon FROM rosters WHERE player_id = ? ORDER BY id", (player["id"],))]
 
 
+def trades_after_match(conn, league, week, match_number):
+    """Both players' approved trades, put into effect because their match is over.
+
+    Nothing moves while a match is being played, because the team that
+    starts it has to be the team that finishes it. Once it is over it is
+    over for both players, so both sides' trades land - except any that is
+    waiting for another trade, which keeps waiting (draft.blocking_trade).
+
+    Returns [(trade, notes)], empty when the match is not finished.
+    """
+    if not match_finished(conn, league, week, match_number):
+        return []
+    fixture = conn.execute(
+        "SELECT * FROM fixtures WHERE league_id = ? AND week = ? AND match_number = ?",
+        (league["id"], week, match_number)).fetchone()
+    if fixture is None:
+        return []
+    seats = [fixture["home_player_id"], fixture["away_player_id"]]
+    return rules.apply_trades(conn, league["id"], (league["current_week"] or 0) + 1,
+                              player_ids=seats)
+
+
 def record_game(conn, league_id, week, match_number, game, source, winner_id=None, stats=None,
                 replay=None, only_player=None):
     """Record (or correct) one game. `stats` is {player_id: [(pokemon, kills, deaths), ...]}: with
@@ -122,13 +149,38 @@ def record_game(conn, league_id, week, match_number, game, source, winner_id=Non
     return match_view(conn, league_id, week, match_number)
 
 
+def wins_needed(league):
+    """How many games win the match: two of a best-of-three, one of a best-of-one."""
+    return max(1, int(league["best_of"] or 1) // 2 + 1)
+
+
+def game_wins(conn, report_id):
+    """{player_id: games won} for a match"""
+    counts = {}
+    for row in conn.execute("SELECT winner_id FROM game_results WHERE report_id = ? "
+                            "AND winner_id IS NOT NULL", (report_id,)):
+        counts[row["winner_id"]] = counts.get(row["winner_id"], 0) + 1
+    return counts
+
+
+def match_finished(conn, league, week, match_number):
+    """Whether a match is over: somebody has won the games it takes.
+
+    This is what puts a player's approved trades into effect, so it has to
+    mean the whole match and not "ahead on games" - winning game 1 of a
+    best-of-three is not the end of it, and the team that plays game 2 has
+    to be the team that played game 1.
+    """
+    report = get_report(conn, league["id"], week, match_number)
+    if report is None:
+        return False
+    needed = wins_needed(league)
+    return any(won >= needed for won in game_wins(conn, report["id"]).values())
+
+
 def set_winner(conn, report_id):
     """Whoever won more games, or None while it's level"""
-    counts = {}
-    for row in conn.execute("SELECT winner_id FROM game_results WHERE report_id = ? AND winner_id IS NOT NULL",
-                            (report_id,)):
-        counts[row["winner_id"]] = counts.get(row["winner_id"], 0) + 1
-    ranked = sorted(counts.items(), key=lambda item: -item[1])
+    ranked = sorted(game_wins(conn, report_id).items(), key=lambda item: -item[1])
     if not ranked or (len(ranked) > 1 and ranked[0][1] == ranked[1][1]):
         return None
     return ranked[0][0]

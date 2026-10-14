@@ -126,7 +126,9 @@ A queue costs a player nothing to lose — it is only a plan for a turn they mig
 
 Players propose with `/trade` in their draft channel. It lands in the **admin channel** with a number, the budget arithmetic, and any warnings.
 
-**`/approvetrade trade_id:3`** — approves it. Rosters and budgets change at the **next `/postschedule`**, so a roster never changes mid-week. Only works once.
+**`/approvetrade trade_id:3`** — approves it. Nothing moves yet: it takes effect when **both its players have finished that week's match** (reported with `/reportgame`, `/reportreplay` or on the site), so no roster changes under a match being played with it. Only works once.
+
+**`/updatetrades`** — puts every approved trade through **now**, without waiting for a match. Run in a pool's channel it does that pool; add `pool:B` or `player:@Someone` to narrow it. This is how trades land during the pre-season grace period, and how you unstick a match nobody is going to report.
 
 **`/rejecttrade trade_id:3`** — declines it. Nothing changes.
 
@@ -134,7 +136,7 @@ Players propose with `/trade` in their draft channel. It lands in the **admin ch
 
 Add `name:OCDL Season 1` to any of these if your admin channel runs more than one draft. Trade numbers are **per draft**, so two leagues sharing an admin channel never both have a #1.
 
-**What the bot refuses before you ever see it:** a name that is not on the tiering list, a Pokémon with no price, one the proposer does not own, a free-agency pickup that somebody has already drafted, and anything either side cannot afford. Names are stored in the tiering list's own spelling, so `rotom-mow` is filed as `Rotom-Mow`.
+**What the bot refuses before you ever see it:** a name that is not on the tiering list, a Pokémon with no price, one the proposer does not own, a free-agency pickup that is genuinely somebody else's, and anything either side cannot afford. Something another coach has an **approved drop** for counts as available — the pickup is filed and lands after their drop does. Names are stored in the tiering list's own spelling, so `rotom-mow` is filed as `Rotom-Mow`.
 
 **What is still yours to judge:** whether a trade is *fair*. Oddities — a roster going over size, somebody dropping nothing, a partner receiving nothing — are attached as ⚠️ warnings, not blocked.
 ```
@@ -148,11 +150,11 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 
 **`/edittrade trade_id:3 drops:Garchomp gets:Rotom-Wash`** — rewrites both sides of a trade that is nearly right, instead of making the player retype it. The edit is held to all the same rules, and an edited trade **goes back to pending** — you approved the Pokémon in front of you, so changed ones need a fresh decision. Both channels are told.
 
-**`/unapprovetrade trade_id:3`** — takes back an approval given by mistake, putting it back to pending. Only works while it is still waiting: approving moves nothing, so there is nothing to undo. Once a week has been posted the Pokémon have changed hands and you need a fresh `/trade` to move them back.
+**`/unapprovetrade trade_id:3`** — takes back an approval given by mistake, putting it back to pending. Only works while it is still waiting: approving moves nothing, so there is nothing to undo. Once it has taken effect the Pokémon have changed hands and you need a fresh `/trade` to move them back.
 
 **`/trade ... for_player:@Someone`** — file a trade on behalf of a player who cannot manage the command. It still needs approving.
 
-**🔁 Substitutes get 24 hours of unlimited transactions** when they take over during or after a draft. Theirs don't count against the trade cap, and they take effect when the window closes rather than at the next posted week — so approve them promptly. They can replace the team they inherited but not grow it.
+**🔁 Substitutes get 24 hours of unlimited transactions** when they take over during or after a draft. Theirs don't count against the trade cap, and they take effect when the window closes — there is no match of their own to wait for, so approve them promptly. They can replace the team they inherited but not grow it.
 
 **The limit counts Pokémon picked up**, not dropped: each player counts what they receive. Trades proposed in the **24 hours after a pool's draft ends** (the bot pings the pool when it opens) don't count at all. A player dropping nothing types `nil` or `0` for `drops`.
 ```
@@ -178,7 +180,7 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 ```
 **📅 Running the season**
 
-**`/postschedule week:3 name:OCDL Season 1`** — posts that week's matchups and puts every approved trade into effect (listed underneath). Reads the template's schedule, or the bot's own if there's no template. Never automatic.
+**`/postschedule week:3 name:OCDL Season 1`** — posts that week's matchups. It moves no Pokémon: approved trades land when their players report the match, or on `/updatetrades`, and any still waiting are listed underneath. Reads the template's schedule, or the bot's own.
 
 **Each match gets its own message, with 🇦 and 🇧 on it to vote with.** They go to the league's **schedule channel**; set one with `/schedulechannel name:OCDL Season 1 channel:#schedule`, or with `schedule_channel` in `/setup`. With none set they post wherever you run the command, and the bot tells you so. I need **Add Reactions** in that channel for the votes.
 
@@ -212,23 +214,19 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 For moderators who already have the blocks above. Everything here is also written into them, so a moderator reading the guide fresh does not need this one.
 
 ```
-**🆕 What's new for moderators**
+**🆕 What's new for moderators — trades now land on match reports**
 
-**Turns and picks**
-• **`/skipturn`** — ends the turn of whoever is on the clock, exactly as the timer running out would: makeup owed, timer reduced. Add `penalty:False` to spare their timer, or `player:@Someone` to refuse unless that really is who's up.
-• **`/reopendrafting player:@Someone`** — players can now stop early with `/finishdrafting` once past the minimum; this puts one back on the clock.
-• **`/editpick`** — players may only fix their own pick **until the next pick is made**. Anything older is your job, and you are never too late.
+**When an approved trade actually moves**
+• Not when a week is posted any more. Two things have to be true: **you approved it**, and **its players have finished that week's match** — reported with `/reportgame`, `/reportreplay` or on the site. The team that starts a match finishes it.
+• **`/updatetrades`** — puts them through now, without waiting. In a pool's channel it does that pool; add `pool:B` for the other one, or `player:@Someone` for just them. This is what you use during the **grace period before week 1**, and when a match is never going to be reported.
+• **`/postschedule`** now only posts matchups. It lists anything still waiting underneath.
+• `/trades` shows each one as *waiting for their match* — or *waiting for #6* when an earlier trade has to go first.
 
-**Queues**
-• **`/myqueue`** run *here in the admin channel* — dropdowns for the draft, pool and player, to read anybody's queue. In a draft channel it only shows your own, so players have no idea this is possible.
-• **`/cancelqueue player:@Someone`** — deletes somebody's queue before it fires. Nothing else changes.
+**Dropped Pokémon can be picked up straight away**
+• A coach may now pick up something another coach has an **approved drop** for, even though it is still on their roster. The pickup is filed and lands **after** that drop does, automatically and in the right order. Nobody has to use a placeholder and wait any more.
+• Two coaches cannot both claim it: once one approved trade is taking it, the next is refused with the trade number that has it.
 
-**Trades**
-• **The bot now refuses bad trades before you ever see them:** names that aren't on the tier list, Pokémon the proposer doesn't own, pickups somebody already drafted, and anything either side can't afford. Names are filed in the tier list's own spelling. Whether a trade is *fair* is still your call.
-• **`/edittrade trade_id:3 drops:Garchomp gets:Rotom-Wash`** — fixes a trade that's nearly right instead of making them retype it. It goes back to pending.
-• **`/unapprovetrade trade_id:3`** — takes back an approval, while the trade is still waiting to apply.
-
-**The season**
-• **`/postschedule`** now posts to the league's **scheduling channel**, one match per message, each with 🇦 and 🇧 to vote on. Set with `/schedulechannel` — already done for all three leagues.
-• **`/grantextension number:2`** or **`/grantextension player:@Someone`** — an extension moves a match on by one week, which is the limit. Also `/rejectextension` and `/extensions`.
+**Two smaller things**
+• **The end of a pool's free-transaction window is now announced** in its channel, saying what changes. It used to pass in silence.
+• **`/setup best_of:1`** (or `/edit best_of:1`) — games in a match, used to tell when a match is finished. **Three** unless you say otherwise, which is what the league template expects. A best-of-one league needs this set, or its trades will only move on `/updatetrades`.
 ```

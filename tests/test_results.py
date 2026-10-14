@@ -92,3 +92,89 @@ class ResultsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MatchOverTests(unittest.TestCase):
+    """What "this match is finished" means, and what it sets off.
+
+    A finished match is what puts that week's approved trades into effect,
+    so it has to mean the whole match: a roster may not change under games
+    that are still to be played with it.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.pool = make_draft(self.conn, channel_id=7100, players=2, min_picks=1, max_picks=2)
+        for name, cost in [("Mega Eternal-Floette", 20), ("Incineroar", 15),
+                           ("Garchomp", 12), ("Rotom-Wash", 8)]:
+            live = draft.get_pool(self.conn, self.pool["id"])
+            player = draft.current_player(self.conn, live)
+            draft.make_pick(self.conn, live, player["user_id"], live["current_round"], name, cost)
+        self.league_id = self.pool["league_id"]
+        draft.generate_fixtures(self.conn, self.league_id, weeks=1)
+        self.one = draft.get_player(self.conn, self.pool["id"], user(1))
+        self.two = draft.get_player(self.conn, self.pool["id"], user(2))
+        self.match = results.find_match(self.conn, self.league_id, 1, self.one["id"])["match_number"]
+
+    def league(self):
+        return draft.get_league(self.conn, self.league_id)
+
+    def win(self, game, player):
+        results.record_game(self.conn, self.league_id, 1, self.match, game, "manual",
+                            winner_id=player["id"])
+
+    def test_a_best_of_three_takes_two_games(self):
+        self.assertEqual(self.league()["best_of"], 3, "the safe default")
+        self.assertFalse(results.match_finished(self.conn, self.league(), 1, self.match),
+                         "nothing reported yet")
+        self.win(1, self.one)
+        self.assertFalse(results.match_finished(self.conn, self.league(), 1, self.match),
+                         "ahead on games is not finished")
+        self.win(2, self.two)
+        self.assertFalse(results.match_finished(self.conn, self.league(), 1, self.match))
+        self.win(3, self.one)
+        self.assertTrue(results.match_finished(self.conn, self.league(), 1, self.match))
+
+    def test_a_best_of_one_takes_one(self):
+        draft.update_settings(self.conn, self.pool, best_of=1)
+        self.assertEqual(self.league()["best_of"], 1,
+                         "changing it is allowed after the draft: it is about the season")
+        self.win(1, self.two)
+        self.assertTrue(results.match_finished(self.conn, self.league(), 1, self.match))
+
+    def test_an_even_number_of_games_is_refused(self):
+        with self.assertRaises(draft.DraftError):
+            draft.update_settings(self.conn, self.pool, best_of=2)
+        with self.assertRaises(draft.DraftError):
+            draft.update_settings(self.conn, self.pool, best_of=7)
+
+    def test_finishing_the_match_puts_both_players_trades_into_effect(self):
+        live = draft.get_pool(self.conn, self.pool["id"])
+        draft.propose_trade(self.conn, live, user(1), ["Rotom-Wash"], ["Skarmory"])
+        draft.propose_trade(self.conn, live, user(2), ["Garchomp"], ["Corviknight"])
+        draft.approve_trade(self.conn, live, 1, 99)
+        draft.approve_trade(self.conn, live, 2, 99)
+
+        self.assertEqual(results.trades_after_match(self.conn, self.league(), 1, self.match), [],
+                         "the match has not been played")
+        self.win(1, self.one)
+        self.assertEqual(results.trades_after_match(self.conn, self.league(), 1, self.match), [],
+                         "and not after one game of three")
+
+        self.win(2, self.one)
+        applied = results.trades_after_match(self.conn, self.league(), 1, self.match)
+        self.assertEqual(sorted(trade["trade_number"] for trade, _ in applied), [1, 2],
+                         "the match is over for both of them")
+        self.assertIsNone(draft.find_owner(self.conn, self.pool["id"], "rotom-wash"))
+        self.assertEqual(
+            draft.find_owner(self.conn, self.pool["id"], "skarmory")["player_id"], self.one["id"])
+        self.assertEqual(draft.get_trade(self.conn, self.league_id, 1)["applied_week"], 1,
+                         "in effect from the week they next play")
+
+        self.assertEqual(results.trades_after_match(self.conn, self.league(), 1, self.match), [],
+                         "and not twice")
+
+    def test_a_match_with_no_fixture_does_nothing(self):
+        self.win(1, self.one)
+        self.win(2, self.one)
+        self.assertEqual(results.trades_after_match(self.conn, self.league(), 1, 99), [])

@@ -1,6 +1,6 @@
 """
 Trades, substitutions and price-list lookups:
-/trade, /approvetrade, /rejecttrade, /trades,
+/trade, /approvetrade, /rejecttrade, /trades, /updatetrades,
 /subrequest, /substitute, /search, /available.
 
 Trades and substitution requests are proposed in a pool's own channel and
@@ -22,6 +22,9 @@ import ui
 from cogs.drafting import lookup_price, pokemon_autocomplete, tiering_tab_for
 
 log = logging.getLogger("draftbot.extras")
+
+POOL_CHOICES = [app_commands.Choice(name="Pool A", value="A"),
+                app_commands.Choice(name="Pool B", value="B")]
 
 
 class ExtrasCog(commands.Cog):
@@ -183,6 +186,8 @@ class ExtrasCog(commands.Cog):
         budget_line = (
             f"\n• Budget: **{proposer['budget_remaining']} → {maths['after']}** "
             f"(back {maths['refund']}, costs {maths['charge']})")
+        for note in maths["notes"]:
+            budget_line += f"\n• 🕒 {note}"
         if maths["partner_after"] is not None:
             budget_line += (f"\n• Partner's budget: "
                             f"**{partner_player['budget_remaining']} → "
@@ -213,7 +218,7 @@ class ExtrasCog(commands.Cog):
         await interaction.followup.send(
             f"✅ Trade **#{record['trade_number']}** submitted{whose} for approval. "
             f"Nothing changes until a moderator approves it, and then rosters change "
-            f"when the next week is posted.",
+            f"{ui.when_trades_land(league)}.",
             ephemeral=True,
         )
 
@@ -247,7 +252,8 @@ class ExtrasCog(commands.Cog):
         # The edited trade is held to exactly the same rules as a new one.
         prices = await self.resolve_trade_sides(pool, drop_list, get_list)
         maths = rules.check_trade(self.bot.conn, pool, proposer, partner,
-                                  drop_list, get_list, prices)
+                                  drop_list, get_list, prices,
+                                  ignore_trade_id=trade["id"])
 
         record, before = rules.edit_trade(self.bot.conn, pool, trade_id,
                                           drop_list, get_list)
@@ -262,6 +268,7 @@ class ExtrasCog(commands.Cog):
             + f"\n• Receiving: {rules.trade_side(before['gets'])} → "
               f"**{rules.trade_side(record['gets'])}**"
             + f"\n• Budget: **{proposer['budget_remaining']} → {maths['after']}**"
+            + "".join(f"\n• 🕒 {note}" for note in maths["notes"])
             + f"\n\nApprove with `/approvetrade trade_id:{trade_id} name:{league['name']}`.",
             ephemeral=True,
         )
@@ -303,10 +310,13 @@ class ExtrasCog(commands.Cog):
                    if record["partner_id"] else None)
         drops = rules.trade_side(record["drops"])
         gets = rules.trade_side(record["gets"])
-        next_week = (league["current_week"] or 0) + 1
+        blocker = rules.blocking_trade(self.bot.conn, record)
 
-        report = (f"✅ Trade #{trade_id} approved. It takes effect when week {next_week} is "
-                  f"posted with `/postschedule`.")
+        report = (f"✅ Trade #{trade_id} approved. It takes effect "
+                  f"{ui.when_trades_land(league)}.")
+        if blocker is not None:
+            report += (f" Trade #{blocker['trade_number']} shares a Pokémon with it and "
+                       f"has not taken effect yet, so this one waits for that.")
         if notes:
             report += "\n\nNotes:\n" + "\n".join(f"• {note}" for note in notes)
         await interaction.followup.send(report, ephemeral=True)
@@ -318,8 +328,84 @@ class ExtrasCog(commands.Cog):
             f"• **{proposer['display_name']}** receives: {gets}\n"
             + (f"• Partner: **{partner['display_name']}**\n" if partner else
                "• Traded with the undrafted pool\n")
-            + f"Rosters and budgets change from week {next_week}, when it's posted.",
+            + f"Rosters and budgets change {ui.when_trades_land(league)}.",
         )
+
+    # ---- /updatetrades --------------------------------------------------
+
+    @app_commands.command(
+        name="updatetrades",
+        description="Moderator only: put approved trades into effect now.")
+    @app_commands.describe(
+        player="Only this player's trades. Leave it out for the whole pool.",
+        pool="Which pool: A or B. Defaults to this channel's pool, or every pool.",
+        name="The league's name, if this channel runs more than one")
+    @app_commands.choices(pool=POOL_CHOICES)
+    async def updatetrades(self, interaction: discord.Interaction,
+                           player: discord.Member = None,
+                           pool: app_commands.Choice[str] = None,
+                           name: str = None):
+        """An approved trade waits for its players to finish the week's match.
+        This is the other way in: a moderator saying it happens now."""
+        ui.require_moderator(self.bot, interaction)
+        league = self.resolve_league(interaction, name)
+
+        await interaction.response.defer(ephemeral=True)
+
+        seats, pool_id = None, None
+        target = f"**{league['name']}**"
+        if player is not None:
+            where, seat = rules.player_in_league(self.bot.conn, league["id"], player.id)
+            if seat is None:
+                raise rules.DraftError(
+                    f"❌ {player.mention} is not playing in **{league['name']}**.")
+            seats, pool_id = [seat["id"]], where["id"]
+            target = f"**{seat['display_name']}** in {target}"
+        else:
+            label = pool.value if pool is not None else None
+            if label is None:
+                here = rules.get_channel_pool(self.bot.conn, interaction.channel_id)
+                label = here["label"] if here is not None else None
+            if label is not None:
+                found = next((row for row in rules.get_league_pools(self.bot.conn, league["id"])
+                              if row["label"] == label), None)
+                if found is None:
+                    raise rules.DraftError(f"❌ **{league['name']}** has no pool {label}.")
+                pool_id = found["id"]
+                target = f"pool {label} of {target}"
+
+        week = (league["current_week"] or 0) + 1
+        applied = rules.apply_trades(self.bot.conn, league["id"], week,
+                                     pool_id=pool_id, player_ids=seats)
+        await ui.trades_landed(self.bot, applied, "a moderator put it through")
+        held = rules.held_trades(self.bot.conn, league["id"], pool_id=pool_id, player_ids=seats)
+
+        if not applied and not held:
+            await interaction.followup.send(
+                f"Nothing was waiting in {target}. Trades show up here once a "
+                f"moderator has approved them.", ephemeral=True)
+            return
+
+        report = f"🔁 Put {len(applied)} approved trade(s) into effect in {target}."
+        for trade, notes in applied:
+            proposer = rules.get_player_by_id(self.bot.conn, trade["proposer_id"])
+            report += (f"\n• **#{trade['trade_number']}** {proposer['display_name']}: "
+                       f"{rules.trade_side(trade['drops'])} → "
+                       f"{rules.trade_side(trade['gets'])}")
+            for note in notes:
+                report += f"\n  ⚠️ {note}"
+        if applied:
+            report += f"\n\nRosters are in effect from week {week}, and the sheet is updated."
+        if held:
+            report += "\n\nStill waiting:"
+            for trade, blocker in held:
+                proposer = rules.get_player_by_id(self.bot.conn, trade["proposer_id"])
+                report += (f"\n• **#{trade['trade_number']}** {proposer['display_name']} waits "
+                           f"for **#{blocker['trade_number']}**, which shares a Pokémon with "
+                           f"it and has not taken effect")
+            report += ("\n\nRun this again including those players (or leave `player` out) "
+                       "and they go through in order.")
+        await interaction.followup.send(report, ephemeral=True)
 
     # ---- /unapprovetrade ------------------------------------------------
 
@@ -402,7 +488,10 @@ class ExtrasCog(commands.Cog):
             status = row["status"]
             if status == "approved" and row["applied_at"] is None:
                 status = "waiting"
-                label = "approved, in effect from the next posted week"
+                blocker = rules.blocking_trade(self.bot.conn, row)
+                label = (f"approved, waiting for #{blocker['trade_number']}"
+                         if blocker is not None else
+                         "approved, in effect when their match is reported")
             elif status == "approved" and row["applied_week"]:
                 label = f"in effect from week {row['applied_week']}"
             else:
@@ -637,8 +726,8 @@ class ExtrasCog(commands.Cog):
                f"{config.SUB_TRADE_WINDOW_HOURS} hours** (until "
                f"<t:{int(result['sub_window_until'])}:f>, "
                f"<t:{int(result['sub_window_until'])}:R>) to make this team their "
-               f"own. They take effect the moment the window closes, not at the "
-               f"next posted week. They can swap as many as they like but not "
+               f"own. They take effect the moment the window closes, with no "
+               f"match to wait for. They can swap as many as they like but not "
                f"grow the team."
                if result["sub_window_until"] else ""),
         )

@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -146,10 +147,16 @@ class FakeBot:
         self.channel = channel
         self.expired = []
         self.tiering_tabs = {}
+        self.cogs = {}
         self.timers = timers.TurnTimers(self.on_timer_expired)
 
     def get_channel(self, channel_id):
         return self.channel if channel_id == self.channel.id else None
+
+    def get_cog(self, name):
+        """Whatever a test has registered, by class name, like the real bot's
+        registry. Pricing a free-agency pickup goes through this."""
+        return self.cogs.get(name)
 
     async def is_owner(self, user):
         return getattr(user, "id", None) == self.OWNER_ID
@@ -2029,9 +2036,10 @@ class RosterFromRoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("needs players", str(caught.exception))
 
 
-class TradeWeekCommandTests(unittest.IsolatedAsyncioTestCase):
-    """/approvetrade and /postschedule as a moderator runs them: an approved
-    trade changes rosters only when the next week is posted."""
+class TradeEffectCommandTests(unittest.IsolatedAsyncioTestCase):
+    """When an approved trade actually moves a Pokémon: never on approval,
+    never just because a week was posted, but when the players have finished
+    the week's match or a moderator runs /updatetrades."""
 
     async def asyncSetUp(self):
         from cogs.admin import AdminCog
@@ -2050,6 +2058,7 @@ class TradeWeekCommandTests(unittest.IsolatedAsyncioTestCase):
                             ["Garchomp"], ["Rotom-Wash"], partner_user_id=22)
         self.extras = ExtrasCog(self.bot)
         self.admin = AdminCog(self.bot)
+        self.bot.cogs["AdminCog"] = self.admin
 
     async def asyncTearDown(self):
         self.bot.timers.cancel_all()
@@ -2063,27 +2072,176 @@ class TradeWeekCommandTests(unittest.IsolatedAsyncioTestCase):
         row = rules.find_owner(self.conn, self.pool_id, rules.normalize(pokemon))
         return rules.get_player_by_id(self.conn, row["player_id"])["display_name"]
 
-    async def test_a_trade_takes_effect_when_the_next_week_is_posted(self):
+    async def test_posting_a_week_leaves_approved_trades_waiting(self):
         approval = self.moderator()
         await self.extras.approvetrade.callback(self.extras, approval, trade_id=1, name="Season")
-        self.assertIn("takes effect when week 1 is posted", approval.text)
-        self.assertIn("change from week 1", self.channel.text)
+        self.assertIn("/updatetrades", approval.text,
+                      "before week 1 there is no match to finish")
+        self.assertIn("no match to finish until week 1", self.channel.text)
         self.assertEqual(self.owner("Garchomp"), "Larry", "nothing moves on approval")
 
         posting = self.moderator()
         await self.admin.postschedule.callback(self.admin, posting, week=1, name="Season")
-        self.assertIn("Trades in effect from week 1", self.channel.text)
-        self.assertIn("1 approved trade(s) are now in effect", posting.text)
-        self.assertEqual(self.owner("Garchomp"), "Alex")
-        self.assertEqual(self.owner("Rotom-Wash"), "Larry")
+        self.assertIn("1 approved trade(s) waiting", self.channel.text)
+        self.assertIn("waiting for their players' matches", posting.text)
+        self.assertEqual(self.owner("Garchomp"), "Larry", "a posted week moves nothing")
         league = rules.get_league(self.conn, rules.get_pool(self.conn, self.pool_id)["league_id"])
         self.assertEqual(league["current_week"], 1)
 
-        # posting the next week doesn't apply it again
+        # With the season under way, the answer players are given changes.
+        rules.propose_trade(self.conn, rules.get_pool(self.conn, self.pool_id), 22,
+                            [], ["Heatran"])
+        second = self.moderator()
+        await self.extras.approvetrade.callback(self.extras, second, trade_id=2, name="Season")
+        self.assertIn("reported by both players", second.text)
+
+    async def test_updatetrades_puts_the_pool_through(self):
+        await self.extras.approvetrade.callback(self.extras, self.moderator(), trade_id=1, name="Season")
         self.channel.messages.clear()
-        await self.admin.postschedule.callback(self.admin, self.moderator(), week=2, name="Season")
-        self.assertNotIn("Trades in effect", self.channel.text)
+
+        interaction = self.moderator()
+        await self.extras.updatetrades.callback(self.extras, interaction, name="Season")
+        self.assertIn("Put 1 approved trade(s) into effect", interaction.text)
+        self.assertIn("pool A", interaction.text, "run in the pool's channel, so that is the target")
+        self.assertIn("in effect from week 1", interaction.text)
         self.assertEqual(self.owner("Garchomp"), "Alex")
+        self.assertEqual(self.owner("Rotom-Wash"), "Larry")
+        self.assertIn("is in effect — a moderator put it through", self.channel.text)
+
+        again = self.moderator()
+        await self.extras.updatetrades.callback(self.extras, again, name="Season")
+        self.assertIn("Nothing was waiting", again.text)
+        self.assertEqual(self.owner("Garchomp"), "Alex", "not applied twice")
+
+    async def test_updatetrades_clears_a_chain_in_order(self):
+        """A trade that needs an earlier one to land first still goes through
+        in the same pass, because each is looked at again as it is reached."""
+        pool = rules.get_pool(self.conn, self.pool_id)
+        rules.approve_trade(self.conn, pool, 1, 99)
+        # Larry gives up the Rotom-Wash that trade #1 brings him, for Heatran.
+        rules.propose_trade(self.conn, pool, 11, ["Rotom-Wash"], ["Heatran"])
+        rules.approve_trade(self.conn, pool, 2, 99)
+        self.assertIsNotNone(rules.blocking_trade(self.conn, rules.get_trade(self.conn, pool["league_id"], 2)))
+
+        interaction = self.moderator()
+        await self.extras.updatetrades.callback(self.extras, interaction, name="Season")
+        self.assertIn("Put 2 approved trade(s) into effect", interaction.text)
+        self.assertEqual(self.owner("Heatran"), "Larry")
+        self.assertEqual(self.owner("Garchomp"), "Alex")
+        self.assertIsNone(rules.find_owner(self.conn, self.pool_id, "rotom-wash"),
+                          "passed to Larry by #1, then dropped by #2")
+
+    async def test_updatetrades_can_target_one_player(self):
+        pool = rules.get_pool(self.conn, self.pool_id)
+        rules.approve_trade(self.conn, pool, 1, 99)
+        interaction = self.moderator()
+        interaction.channel_id = 9999      # not the pool's channel, so no pool default
+        await self.extras.updatetrades.callback(
+            self.extras, interaction, name="Season", player=FakeMember(11, "Larry"))
+        self.assertIn("**Larry** in", interaction.text)
+        self.assertEqual(self.owner("Garchomp"), "Alex")
+
+
+class ReportedMatchTradeTests(unittest.IsolatedAsyncioTestCase):
+    """Reporting a match is what puts that week's approved trades into effect,
+    through the command a player actually uses."""
+
+    async def asyncSetUp(self):
+        from cogs.admin import AdminCog
+        from cogs.results import ResultsCog
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9700)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.pool_id = make_pool(self.conn, 9700, [(11, "Larry"), (22, "Alex")],
+                                 max_picks=1, name="Reported")
+        pool = rules.get_pool(self.conn, self.pool_id)
+        rules.start_pool(self.conn, pool)
+        rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id), 11, 1, "Garchomp", 12)
+        rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id), 22, 1, "Rotom-Wash", 8)
+        self.league_id = pool["league_id"]
+        rules.generate_fixtures(self.conn, self.league_id, weeks=2)
+        live = rules.get_pool(self.conn, self.pool_id)
+        rules.propose_trade(self.conn, live, 11, ["Garchomp"], ["Heatran"])
+        rules.approve_trade(self.conn, live, 1, 99)
+        self.cog = ResultsCog(self.bot)
+        self.bot.cogs["AdminCog"] = AdminCog(self.bot)
+
+    async def asyncTearDown(self):
+        self.bot.timers.cancel_all()
+
+    def player(self, user_id, name):
+        interaction = FakeInteraction(self.bot, 9700, user_id, name)
+        return interaction
+
+    async def report(self, user_id, name, game, kd, winner):
+        interaction = self.player(user_id, name)
+        await self.cog.reportgame.callback(self.cog, interaction, week=1, game=game, kd=kd,
+                                           winner=FakeMember(*winner))
+        return interaction
+
+    async def test_the_trade_lands_when_the_match_is_over_and_not_before(self):
+        first = await self.report(11, "Larry", 1, "Garchomp 2-0", (11, "Larry"))
+        self.assertIn("is reported", first.text)
+        self.assertNotIn("now in effect", first.text, "one game of three")
+        self.assertIsNotNone(rules.find_owner(self.conn, self.pool_id, "garchomp"))
+
+        second = await self.report(11, "Larry", 2, "Garchomp 1-0", (11, "Larry"))
+        self.assertIn("That finishes the match", second.text)
+        self.assertIn("1 approved trade(s) are now in effect", second.text)
+        self.assertIsNone(rules.find_owner(self.conn, self.pool_id, "garchomp"))
+        self.assertIsNotNone(rules.find_owner(self.conn, self.pool_id, "heatran"))
+        self.assertIn("have finished their week 1 match", self.channel.text)
+
+    async def test_reporting_more_games_does_not_apply_it_again(self):
+        await self.report(11, "Larry", 1, "Garchomp 2-0", (11, "Larry"))
+        await self.report(11, "Larry", 2, "Garchomp 1-0", (11, "Larry"))
+        third = await self.report(22, "Alex", 3, "Rotom-Wash 1-1", (22, "Alex"))
+        self.assertNotIn("now in effect", third.text)
+        self.assertEqual(
+            [t["trade_number"] for t in rules.waiting_trades(self.conn, self.league_id)], [])
+
+
+class GraceWindowTests(unittest.IsolatedAsyncioTestCase):
+    """The end of the free-transaction window is announced, once.
+
+    Cornerstone's pool A reached the end of its grace period without a word,
+    which is how this was noticed.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9800)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.pool_id = make_pool(self.conn, 9800, [(11, "Larry"), (22, "Alex")],
+                                 max_picks=1, name="Grace", max_trades=3)
+        self.conn.execute("UPDATE pools SET status = 'complete', free_trades_until = ? "
+                          "WHERE id = ?", (time.time() - 60, self.pool_id))
+        self.conn.execute("UPDATE leagues SET status = 'complete' WHERE id = ?",
+                          (rules.get_pool(self.conn, self.pool_id)["league_id"],))
+        self.conn.commit()
+
+    def due(self):
+        return [pool["id"] for pool in rules.grace_ended_pools(self.conn)]
+
+    async def test_it_is_said_once_and_says_what_changes(self):
+        self.assertEqual(self.due(), [self.pool_id])
+        await ui.grace_window_closed(self.bot, rules.get_pool(self.conn, self.pool_id))
+        self.assertIn("free-transaction window has closed", self.channel.text)
+        self.assertIn("pick up **3** Pokémon", self.channel.text)
+        self.assertIn("finished that week's match", self.channel.text)
+        self.assertEqual(self.due(), [], "and not again every minute")
+
+    async def test_a_window_that_is_still_open_is_left_alone(self):
+        self.conn.execute("UPDATE pools SET free_trades_until = ? WHERE id = ?",
+                          (time.time() + 3600, self.pool_id))
+        self.conn.commit()
+        self.assertEqual(self.due(), [])
+
+    async def test_a_pool_that_never_had_a_window_is_left_alone(self):
+        self.conn.execute("UPDATE pools SET free_trades_until = NULL WHERE id = ?",
+                          (self.pool_id,))
+        self.conn.commit()
+        self.assertEqual(self.due(), [])
 
 
 class SetupCommandTests(unittest.IsolatedAsyncioTestCase):

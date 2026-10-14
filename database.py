@@ -26,7 +26,10 @@ Two tables deserve a note:
   round, in what order. Trades never rewrite it.
 * `rosters` is current ownership. Trades move rows here, and a Pokemon counts
   as "already drafted" when it appears in `rosters` for that pool - so a
-  Pokemon dropped in a trade correctly becomes available again.
+  Pokemon dropped in a trade correctly becomes available again. A trade is
+  approved before it moves anything, so something an approved trade is about
+  to give up is still on its roster for a while: it may be picked up anyway
+  (see `draft.pending_drops`), and that pickup waits for the drop.
 """
 
 import logging
@@ -70,6 +73,9 @@ CREATE TABLE IF NOT EXISTS leagues (
     -- Weeks in the generated season. Only used when the bot makes its own
     -- schedule; with a template the sheet's own SeasonWeeks applies.
     season_weeks      INTEGER NOT NULL DEFAULT 0,
+    -- Games in one match. It decides when a match is over, and a match
+    -- being over is what puts a player's approved trades into effect.
+    best_of           INTEGER NOT NULL DEFAULT 3,
     -- The week /postschedule last posted (0 before the first)
     current_week      INTEGER NOT NULL DEFAULT 0,
     -- Who sees it on draft.ogreclan.com: 'public' (everyone) or 'private'
@@ -119,6 +125,9 @@ CREATE TABLE IF NOT EXISTS pools (
     finished_at         TEXT,
     -- Unix time the free-trade window after the draft closes (NULL: none)
     free_trades_until   REAL,
+    -- When the pool was told its free-trade window had closed, so that it
+    -- is said once and not every minute afterwards.
+    grace_ended_at      TEXT,
     UNIQUE (league_id, label)
 );
 
@@ -387,6 +396,7 @@ SELECT pools.id               AS id,
        pools.queue_exhausted  AS queue_exhausted,
        pools.halved_this_turn AS halved_this_turn,
        pools.free_trades_until AS free_trades_until,
+       pools.grace_ended_at   AS grace_ended_at,
        leagues.guild_id         AS guild_id,
        leagues.name             AS league_name,
        leagues.admin_channel_id AS admin_channel_id,
@@ -404,6 +414,7 @@ SELECT pools.id               AS id,
        leagues.base_timer       AS base_timer,
        leagues.max_trades       AS max_trades,
        leagues.season_weeks     AS season_weeks,
+       leagues.best_of          AS best_of,
        leagues.status           AS league_status,
        leagues.website          AS website,
        leagues.site_only        AS site_only
@@ -417,6 +428,8 @@ FROM pools JOIN leagues ON leagues.id = pools.league_id;
 # the new column. Append to this list whenever you add one; it is applied on
 # every connect and is safe to run repeatedly.
 ADDED_COLUMNS = [
+    ("leagues", "best_of", "INTEGER NOT NULL DEFAULT 3"),
+    ("pools", "grace_ended_at", "TEXT"),
     ("players", "sub_window_until", "REAL"),
     ("trades", "apply_at", "REAL"),
     ("leagues", "season_weeks", "INTEGER NOT NULL DEFAULT 0"),

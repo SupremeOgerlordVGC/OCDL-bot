@@ -76,6 +76,21 @@ class ResultsCog(commands.Cog):
                    rules.get_player_by_id(self.bot.conn, fixture["away_player_id"])]
         return league, player, fixture, players
 
+    async def land_trades(self, league, week, fixture, players):
+        """A finished match puts both players' approved trades into effect.
+
+        Reported game by game, so this runs after each one and does nothing
+        until the match is actually over. Returns a line for the reply.
+        """
+        applied = results.trades_after_match(self.bot.conn, league, week, fixture["match_number"])
+        if not applied:
+            return ""
+        because = (f"**{players[0]['display_name']}** and **{players[1]['display_name']}** "
+                   f"have finished their week {week} match")
+        await ui.trades_landed(self.bot, applied, because)
+        return (f"\n\n🔁 That finishes the match, so {len(applied)} approved trade(s) are "
+                f"now in effect.")
+
     async def announce(self, league, players, text):
         """A short note in the players' pool channel (a league on Discord)"""
         if league["site_only"]:
@@ -100,8 +115,10 @@ class ResultsCog(commands.Cog):
             winner_id = winner_player["id"]
         view = results.record_game(self.bot.conn, league["id"], week, fixture["match_number"], game, "manual",
                                    winner_id=winner_id, stats={player["id"]: stats}, only_player=player["id"])
+        landed = await self.land_trades(league, week, fixture, players)
         await interaction.response.send_message(
-            f"✅ Game {game} of your week {week} match is reported.\n\n{describe(self.bot.conn, league['id'], view, players)}",
+            f"✅ Game {game} of your week {week} match is reported.\n\n"
+            f"{describe(self.bot.conn, league['id'], view, players)}{landed}",
             ephemeral=True)
 
     @app_commands.command(name="reportreplay", description="Report a game of your match with its replay link (both sides).")
@@ -113,9 +130,10 @@ class ResultsCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         body = await read_replay(replay, [str(p["user_id"]) for p in players])
         view = record_replay(self.bot.conn, league["id"], week, fixture["match_number"], game, players, body)
+        landed = await self.land_trades(league, week, fixture, players)
         await interaction.followup.send(
             f"✅ Game {game} of your week {week} match is reported from its replay.\n\n"
-            f"{describe(self.bot.conn, league['id'], view, players)}", ephemeral=True)
+            f"{describe(self.bot.conn, league['id'], view, players)}{landed}", ephemeral=True)
 
     @app_commands.command(name="champions", description="Agree to play your match on Pokémon Champions instead.")
     @app_commands.describe(week="The week of the match", agree="True to agree, False to take it back",

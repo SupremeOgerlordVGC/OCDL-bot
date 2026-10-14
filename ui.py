@@ -447,6 +447,80 @@ def sync_pick_to_sheet(bot, pool_id, event):
     asyncio.create_task(worker())
 
 
+async def grace_window_closed(bot, pool):
+    """Tell a pool its free-transaction window has closed, once.
+
+    Nothing marks the end of the grace period except the clock, so without
+    this the rules change under the players in silence - which is exactly
+    what happened in Cornerstone's pool A.
+    """
+    limit = (f"Each of you may pick up **{pool['max_trades']}** Pokémon in trades from "
+             f"here on." if pool["max_trades"] else
+             "There is no limit on how many Pokémon you may pick up in trades.")
+    await safe_send(
+        bot.get_channel(pool["channel_id"]),
+        f"⏳ **Pool {pool['label']}'s free-transaction window has closed.**\n"
+        f"{limit} `/trade` works the same way and a moderator still approves every "
+        f"one — what changes is that these count towards your allowance.\n"
+        f"An approved trade takes effect once you have finished that week's match.")
+    rules.record_grace_ended(bot.conn, pool["id"])
+
+
+def when_trades_land(league):
+    """A phrase for "rosters and budgets change ___", true for this league now.
+
+    Before week 1 there is no match to finish - which is exactly when the
+    rush of free transactions happens - so saying "when you finish your
+    match" then would be telling players to wait for nothing.
+    """
+    if (league["current_week"] or 0) < 1:
+        return ("when a moderator puts them through with `/updatetrades`: there is no "
+                "match to finish until week 1 starts")
+    return "once the match for that week has been reported by both players"
+
+
+async def trades_landed(bot, applied, because):
+    """Finish off trades that have just taken effect.
+
+    Everything that puts a trade into effect ends up here - a finished
+    match, a moderator's /updatetrades, a substitute's window closing -
+    because the same three things always follow: a free-agency pickup has
+    no price until the tiering list is read, the pool wants telling, and
+    the spreadsheet has to be rewritten. `because` is the reason, which
+    goes into the message. Returns what it was given, so a caller can
+    count it.
+    """
+    if not applied:
+        return applied
+
+    cog = bot.get_cog("AdminCog")
+    if cog is not None:
+        await cog.price_trades(applied)      # free-agency pickups have no price yet
+
+    for trade, notes in applied:
+        pool = rules.get_pool(bot.conn, trade["pool_id"])
+        if pool is None:
+            continue
+        proposer = rules.get_player_by_id(bot.conn, trade["proposer_id"])
+        partner = (rules.get_player_by_id(bot.conn, trade["partner_id"])
+                   if trade["partner_id"] else None)
+        log.info("trade #%s applied for %s (%s)", trade["trade_number"],
+                 proposer["display_name"], because)
+        lines = (f"🔁 **{proposer['display_name']}**'s trade #{trade['trade_number']} is "
+                 f"in effect — {because}.\n"
+                 f"• Gave up: {rules.trade_side(trade['drops'])}\n"
+                 f"• Received: {rules.trade_side(trade['gets'])}")
+        if partner is not None:
+            lines += f"\n• With: **{partner['display_name']}**"
+        if notes:
+            lines += "\n" + "\n".join(f"• ⚠️ {note}" for note in notes)
+        await safe_send(bot.get_channel(pool["channel_id"]), lines)
+
+    for pool_id in {trade["pool_id"] for trade, _ in applied}:
+        resync_sheet(bot, pool_id)
+    return applied
+
+
 def resync_sheet(bot, pool_id):
     """Rewrite the whole league on the sheet, in the background.
 

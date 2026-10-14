@@ -222,11 +222,25 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(rules.find_owner(self.conn, pool, "garchomp"), "not until the week is posted")
 
         status, body = await self.call("/postweek", league_id=league_id, week=1)
-        self.assertEqual((status, body["matches"], body["applied"]), (200, 1, 1), body)
-        self.assertIsNone(rules.find_owner(self.conn, pool, "garchomp"))
+        self.assertEqual((status, body["matches"], body["waiting"]), (200, 1, 1), body)
+        self.assertIsNotNone(rules.find_owner(self.conn, pool, "garchomp"),
+                             "posting a week no longer moves anything")
         self.assertEqual(rules.get_league(self.conn, league_id)["current_week"], 1)
         status, body = await self.call("/postweek", league_id=league_id, week=9)
         self.assertEqual(status, 400)
+
+        # Reporting the match is what puts it into effect, and not before the
+        # match is over: a best-of-three takes two games.
+        status, body = await self.call("/gameresult", league_id=league_id, week=1, match=1, game=1,
+                                       source="battle", winner_user_id="11")
+        self.assertEqual((status, body["trades_applied"]), (200, 0), body)
+        self.assertIsNotNone(rules.find_owner(self.conn, pool, "garchomp"), "one game of three")
+
+        status, body = await self.call("/gameresult", league_id=league_id, week=1, match=1, game=2,
+                                       source="battle", winner_user_id="11")
+        self.assertEqual((status, body["trades_applied"]), (200, 1), body)
+        self.assertIsNone(rules.find_owner(self.conn, pool, "garchomp"), "2-0 ends the match")
+        self.assertIsNotNone(rules.find_owner(self.conn, pool, "heatran"))
 
         status, body = await self.call("/trade", league_id=league_id, user_id="22", drops=[], gets=["Bulbasaur"])
         self.assertEqual(status, 200, "drops can be nothing")

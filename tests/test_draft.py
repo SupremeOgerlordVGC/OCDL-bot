@@ -2965,6 +2965,146 @@ class CheckTradeTests(unittest.TestCase):
         self.assertEqual((maths["refund"], maths["charge"], maths["after"]), (16, 18, 0))
 
 
+class PendingDropTests(unittest.TestCase):
+    """Picking up something an approved trade has not got round to dropping.
+
+    From a live league: lukehowell123's drop of Sinistcha was approved during
+    the grace period but had not taken effect, so vonyepet was told Sinistcha
+    "is already drafted" and put a placeholder in its slot instead. Something
+    that has been given up is available, and the pickup waits for the drop.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.pool = make_draft(self.conn, channel_id=2300, players=3, budget=100,
+                               min_picks=1, max_picks=3)
+        for seat, name, cost in ((1, "Sinistcha", 17), (2, "Aegislash", 12), (3, "Camerupt", 4)):
+            draft.make_pick(self.conn, draft.get_pool(self.conn, self.pool["id"]),
+                            user(seat), 1, name, cost)
+        self.live = draft.get_pool(self.conn, self.pool["id"])
+        self.league_id = self.pool["league_id"]
+        self.prices = {"sinistcha": 17, "aegislash": 12, "camerupt": 4, "skarmory": 5}
+
+    def player(self, seat):
+        return draft.get_player(self.conn, self.pool["id"], user(seat))
+
+    def approve(self, number):
+        return draft.approve_trade(self.conn, self.live, number, 99)
+
+    def drop_sinistcha(self):
+        """Player1 gives Sinistcha up to free agency, approved, not applied."""
+        draft.propose_trade(self.conn, self.live, user(1), ["Sinistcha"], ["Skarmory"])
+        self.approve(1)
+
+    def check(self, seat, drops, gets, **kwargs):
+        return draft.check_trade(self.conn, self.live, self.player(seat), None,
+                                 drops, gets, self.prices, **kwargs)
+
+    def test_an_approved_drop_can_be_picked_up_before_it_lands(self):
+        self.drop_sinistcha()
+        self.assertEqual(list(draft.pending_drops(self.conn, self.pool["id"])), ["sinistcha"])
+
+        maths = self.check(2, ["Aegislash"], ["Sinistcha"])
+        self.assertEqual((maths["refund"], maths["charge"]), (12, 17))
+        self.assertEqual(len(maths["notes"]), 1)
+        self.assertIn("still on Player1's roster", maths["notes"][0])
+        self.assertIn("trade #1", maths["notes"][0])
+
+    def test_a_drop_to_a_partner_is_not_free_agency(self):
+        # Player1 gives Sinistcha to Player3, so it is not going spare.
+        draft.propose_trade(self.conn, self.live, user(1), ["Sinistcha"], ["Camerupt"],
+                            partner_user_id=user(3))
+        self.approve(1)
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(2, ["Aegislash"], ["Sinistcha"])
+        self.assertIn("already drafted by **Player1**", str(caught.exception))
+
+    def test_a_pending_pickup_is_spoken_for(self):
+        self.drop_sinistcha()
+        draft.propose_trade(self.conn, self.live, user(2), ["Aegislash"], ["Sinistcha"])
+        self.approve(2)
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(3, ["Camerupt"], ["Sinistcha"])
+        message = str(caught.exception)
+        self.assertIn("already going to **Player2**", message)
+        self.assertIn("#2", message)
+
+    def test_a_trade_being_edited_does_not_compete_with_itself(self):
+        self.drop_sinistcha()
+        draft.propose_trade(self.conn, self.live, user(2), ["Aegislash"], ["Sinistcha"])
+        self.approve(2)
+        mine = draft.get_trade(self.conn, self.league_id, 2)
+        maths = self.check(2, ["Aegislash"], ["Sinistcha"], ignore_trade_id=mine["id"])
+        self.assertEqual(maths["charge"], 17)
+
+    def test_a_warning_says_which_trade_it_waits_for(self):
+        self.drop_sinistcha()
+        notes = draft.trade_warnings(self.conn, self.live, self.player(2), None,
+                                     ["Aegislash"], ["Sinistcha"])
+        self.assertTrue(any("takes effect after that one" in note for note in notes), notes)
+
+    def test_the_pickup_waits_for_the_drop_and_then_lands(self):
+        self.drop_sinistcha()
+        draft.propose_trade(self.conn, self.live, user(2), ["Aegislash"], ["Sinistcha"])
+        self.approve(2)
+        two, one = (draft.get_trade(self.conn, self.league_id, n) for n in (2, 1))
+        self.assertEqual(draft.blocking_trade(self.conn, two)["trade_number"], 1)
+        self.assertIsNone(draft.blocking_trade(self.conn, one))
+
+        # Player2's match is over but Player1's is not: the pickup has to wait.
+        applied = draft.apply_trades(self.conn, self.league_id, 2,
+                                     player_ids=[self.player(2)["id"]])
+        self.assertEqual(applied, [])
+        held = draft.held_trades(self.conn, self.league_id, player_ids=[self.player(2)["id"]])
+        self.assertEqual([(t["trade_number"], b["trade_number"]) for t, b in held], [(2, 1)])
+        self.assertEqual(draft.find_owner(self.conn, self.pool["id"], "sinistcha")["player_id"],
+                         self.player(1)["id"])
+
+        # Player1's lands, and then Player2's can.
+        draft.apply_trades(self.conn, self.league_id, 2, player_ids=[self.player(1)["id"]])
+        applied = draft.apply_trades(self.conn, self.league_id, 2,
+                                     player_ids=[self.player(2)["id"]])
+        self.assertEqual([t["trade_number"] for t, _ in applied], [2])
+        self.assertEqual(draft.find_owner(self.conn, self.pool["id"], "sinistcha")["player_id"],
+                         self.player(2)["id"])
+        self.assertEqual(draft.held_trades(self.conn, self.league_id), [])
+
+    def test_both_land_together_when_nobody_is_filtered_out(self):
+        self.drop_sinistcha()
+        draft.propose_trade(self.conn, self.live, user(2), ["Aegislash"], ["Sinistcha"])
+        self.approve(2)
+        applied = draft.apply_trades(self.conn, self.league_id, 1)
+        self.assertEqual([t["trade_number"] for t, _ in applied], [1, 2])
+        self.assertEqual(draft.find_owner(self.conn, self.pool["id"], "sinistcha")["player_id"],
+                         self.player(2)["id"])
+
+    def test_out_of_order_hands_the_points_back(self):
+        """The guard can only be dodged by a trade that was edited afterwards.
+        If one does take a Pokémon off a roster, the budgets still add up."""
+        self.drop_sinistcha()
+        draft.propose_trade(self.conn, self.live, user(2), ["Aegislash"], ["Sinistcha"])
+        self.approve(2)
+        two = draft.get_trade(self.conn, self.league_id, 2)
+        before = self.player(1)["budget_remaining"]
+
+        notes = draft._apply_trade(self.conn, two)
+        self.conn.commit()
+        self.assertEqual(self.player(1)["budget_remaining"], before + 17,
+                         "Player1 gave it up, so they have its points")
+        self.assertTrue(any("still on Player1's roster" in note for note in notes), notes)
+        self.assertEqual(draft.find_owner(self.conn, self.pool["id"], "sinistcha")["player_id"],
+                         self.player(2)["id"])
+
+        # The drop now finds it gone and says so rather than refunding twice.
+        notes = draft._apply_trade(self.conn, draft.get_trade(self.conn, self.league_id, 1))
+        self.conn.commit()
+        self.assertEqual(self.player(1)["budget_remaining"], before + 17,
+                         "refunded once; Skarmory arrives at 0 until the sheet prices it")
+        self.assertTrue(any("not Player1's, so it was left there" in note for note in notes), notes)
+        self.assertEqual(draft.find_owner(self.conn, self.pool["id"], "sinistcha")["player_id"],
+                         self.player(2)["id"], "and not taken off the player who received it")
+
+
 class TidyNameTests(unittest.TestCase):
     """The fallback capitalisation, for leagues with no tiering list."""
 

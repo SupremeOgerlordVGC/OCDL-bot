@@ -61,6 +61,7 @@ class AdminCog(commands.Cog):
         budget="Points each player may spend. Read from a template if you link one.",
         tera_budget="Tera Captain points. 0 means no Tera format.",
         max_trades="Most Pokémon one player may pick up in trades. 0 = unlimited.",
+        best_of="Games in one match: 1, 3 or 5. Three unless you say otherwise.",
         template_link="Full league template. Gives rosters, settings and the schedule.",
         tiering_link="Simple tiering sheet: names in A, prices in B, Tera prices in C.",
         draft_channel_b="Optional second pool's channel (needs a template)",
@@ -79,7 +80,8 @@ class AdminCog(commands.Cog):
                            players: str = None,
                            players_role: discord.Role = None,
                            budget: int = None, tera_budget: int = None,
-                           max_trades: int = 0, template_link: str = None,
+                           max_trades: int = 0, best_of: int = None,
+                           template_link: str = None,
                            tiering_link: str = None,
                            draft_channel_b: discord.TextChannel = None,
                            players_b: str = None,
@@ -121,7 +123,8 @@ class AdminCog(commands.Cog):
             guild_id=interaction.guild_id, admin_channel_id=interaction.channel_id, name=name,
             rosters=rosters, channels=channels, min_picks=min_picks, max_picks=max_picks,
             timer=timer, mode=mode.value, budget=budget, tera_budget=tera_budget,
-            max_trades=max_trades, template_link=template_link, tiering_link=tiering_link,
+            max_trades=max_trades, best_of=best_of,
+            template_link=template_link, tiering_link=tiering_link,
             weeks=weeks, visibility=visibility.value if visibility else "public", website=website,
             created_by=interaction.user.id,
             schedule_channel_id=schedule_channel.id if schedule_channel else None,
@@ -139,7 +142,7 @@ class AdminCog(commands.Cog):
                            min_picks, max_picks, timer, mode, budget=None, tera_budget=None,
                            max_trades=0, template_link=None, tiering_link=None, weeks=None,
                            visibility="public", website=True, site_only=False, created_by=None,
-                           schedule_channel_id=None):
+                           schedule_channel_id=None, best_of=None):
         """The heart of /setup, shared with draft.ogreclan.com (webapi.py).
 
         Reads the document (a template's budgets and Coaches tab), creates the
@@ -276,6 +279,7 @@ class AdminCog(commands.Cog):
             doc_url=doc_url,
             tera_budget=tera_budget,
             max_trades=max_trades,
+            best_of=best_of,
             season_weeks=weeks or 0,
             coach_slots=coach_slots,
             visibility=visibility,
@@ -360,23 +364,24 @@ class AdminCog(commands.Cog):
         min_picks="New minimum picks per player",
         max_picks="New maximum picks per player",
         max_trades="New limit on Pokémon each player may pick up in trades (0 = unlimited)",
+        best_of="Games in one match: 1, 3 or 5. This one can be changed mid-season.",
         document_link="New template or tiering link",
     )
     async def edit_league(self, interaction: discord.Interaction, budget: int = None,
                           tera_budget: int = None, min_picks: int = None,
                           max_picks: int = None, max_trades: int = None,
-                          document_link: str = None):
+                          best_of: int = None, document_link: str = None):
         pool = rules.require_live_pool(self.bot.conn, interaction.channel_id)
         ui.require_moderator(self.bot, interaction)
 
         if all(value is None for value in
-               (budget, tera_budget, min_picks, max_picks, max_trades, document_link)):
+               (budget, tera_budget, min_picks, max_picks, max_trades, best_of, document_link)):
             raise rules.DraftError("❌ Give at least one setting to change.")
 
         updated = rules.update_settings(
             self.bot.conn, pool, budget=budget, min_picks=min_picks,
             max_picks=max_picks, doc_url=document_link,
-            tera_budget=tera_budget, max_trades=max_trades,
+            tera_budget=tera_budget, max_trades=max_trades, best_of=best_of,
         )
         await interaction.response.send_message(
             f"✅ **{updated['name']}** updated.\n"
@@ -384,6 +389,7 @@ class AdminCog(commands.Cog):
             + (f" · Tera **{updated['tera_budget']}**" if updated["tera_budget"] else "")
             + f"\n• Picks: **{updated['min_picks']}–{updated['max_picks']}**\n"
             f"• Trade pickups per player: **{updated['max_trades'] or 'unlimited'}** Pokémon\n"
+            f"• A match is best of **{updated['best_of']}**\n"
             f"• Document: {updated['doc_url'] or 'none'}",
             ephemeral=True,
         )
@@ -636,9 +642,14 @@ class AdminCog(commands.Cog):
 
     async def post_week(self, league, week):
         """/postschedule's work, shared with draft.ogreclan.com (webapi.py): reads the week's
-        matches (the template's, or the bot's own schedule), puts approved trades into
-        effect, records the week, and rewrites the sheet. Returns the lines to post and a
-        report for the moderator, or None when the week has no matches."""
+        matches (the template's, or the bot's own schedule) and records the week. Returns
+        the lines to post and a report for the moderator, or None when the week has no
+        matches.
+
+        Posting a week does not move any Pokémon. Approved trades take effect when the
+        players have finished the week's match, or when a moderator runs /updatetrades
+        (see rules.apply_trades), so a roster never changes under a match being played
+        with it."""
         if league["mode"] not in config.SCHEDULE_MODES:
             raise rules.DraftError(
                 f"❌ **{league['name']}** is a draft-only league, so it has no schedule. "
@@ -694,50 +705,39 @@ class AdminCog(commands.Cog):
         if not pairs:
             return None
 
-        # Approved trades change rosters from the week that's posted next.
-        applied = rules.apply_trades(self.bot.conn, league["id"], week)
         rules.set_current_week(self.bot.conn, league["id"], week)
         # Sets the weekly cadence, and re-arms automatic posting if a
         # moderator is posting by hand after it gave up.
         rules.record_week_posted(self.bot.conn, league["id"])
         if league["doc_kind"] == "template":
             rules.record_week(self.bot.conn, league["id"], week, matched)
-        if applied:
-            await self.price_trades(applied)
 
+        # Trades are not applied here. Saying how many are waiting is still
+        # worth it: it is the commonest "why has nothing changed?".
+        waiting = rules.waiting_trades(self.bot.conn, league["id"])
         extra = []
-        if applied:
-            extra += [f"🔁 **Trades in effect from week {week}**"]
-            for trade, _ in applied:
-                proposer = rules.get_player_by_id(self.bot.conn, trade["proposer_id"])
-                partner = (rules.get_player_by_id(self.bot.conn, trade["partner_id"])
-                           if trade["partner_id"] else None)
-                extra.append(
-                    f"• #{trade['trade_number']} **{proposer['display_name']}** gives up "
-                    f"{rules.trade_side(trade['drops'])} and receives "
-                    f"{rules.trade_side(trade['gets'])}"
-                    + (f" (with **{partner['display_name']}**)" if partner else " (free agency)"))
+        if waiting:
+            extra.append(
+                f"🔁 **{len(waiting)} approved trade(s) waiting:** "
+                f"#{', #'.join(str(trade['trade_number']) for trade in waiting)}. Each one "
+                f"takes effect once that player's match is reported, and a moderator can "
+                f"put them all through with `/updatetrades`.")
         if footnote:
             extra.append(footnote)
-
-        for pool_id in {trade["pool_id"] for trade, _ in applied}:
-            ui.resync_sheet(self.bot, pool_id)
 
         report = f"✅ Posted {len(pairs)} match(es) for week {week}."
         if extended:
             report += f" {len(extended)} of them carried over on an extension."
-        if applied:
-            report += f" {len(applied)} approved trade(s) are now in effect."
-            notes = [f"#{trade['trade_number']}: {note}" for trade, notes in applied for note in notes]
-            if notes:
-                report += "\n\nNotes:\n" + "\n".join(f"• {note}" for note in notes)
+        if waiting:
+            report += (f" {len(waiting)} approved trade(s) are waiting for their players' "
+                       f"matches; `/updatetrades` puts them through sooner.")
         return {
             "header": f"📅 **{league['name']} — Week {week}**",
             "matchups": [f"{home} **vs** {away}" for home, away in pairs],
             "extra": extra,
             "report": report,
             "matches": len(pairs),
-            "applied": len(applied),
+            "waiting": len(waiting),
         }
 
     async def post_week_due(self, league, week):

@@ -84,10 +84,18 @@ WEEK_GAP_DAYS = 7
 
 # A player who takes over a seat during or after the draft gets this long to
 # rebuild the team they inherited: unlimited transactions, which all take
-# effect when the window closes rather than waiting for the next posted week.
+# effect when the window closes - they have no match of their own to wait for.
 SUB_TRADE_WINDOW_HOURS = 24
 
 MAX_EXTENSION_WEEKS = 1
+
+# Games in one match, unless /setup says otherwise. It decides when a match
+# is over, and a finished match is what puts that week's approved trades into
+# effect - so the safe default is the longest common format: a league that is
+# really best-of-one just never reaches it by itself, and a moderator runs
+# /updatetrades. The league template's own result formula is best-of-three.
+DEFAULT_BEST_OF = 3
+MAX_GAMES_PER_MATCH = 5
 
 MAX_TRADE_SIZE = 5
 

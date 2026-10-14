@@ -75,7 +75,7 @@ simple tiering sheet, or with the full league template — see
 | `ui.py` | Turns draft events into Discord messages. |
 | `cogs/admin.py` | `/setup` `/edit` `/draft` `/canceldraft` `/archive` `/draft-moderator` `/postschedule` `/sync` `/inspectsheet` `/backup` |
 | `cogs/drafting.py` | `/pick` `/queuepick` `/makeuppick` `/editpick` `/status` `/progress` `/roster` |
-| `cogs/extras.py` | `/trade` `/approvetrade` `/rejecttrade` `/trades` `/subrequest` `/substitute` `/search` `/available` |
+| `cogs/extras.py` | `/trade` `/approvetrade` `/rejecttrade` `/trades` `/updatetrades` `/subrequest` `/substitute` `/search` `/available` |
 | `tests/` | Tests for the rules, the sheet mapping and the Discord layer. |
 
 The database keeps leagues and pools separate, and a SQL view called
@@ -405,11 +405,11 @@ itself is the thing that breaks.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/setup` | Moderator | Creates a league **in the admin channel you run it from**. Takes a name, mode, pool channel(s) with their players, budgets, pick limits, timer, trade cap and an optional document. Does **not** start the draft. |
+| `/setup` | Moderator | Creates a league **in the admin channel you run it from**. Takes a name, mode, pool channel(s) with their players, budgets, pick limits, timer, trade cap, games per match (`best_of`, 3 by default) and an optional document. Does **not** start the draft. |
 | `/removeplayer player [keep_roster]` | Moderator | Takes a player out of this pool's draft. |
 | `/setskips player skips [timer]` | Moderator | Corrects a player's skip count, and recalculates their timer to match. |
 | `/reschedule name [weeks]` | Moderator | Rolls a fresh random schedule, when the bot is the one generating it. |
-| `/edit` | Moderator | Changes budgets, pick limits, trade cap or the document link. Locked once `/draft` runs. |
+| `/edit` | Moderator | Changes budgets, pick limits, trade cap or the document link. Locked once `/draft` runs — except `best_of`, the games in a match, which is about the season rather than the draft and can be changed any time. |
 | `/visibility name setting` | Moderator | Whether draft.ogreclan.com shows the league to everyone (public) or only its players signed in with Discord (private). `/setup` takes it too; public by default. Works any time. |
 | `/draft` | Moderator | Run in a pool's channel: starts that pool, pings the first player and begins their timer. |
 | `/draft-moderator` | Administrator | Grants or revokes a role's access to every moderator command on the server. Run with no options to list the current roles. |
@@ -472,11 +472,12 @@ Both are proposed in a pool channel and sent to the league's admin channel.
 | Command | Who | What it does |
 |---|---|---|
 | `/trade drops gets [partner] [for_player]` | Any player | Proposes a trade (up to 5 each way). With `partner` it is a player-to-player swap; without, a free-agency move against the undrafted pool. Moderators can use `for_player` to file a trade on somebody else's behalf. Nothing changes yet. |
-| `/approvetrade trade_id [name]` | Moderator | Approves the trade; rosters and budgets change at the next `/postschedule`. A trade can only be approved once. |
+| `/approvetrade trade_id [name]` | Moderator | Approves the trade. Nothing moves yet: it takes effect once both its players have finished that week's match, or on `/updatetrades`. A trade can only be approved once. |
 | `/rejecttrade trade_id [name]` | Moderator | Rejects it. Nothing changes. |
 | `/trades [name]` | Anyone | Lists a league's trades and their status. |
 | `/unapprovetrade trade_id [name]` | Moderator | Takes back an approval given by mistake, while the trade is still waiting to apply. |
 | `/edittrade trade_id drops gets [name]` | Moderator | Rewrites both sides of a trade that is nearly right. Held to the same checks, and sends it back to pending. |
+| `/updatetrades [player] [pool] [name]` | Moderator | Puts approved trades into effect now, without waiting for a match. Defaults to the pool whose channel it is run in, or the whole league from the admin channel. Reports anything still waiting for an earlier trade. |
 | `/subrequest reason` | Anyone | Asks to leave the draft (if you are in it) or to join it (if you are not). Posted for the moderators. |
 | `/substitute out into` | Moderator | Hands a seat over: the roster, budgets and any makeup picks stay, and only the person changes. |
 
@@ -490,9 +491,11 @@ Trades are a full-season feature; a draft-only league refuses them.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/postschedule week name` | Moderator | Posts that week's matchups to the league's schedule channel — one match per message, each with 🇦 and 🇧 to vote on — pinging both players, and puts approved trades into effect. Reads the template's schedule, or the bot's own generated one. Never automatic. |
+| `/postschedule week name` | Moderator | Posts that week's matchups to the league's schedule channel — one match per message, each with 🇦 and 🇧 to vote on — pinging both players. Moves no Pokémon; approved trades waiting are listed underneath. Reads the template's schedule, or the bot's own generated one. |
 | *(automatic)* | — | **Week 1 posts itself** once every pool has drafted and the free-trade window has closed; every week after that on **Monday 20:00 GMT+8**, never less than seven days apart. A week with no matches stops it and says so; posting one by hand arms it again. |
-| *(automatic)* | — | **A substitute who takes over during or after a draft gets 24 hours of unlimited transactions**, which take effect when the window closes rather than at the next posted week. They may replace the team they inherited but not grow it. |
+| *(automatic)* | — | **A substitute who takes over during or after a draft gets 24 hours of unlimited transactions**, which take effect when the window closes — a substitute has no match of their own to wait for. They may replace the team they inherited but not grow it. |
+| *(automatic)* | — | **A finished match puts both its players' approved trades into effect** — reported on Discord or the site. A trade waiting for an earlier one that shares a Pokémon goes through as soon as that one has. |
+| *(automatic)* | — | **The end of a pool's free-transaction window is announced** in its channel, once, saying what changes. |
 | `/extension [reason]` | Any player | Asks for your match this week to be played next week instead. Either player may ask; it covers the match. |
 | `/grantextension [number] [player] [name]` | Moderator | Grants an extension, by request number or directly for a player's match. The match is posted again with the following week. |
 | `/rejectextension number [name]` | Moderator | Turns a request down; the match stands. |
@@ -714,16 +717,21 @@ of each side and the per-player cap from `/setup` (`max_trades`, 0 for
 unlimited), which counts the Pokémon each player picks up, not the ones they
 drop. Trades proposed in the free window after a pool's draft
 (`FREE_TRADE_HOURS`, 24) don't count. `drops:nil` (or `0`) gives up nothing.
-An approved trade waits for the next `/postschedule`, which applies every
-waiting trade in number order, so rosters never change mid-week. Anything that looks wrong — trading a Pokémon you do not own, or
-claiming one already drafted — is attached to the moderator's message as a
-warning rather than blocking the proposal.
+An approved trade waits for its players to finish the week's match, or for a
+moderator's `/updatetrades`, so no roster changes under a match being played
+with it. Trades go in number order, and one that shares a Pokémon with an
+earlier waiting trade holds back until that one has landed — which is what
+makes picking up somebody's approved drop safe. Anything that looks wrong —
+trading a Pokémon you do not own, or claiming one genuinely somebody else's —
+is attached to the moderator's message as a warning rather than blocking the
+proposal.
 
 **History and rosters are separate.** The `picks` table is the permanent record
 of who drafted what and when — trades never rewrite it, so `/progress` always
 shows what really happened. The `rosters` table is current ownership, and it is
 what decides availability, so a Pokémon dropped in a trade becomes draftable
-again. It is also what gets written to the spreadsheet, which is why the sheet's
+again. One an approved trade is about to drop counts as available too
+(`draft.pending_drops`): the pickup is filed and applied after the drop. It is also what gets written to the spreadsheet, which is why the sheet's
 budget column stays right after a trade. A Pokémon gained in a trade has no
 round of its own, so it fills the first free row in the block.
 

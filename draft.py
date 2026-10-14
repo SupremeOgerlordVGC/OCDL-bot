@@ -552,12 +552,25 @@ def _roster_entries(entries):
     return rows
 
 
+def check_best_of(best_of):
+    """Games in a match: 1, 3, 5... An even number has no winner, and it is
+    the winner that ends a match and lets the week's trades land."""
+    if best_of is None:
+        return config.DEFAULT_BEST_OF
+    best_of = int(best_of)
+    if best_of < 1 or best_of > config.MAX_GAMES_PER_MATCH or best_of % 2 == 0:
+        raise DraftError(
+            f"❌ A match is best of an odd number of games, up to "
+            f"{config.MAX_GAMES_PER_MATCH}: 1, 3 or 5.")
+    return best_of
+
+
 def create_league(conn, guild_id, admin_channel_id, name, pools,
                   budget, min_picks, max_picks, base_timer,
                   mode="full_season", doc_kind="none", doc_url=None,
                   tera_budget=0, max_trades=0, season_weeks=0, visibility="public",
                   coach_slots=None, website=True, site_only=False, created_by=None,
-                  schedule_channel_id=None, official=False):
+                  schedule_channel_id=None, official=False, best_of=None):
     """Create a league in `setup` state, with one or two pools.
 
     `pools` is [(label, channel_id, [(user_id, display_name), ...]), ...],
@@ -664,13 +677,14 @@ def create_league(conn, guild_id, admin_channel_id, name, pools,
         """INSERT INTO leagues (guild_id, name, admin_channel_id, schedule_channel_id,
                                 official, mode, doc_kind, doc_url,
                                 budget, tera_budget, min_picks, max_picks, base_timer,
-                                max_trades, season_weeks, status, created_at, visibility,
+                                max_trades, season_weeks, best_of, status, created_at, visibility,
                                 website, site_only, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'setup', ?, ?, ?, ?, ?)""",
         (guild_id, name, admin_channel_id, schedule_channel_id, 1 if official else 0,
          mode, doc_kind, doc_url,
          budget, tera_budget,
          min_picks, max_picks, base_timer, max_trades, max(0, season_weeks),
+         check_best_of(best_of),
          database.now(), visibility, 1 if website or site_only else 0, 1 if site_only else 0, created_by),
     )
     league_id = cursor.lastrowid
@@ -815,9 +829,18 @@ def leagues_in_admin_channel(conn, channel_id):
 
 
 def update_settings(conn, ctx, budget=None, min_picks=None, max_picks=None, doc_url=None,
-                    tera_budget=None, max_trades=None):
-    """/edit - only legal while the league is still in `setup`."""
+                    tera_budget=None, max_trades=None, best_of=None):
+    """/edit - only legal while the league is still in `setup`, except for the
+    length of a match, which is about the season rather than the draft."""
     league = get_league(conn, ctx["league_id"])
+    if best_of is not None:
+        conn.execute("UPDATE leagues SET best_of = ? WHERE id = ?",
+                     (check_best_of(best_of), league["id"]))
+        conn.commit()
+        league = get_league(conn, league["id"])
+        if all(value is None for value in
+               (budget, min_picks, max_picks, doc_url, tera_budget, max_trades)):
+            return league
     if league["status"] != "setup":
         raise DraftError("❌ The draft has already started, so its settings can no longer be edited.")
 
@@ -1858,6 +1881,46 @@ def check_pickup_limit(conn, draft, player, incoming):
         )
 
 
+def _free_agency_trades(conn, pool_id, ignore_trade_id=None):
+    """Approved free-agency trades in a pool that have not taken effect yet,
+    oldest first. `ignore_trade_id` leaves one out: the trade being edited,
+    which cannot be its own competition."""
+    return conn.execute(
+        "SELECT * FROM trades WHERE pool_id = ? AND status = 'approved' "
+        "AND applied_at IS NULL AND partner_id IS NULL AND id IS NOT ? "
+        "ORDER BY trade_number",
+        (pool_id, ignore_trade_id),
+    ).fetchall()
+
+
+def pending_drops(conn, pool_id, ignore_trade_id=None):
+    """{normalised name: the trade giving it up} - Pokémon an approved trade
+    is about to drop into free agency, which have not left their roster yet.
+
+    An approved trade waits for its moment (see `apply_trades`), so for a
+    while a Pokémon is both on somebody's roster and given up. It counts as
+    given up: the player who wants it should not have to wait and hope.
+
+    A drop to a trade partner is not here - that Pokémon is going to the
+    partner, not back into the undrafted pool.
+    """
+    pending = {}
+    for trade in _free_agency_trades(conn, pool_id, ignore_trade_id):
+        for name in json.loads(trade["drops"]):
+            pending.setdefault(normalize(name), trade)
+    return pending
+
+
+def pending_pickups(conn, pool_id, ignore_trade_id=None):
+    """{normalised name: the trade receiving it} - free-agency pickups that are
+    approved and waiting to take effect, so already spoken for."""
+    claimed = {}
+    for trade in _free_agency_trades(conn, pool_id, ignore_trade_id):
+        for name in json.loads(trade["gets"]):
+            claimed.setdefault(normalize(name), trade)
+    return claimed
+
+
 def trade_warnings(conn, draft, proposer, partner, drops, gets):
     """Things an approving admin probably wants to know. Never blocks."""
     notes = []
@@ -1878,17 +1941,24 @@ def trade_warnings(conn, draft, proposer, partner, drops, gets):
             owner = get_player_by_id(conn, row["player_id"])
             notes.append(f"**{name}** is on {owner['display_name']}'s roster, "
                          f"not {proposer['display_name']}'s.")
+    dropping = pending_drops(conn, draft["id"])
     for name in gets:
         row = find_owner(conn, draft["id"], normalize(name))
         if partner is None and row is not None:
             owner = get_player_by_id(conn, row["player_id"])
-            notes.append(f"**{name}** is already drafted by {owner['display_name']}.")
+            leaving = dropping.get(normalize(name))
+            if leaving is not None:
+                notes.append(f"**{name}** is on {owner['display_name']}'s roster until "
+                             f"trade #{leaving['trade_number']} takes effect, so this "
+                             f"pickup takes effect after that one.")
+            else:
+                notes.append(f"**{name}** is already drafted by {owner['display_name']}.")
         elif partner is not None and (row is None or row["player_id"] != partner["id"]):
             notes.append(f"**{name}** is not on {partner['display_name']}'s roster.")
     return notes
 
 
-def check_trade(conn, draft, proposer, partner, drops, gets, prices):
+def check_trade(conn, draft, proposer, partner, drops, gets, prices, ignore_trade_id=None):
     """Refuse a trade that cannot work, before an admin is asked to judge it.
 
     Only the mechanical facts are checked here: that each side owns what it
@@ -1900,8 +1970,13 @@ def check_trade(conn, draft, proposer, partner, drops, gets, prices):
     this stays free of Google. A name with no price is treated as costing
     nothing, which is the same assumption the sheet makes.
 
-    Returns the budget arithmetic for the message the admins see.
+    `ignore_trade_id` is the trade being edited, which must not count as
+    competition with itself.
+
+    Returns the budget arithmetic, and notes for the admins' message.
     """
+    notes = []
+
     def owned_by(player, names):
         """The roster rows for these Pokemon, refusing anything they lack."""
         rows = []
@@ -1931,17 +2006,38 @@ def check_trade(conn, draft, proposer, partner, drops, gets, prices):
     proposer_out = owned_by(proposer, drops)
 
     if partner is None:
-        # Free agency: everything received must still be undrafted.
+        # Free agency: everything received must be undrafted - or dropped.
+        # Something an approved trade is about to give up has been given up,
+        # even though it is still sitting on a roster, so it can be picked
+        # up now and the pickup waits its turn behind the drop.
+        dropping = pending_drops(conn, draft["id"], ignore_trade_id)
+        claimed = pending_pickups(conn, draft["id"], ignore_trade_id)
         for name in gets:
+            spoken_for = claimed.get(normalize(name))
+            if spoken_for is not None:
+                taker = get_player_by_id(conn, spoken_for["proposer_id"])
+                raise DraftError(
+                    f"❌ **{name}** is already going to "
+                    f"**{taker['display_name']}** in approved trade "
+                    f"#{spoken_for['trade_number']}, which has not taken "
+                    f"effect yet."
+                )
             row = find_owner(conn, draft["id"], normalize(name))
-            if row is not None:
-                owner = get_player_by_id(conn, row["player_id"])
+            if row is None:
+                continue
+            leaving = dropping.get(normalize(name))
+            if leaving is None:
                 raise DraftError(
                     f"❌ **{row['pokemon']}** is already drafted by "
-                    f"**{owner['display_name']}**, so it cannot be picked up "
-                    f"from the undrafted pool. Trade with them instead by "
-                    f"adding `partner:`."
+                    f"**{get_player_by_id(conn, row['player_id'])['display_name']}**, "
+                    f"so it cannot be picked up from the undrafted pool. Trade "
+                    f"with them instead by adding `partner:`."
                 )
+            owner = get_player_by_id(conn, row["player_id"])
+            notes.append(
+                f"**{row['pokemon']}** is still on {owner['display_name']}'s roster: "
+                f"they give it up in approved trade #{leaving['trade_number']}, and "
+                f"this pickup takes effect after that one does.")
         proposer_in = listed(gets)
         partner_change = None
     else:
@@ -1968,7 +2064,7 @@ def check_trade(conn, draft, proposer, partner, drops, gets, prices):
         )
 
     return {"refund": refund, "charge": proposer_in, "after": after,
-            "partner_after": partner_change}
+            "partner_after": partner_change, "notes": notes}
 
 
 def apply_sheet_cost(conn, draft, pokemon, cost):
@@ -2008,9 +2104,10 @@ def get_trade(conn, league_id, trade_number):
 def approve_trade(conn, draft, trade_number, approver_user_id):
     """/approvetrade - approve a pending trade.
 
-    Nothing moves yet: an approved trade takes effect when the next week is
-    posted with /postschedule (see apply_trades), so a roster never changes
-    in the middle of a week. Returns the trade and notes for the moderator.
+    Nothing moves yet. An approved trade takes effect when its players have
+    finished the week's match, or when a moderator runs /updatetrades (see
+    apply_trades), so a roster never changes in the middle of a match that
+    is being played with it. Returns the trade and notes for the moderator.
     """
     trade = get_trade(conn, draft["league_id"], trade_number)
     if trade is None:
@@ -2034,7 +2131,8 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
         shared = mine & {normalize(n) for n in json.loads(other["drops"]) + json.loads(other["gets"])}
         if shared:
             notes.append(f"Trade #{other['trade_number']} (approved, not in effect yet) also "
-                         f"involves {', '.join(sorted(shared))}; they apply in number order.")
+                         f"involves {', '.join(sorted(shared))}; the lower number goes "
+                         f"first and the other one waits for it.")
 
     conn.execute(
         "UPDATE trades SET status = 'approved', resolved_at = ?, resolved_by = ? WHERE id = ?",
@@ -2044,18 +2142,66 @@ def approve_trade(conn, draft, trade_number, approver_user_id):
     return get_trade(conn, draft["league_id"], trade_number), notes
 
 
-def waiting_trades(conn, league_id):
-    """Approved trades that take effect at the next /postschedule, in order.
+def waiting_trades(conn, league_id, pool_id=None, player_ids=None):
+    """Approved trades waiting to take effect, in number order.
+
+    With `pool_id` or `player_ids`, only the ones in that pool or involving
+    those players - which is how a player finishing their match, or a
+    moderator targeting one player, puts a few of them into effect without
+    touching anybody else's.
 
     A substitute's trades are not among them: those have their own moment,
     when the window closes, so that somebody who takes a team over is not
-    left waiting until the next week to field it.
+    left waiting for a match they had no part in.
     """
-    return conn.execute(
-        "SELECT * FROM trades WHERE league_id = ? AND status = 'approved' AND applied_at IS NULL "
-        "AND apply_at IS NULL ORDER BY trade_number",
-        (league_id,),
-    ).fetchall()
+    sql = ("SELECT * FROM trades WHERE league_id = ? AND status = 'approved' "
+           "AND applied_at IS NULL AND apply_at IS NULL")
+    params = [league_id]
+    if pool_id is not None:
+        sql += " AND pool_id = ?"
+        params.append(pool_id)
+    if player_ids is not None:
+        ids = list(player_ids)
+        if not ids:
+            return []
+        marks = ", ".join("?" for _ in ids)
+        sql += f" AND (proposer_id IN ({marks}) OR partner_id IN ({marks}))"
+        params += ids + ids
+    return conn.execute(sql + " ORDER BY trade_number", params).fetchall()
+
+
+def blocking_trade(conn, trade):
+    """The approved trade that has to take effect before this one, or None.
+
+    Trades used to apply together, in number order, so one that passed a
+    Pokémon along always found it where it expected. Now that each lands
+    when its own players have played, they can arrive in any order - and a
+    pickup of something another trade is still giving up has to wait for it.
+    The rule is the same one the approving moderator is told: the lower
+    number goes first, and anything sharing a Pokémon with it waits. A
+    substitute's transactions count here too, even though they have their
+    own moment, because they move the same Pokémon.
+    """
+    mine = {normalize(n) for n in json.loads(trade["drops"]) + json.loads(trade["gets"])}
+    for other in conn.execute(
+            "SELECT * FROM trades WHERE pool_id = ? AND status = 'approved' "
+            "AND applied_at IS NULL AND trade_number < ? ORDER BY trade_number",
+            (trade["pool_id"], trade["trade_number"])):
+        theirs = {normalize(n) for n in json.loads(other["drops"]) + json.loads(other["gets"])}
+        if mine & theirs:
+            return other
+    return None
+
+
+def held_trades(conn, league_id, pool_id=None, player_ids=None):
+    """[(trade, the trade it is waiting for)] - approved trades that cannot
+    take effect yet, for a moderator's report."""
+    held = []
+    for trade in waiting_trades(conn, league_id, pool_id=pool_id, player_ids=player_ids):
+        blocker = blocking_trade(conn, trade)
+        if blocker is not None:
+            held.append((trade, blocker))
+    return held
 
 
 def due_sub_trades(conn, now=None):
@@ -2087,16 +2233,27 @@ def apply_due_sub_trades(conn, now=None):
     return applied
 
 
-def apply_trades(conn, league_id, week):
-    """/postschedule - put every approved trade that is waiting into effect,
-    in the order they were proposed, from `week` on.
+def apply_trades(conn, league_id, week, pool_id=None, player_ids=None):
+    """Put approved trades into effect, in the order they were proposed, and
+    record them as in effect from `week`.
+
+    Two things have to be true before a trade moves a Pokémon: a moderator
+    approved it, and its moment has come - the players have finished the
+    week's match, or a moderator ran /updatetrades. `pool_id` and
+    `player_ids` narrow it to whoever that is.
+
+    A trade waiting for an earlier one that shares a Pokémon is left for
+    later (see blocking_trade); a chain still clears in one pass, because
+    each trade is looked at again once the one before it has landed.
 
     The moderators have already decided each trade is legal, so this applies
     them as written and reports anything it could not do rather than
     refusing. Returns [(trade, notes)].
     """
     applied = []
-    for trade in waiting_trades(conn, league_id):
+    for trade in waiting_trades(conn, league_id, pool_id=pool_id, player_ids=player_ids):
+        if blocking_trade(conn, trade) is not None:
+            continue
         notes = _apply_trade(conn, trade)
         conn.execute("UPDATE trades SET applied_at = ?, applied_week = ? WHERE id = ?",
                      (database.now(), week, trade["id"]))
@@ -2106,7 +2263,14 @@ def apply_trades(conn, league_id, week):
 
 
 def _apply_trade(conn, trade):
-    """Move the Pokémon and adjust budgets for one trade (not committed)."""
+    """Move the Pokémon and adjust budgets for one trade (not committed).
+
+    Approval and effect are minutes or days apart, so each side is checked
+    against the rosters as they are now rather than as they were: anything
+    that has moved on in the meantime is left alone and reported, because
+    quietly taking a Pokémon off the wrong roster is far worse than a trade
+    that does nothing.
+    """
     pool_id = trade["pool_id"]
     proposer = get_player_by_id(conn, trade["proposer_id"])
     partner = get_player_by_id(conn, trade["partner_id"]) if trade["partner_id"] else None
@@ -2120,6 +2284,11 @@ def _apply_trade(conn, trade):
         if row is None:
             notes.append(f"{name} was not on any roster, so nothing was removed.")
             continue
+        if row["player_id"] != proposer["id"]:
+            holder = get_player_by_id(conn, row["player_id"])
+            notes.append(f"{name} is on {holder['display_name']}'s roster, not "
+                         f"{proposer['display_name']}'s, so it was left there.")
+            continue
         drop_total += row["cost"]
         if partner is None:
             conn.execute("DELETE FROM rosters WHERE id = ?", (row["id"],))
@@ -2128,6 +2297,7 @@ def _apply_trade(conn, trade):
                          (partner["id"], row["id"]))
 
     get_total = 0
+    given_up = []
     for name in gets:
         row = find_owner(conn, pool_id, normalize(name))
         if row is None:
@@ -2138,12 +2308,30 @@ def _apply_trade(conn, trade):
                    VALUES (?, ?, ?, ?, 0, 'trade')""",
                 (pool_id, proposer["id"], name.strip(), normalize(name)),
             )
+        elif partner is not None and row["player_id"] != partner["id"]:
+            holder = get_player_by_id(conn, row["player_id"])
+            notes.append(f"{name} is on {holder['display_name']}'s roster, not "
+                         f"{partner['display_name']}'s, so it was left there.")
         else:
             get_total += row["cost"]
+            if partner is None and row["player_id"] != proposer["id"]:
+                # A free-agency pickup of something still sitting on another
+                # roster: the trade dropping it has not landed yet, so this
+                # one takes it and hands back the points. The drop finds it
+                # gone and says so, which keeps both budgets right.
+                loser = get_player_by_id(conn, row["player_id"])
+                given_up.append((row["player_id"], row["cost"]))
+                notes.append(
+                    f"{row['pokemon']} was still on {loser['display_name']}'s roster, "
+                    f"waiting for the trade that drops it; it has moved across and "
+                    f"they have their {row['cost']} points back.")
             conn.execute("UPDATE rosters SET player_id = ?, source = 'trade' WHERE id = ?",
                          (proposer["id"], row["id"]))
 
     if config.TRADE_ADJUSTS_BUDGET:
+        for player_id, cost in given_up:
+            conn.execute("UPDATE players SET budget_remaining = budget_remaining + ? WHERE id = ?",
+                         (cost, player_id))
         # The proposer gets back what they dropped and pays for what they
         # gained, which keeps budgets matching the spreadsheet, where each
         # coach's budget is worked out from whatever is on their roster.
@@ -2254,8 +2442,8 @@ def unapprove_trade(conn, draft, trade_number):
 
     Approving moves nothing on its own, so while a trade is still waiting
     this is a clean reversal: the status goes back and the rosters never
-    knew. Once /postschedule has applied it the Pokemon have changed hands
-    and taking it back is a new trade, not an undo.
+    knew. Once it has taken effect the Pokemon have changed hands and
+    taking it back is a new trade, not an undo.
     """
     trade = get_trade(conn, draft["league_id"], trade_number)
     if trade is None:
@@ -2902,6 +3090,30 @@ def grace_over(conn, league_id, now=None):
         if until and now < until:
             return False
     return True
+
+
+def grace_ended_pools(conn, now=None):
+    """Pools whose free-trade window has just closed and have not been told.
+
+    The window closing changes what players may do - from unlimited free
+    transactions to the league's trade limit - so it is worth saying out
+    loud, once, in the pool's own channel.
+    """
+    now = time.time() if now is None else now
+    return conn.execute(
+        "SELECT pool_view.* FROM pool_view JOIN leagues ON leagues.id = pool_view.league_id "
+        "WHERE leagues.status IN ('active', 'complete') AND pool_view.status = 'complete' "
+        "AND pool_view.free_trades_until IS NOT NULL AND pool_view.free_trades_until <= ? "
+        "AND pool_view.grace_ended_at IS NULL ORDER BY pool_view.id",
+        (now,),
+    ).fetchall()
+
+
+def record_grace_ended(conn, pool_id):
+    """Remember that a pool has been told its free-trade window closed."""
+    conn.execute("UPDATE pools SET grace_ended_at = ? WHERE id = ? AND grace_ended_at IS NULL",
+                 (database.now(), pool_id))
+    conn.commit()
 
 
 def next_week_time(after):
