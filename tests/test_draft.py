@@ -3060,6 +3060,151 @@ class EditTradeTests(unittest.TestCase):
             draft.edit_trade(self.conn, self.live, 99, ["Garchomp"], ["Sinistcha"])
 
 
+class ExtensionTests(unittest.TestCase):
+    """Putting a match off by a week, which is as far as it can go."""
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.draft = make_draft(self.conn, channel_id=2300, players=4, budget=100,
+                                min_picks=1, max_picks=1, mode="full_season")
+        for seat in (1, 2, 3, 4):
+            live = draft.get_pool(self.conn, self.draft["id"])
+            current = draft.current_player(self.conn, live)
+            draft.make_pick(self.conn, live, current["user_id"], 1,
+                            f"Mon{current['id']}", 5)
+        self.live = draft.get_pool(self.conn, self.draft["id"])
+        self.league_id = self.live["league_id"]
+        draft.generate_fixtures(self.conn, self.league_id, weeks=3)
+        draft.set_current_week(self.conn, self.league_id, 1)
+
+    def week_one_pair(self):
+        """The two players in week 1's first match."""
+        return draft.get_fixtures(self.conn, self.league_id, 1)[0]
+
+    def request(self, player, reason="exams"):
+        return draft.request_extension(
+            self.conn, draft.get_pool(self.conn, self.draft["id"]),
+            player["user_id"], reason)
+
+    def test_either_player_can_ask_and_it_covers_the_match(self):
+        home, away = self.week_one_pair()
+        record, got_home, got_away = self.request(away)
+
+        self.assertEqual(record["status"], "pending")
+        self.assertEqual(record["number"], 1)
+        self.assertEqual(record["week"], 1)
+        self.assertEqual(record["reason"], "exams")
+        self.assertEqual({got_home["id"], got_away["id"]}, {home["id"], away["id"]})
+
+    def test_the_same_match_cannot_be_asked_for_twice(self):
+        home, away = self.week_one_pair()
+        self.request(home)
+        with self.assertRaises(draft.DraftError) as caught:
+            self.request(away)      # the opponent tries as well
+        self.assertIn("already waiting", str(caught.exception))
+
+    def test_granting_lists_the_match_again_next_week(self):
+        home, away = self.week_one_pair()
+        record, _, _ = self.request(home)
+        draft.grant_extension(self.conn, self.league_id, record["number"], 999)
+
+        carried = draft.extensions_into(self.conn, self.league_id, 2)
+        self.assertEqual([row["number"] for row in carried], [1])
+        self.assertEqual(draft.extensions_into(self.conn, self.league_id, 3), [],
+                         "it moves one week, not every week after")
+
+    def test_a_rejected_extension_carries_nothing_over(self):
+        home, _ = self.week_one_pair()
+        record, _, _ = self.request(home)
+        draft.reject_extension(self.conn, self.league_id, record["number"], 999)
+        self.assertEqual(draft.extensions_into(self.conn, self.league_id, 2), [])
+
+    def test_one_week_is_the_limit(self):
+        # Two players meet every week, so week 2's fixture IS the match that
+        # was carried over - the one case where it can be asked for twice.
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=2302, players=2, budget=50,
+                          min_picks=1, max_picks=1, mode="full_season")
+        for _ in range(2):
+            live = draft.get_pool(conn, pool["id"])
+            current = draft.current_player(conn, live)
+            draft.make_pick(conn, live, current["user_id"], 1, f"M{current['id']}", 5)
+        live = draft.get_pool(conn, pool["id"])
+        league_id = live["league_id"]
+        draft.generate_fixtures(conn, league_id, weeks=3)
+        draft.set_current_week(conn, league_id, 1)
+
+        record, _, _ = draft.request_extension(conn, live, user(1))
+        draft.grant_extension(conn, league_id, record["number"], 999)
+
+        draft.set_current_week(conn, league_id, 2)
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.request_extension(conn, live, user(1))
+        message = str(caught.exception)
+        self.assertIn("already extended once", message)
+        self.assertIn("week 2", message)
+
+    def test_a_carried_match_cannot_be_asked_for_again(self):
+        # The structural half of the one-week rule: /extension only ever
+        # looks at the current week's fixture, so once a match has been
+        # carried into this week there is no way to ask for it again. A
+        # request now is about this week's own match instead.
+        home, away = self.week_one_pair()
+        record, _, _ = self.request(home)
+        draft.grant_extension(self.conn, self.league_id, record["number"], 999)
+        draft.set_current_week(self.conn, self.league_id, 2)
+
+        second_home, second_away = draft.fixture_for(
+            self.conn, self.league_id, 2, home["id"])
+        self.assertNotEqual({second_home["id"], second_away["id"]},
+                            {home["id"], away["id"]},
+                            "a four-player round robin changes opponents")
+
+        record_two, got_home, got_away = self.request(home)
+        self.assertEqual(record_two["week"], 2)
+        self.assertEqual({got_home["id"], got_away["id"]},
+                         {second_home["id"], second_away["id"]},
+                         "the new request is for this week's match")
+        # And the carried match still only appears in week 2, once.
+        self.assertEqual([row["number"] for row in
+                          draft.extensions_into(self.conn, self.league_id, 2)], [1])
+
+    def test_a_decision_cannot_be_made_twice(self):
+        home, _ = self.week_one_pair()
+        record, _, _ = self.request(home)
+        draft.grant_extension(self.conn, self.league_id, record["number"], 999)
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.reject_extension(self.conn, self.league_id, record["number"], 999)
+        self.assertIn("already been granted", str(caught.exception))
+
+    def test_nothing_to_extend_before_a_week_is_posted(self):
+        draft.set_current_week(self.conn, self.league_id, 0)
+        home, _ = self.week_one_pair()
+        with self.assertRaises(draft.DraftError) as caught:
+            self.request(home)
+        self.assertIn("No week has been posted", str(caught.exception))
+
+    def test_a_player_with_no_match_that_week_is_told_so(self):
+        # Nobody has a fixture in a week the schedule does not cover.
+        draft.set_current_week(self.conn, self.league_id, 9)
+        home, _ = self.week_one_pair()
+        with self.assertRaises(draft.DraftError) as caught:
+            self.request(home)
+        self.assertIn("no match recorded for week 9", str(caught.exception))
+
+    def test_a_draft_only_league_has_nothing_to_extend(self):
+        conn = database.connect(":memory:")
+        pool = make_draft(conn, channel_id=2301, players=2, budget=50,
+                          min_picks=1, max_picks=1, mode="draft_only")
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.request_extension(conn, pool, user(1))
+        self.assertIn("does not run a schedule", str(caught.exception))
+
+    def test_an_unknown_number_is_refused(self):
+        with self.assertRaises(draft.DraftError):
+            draft.grant_extension(self.conn, self.league_id, 99, 999)
+
+
 class MigrationTests(unittest.TestCase):
     """An upgrade must not break an existing database.
 

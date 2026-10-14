@@ -245,6 +245,26 @@ CREATE TABLE IF NOT EXISTS fixtures (
     UNIQUE (league_id, week, match_number)
 );
 
+-- Extension requests: a player asking for their week's match to be played
+-- next week instead. Granting one makes /postschedule list it again in the
+-- following week. A match may only be extended once (config.MAX_EXTENSION_WEEKS).
+CREATE TABLE IF NOT EXISTS extensions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    league_id      INTEGER NOT NULL REFERENCES leagues(id) ON DELETE CASCADE,
+    pool_id        INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+    number         INTEGER NOT NULL,       -- 1, 2, 3 ... within the league
+    week           INTEGER NOT NULL,       -- the week being pushed back
+    home_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    away_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    requested_by   INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    reason         TEXT,
+    status         TEXT NOT NULL DEFAULT 'pending',   -- pending/granted/rejected
+    created_at     TEXT NOT NULL,
+    resolved_at    TEXT,
+    resolved_by    INTEGER,
+    UNIQUE (league_id, week, home_player_id, away_player_id)
+);
+
 -- Substitution requests, posted to the admin channel for a human to act on.
 -- A player already in the draft asks to sub OUT; anybody else asks to sub IN.
 -- Approving one is a moderator running /substitute, which is what actually

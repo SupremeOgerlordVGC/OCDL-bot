@@ -107,6 +107,11 @@ A reduced timer is not permanent punishment — ask a moderator if you think it 
 
 **`/trades`** — see every trade and whether it was approved.
 
+**`/extension reason:...`** — ask for this week's match to be played next week instead.
+• Either player can ask; it covers the match, so you both get the same answer.
+• A moderator decides. If granted, the match is posted again with next week.
+• **One week is the most it can move** — a match already carried over has to be played.
+
 **`/subrequest reason:...`** — ask for a substitution.
 • Already drafting? This asks to **sub out**.
 • Not in the draft? This offers to **sub in**.

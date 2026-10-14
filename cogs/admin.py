@@ -674,6 +674,16 @@ class AdminCog(commands.Cog):
             footnote = (f"*Season runs weeks {available[0]}–{available[-1]}.*"
                         if available else "")
 
+        # A match granted an extension last week is listed again now. That
+        # is what an extension means, so it goes in before the "nothing to
+        # post" check: a week may consist only of extended matches.
+        extended = rules.extensions_into(self.bot.conn, league["id"], week)
+        for row in extended:
+            home = rules.get_player_by_id(self.bot.conn, row["home_player_id"])
+            away = rules.get_player_by_id(self.bot.conn, row["away_player_id"])
+            pairs.append((f"<@{home['user_id']}>",
+                          f"<@{away['user_id']}> *(extended from week {row['week']})*"))
+
         if not pairs:
             return None
 
@@ -704,6 +714,8 @@ class AdminCog(commands.Cog):
             ui.resync_sheet(self.bot, pool_id)
 
         report = f"✅ Posted {len(pairs)} match(es) for week {week}."
+        if extended:
+            report += f" {len(extended)} of them carried over on an extension."
         if applied:
             report += f" {len(applied)} approved trade(s) are now in effect."
             notes = [f"#{trade['trade_number']}: {note}" for trade, notes in applied for note in notes]

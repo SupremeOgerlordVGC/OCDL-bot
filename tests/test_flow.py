@@ -1348,6 +1348,113 @@ class SchedulePostingTests(unittest.IsolatedAsyncioTestCase):
             rules.get_league(self.conn, self.league_id)["schedule_channel_id"])
 
 
+class ExtensionCommandTests(unittest.IsolatedAsyncioTestCase):
+    """Requesting and deciding an extension as players and moderators do."""
+
+    DRAFT = 9950
+    SCHEDULE = 9951
+    ADMIN = 1
+
+    async def asyncSetUp(self):
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(self.DRAFT)
+        self.schedule_channel = FakeChannel(self.SCHEDULE)
+        self.admin_channel = FakeChannel(self.ADMIN)
+        self.bot = FakeBot(self.conn, self.channel)
+
+        channels = {c.id: c for c in (self.channel, self.schedule_channel,
+                                      self.admin_channel)}
+        self.bot.get_channel = channels.get
+
+        self.pool_id = make_pool(self.conn, self.DRAFT,
+                                 [(11, "Larry"), (22, "Alex")],
+                                 max_picks=1, name="Season")
+        pool = rules.get_pool(self.conn, self.pool_id)
+        self.league_id = pool["league_id"]
+        rules.start_pool(self.conn, pool)
+        for user_id in (11, 22):
+            live = rules.get_pool(self.conn, self.pool_id)
+            current = rules.current_player(self.conn, live)
+            rules.make_pick(self.conn, live, current["user_id"], 1,
+                            f"Mon{current['id']}", 5)
+        rules.generate_fixtures(self.conn, self.league_id, weeks=3)
+        rules.set_schedule_channel(self.conn, self.league_id, self.SCHEDULE)
+        rules.set_current_week(self.conn, self.league_id, 1)
+        self.extras = ExtrasCog(self.bot)
+        self.admin = AdminCog(self.bot)
+
+    async def asyncTearDown(self):
+        self.bot.timers.cancel_all()
+
+    async def ask(self, user_id=11, reason="exams"):
+        interaction = FakeInteraction(self.bot, self.DRAFT, user_id)
+        await self.extras.extension.callback(self.extras, interaction, reason=reason)
+        return interaction
+
+    async def decide(self, number, granted, moderator=True):
+        interaction = FakeInteraction(self.bot, self.ADMIN, 99, "Mod",
+                                      moderator=moderator)
+        command = self.extras.grantextension if granted else self.extras.rejectextension
+        await command.callback(self.extras, interaction, number=number, name="Season")
+        return interaction
+
+    async def test_a_request_reaches_the_admin_channel(self):
+        interaction = await self.ask()
+
+        self.assertIn("**Extension #1**", self.admin_channel.text)
+        self.assertIn("exams", self.admin_channel.text)
+        self.assertIn("grantextension number:1", self.admin_channel.text)
+        self.assertIn("Alex", interaction.text, "tells them who they are playing")
+
+    async def test_granting_tells_both_players_in_the_schedule_channel(self):
+        await self.ask()
+        interaction = await self.decide(1, granted=True)
+
+        self.assertIn("Extension granted", self.schedule_channel.text)
+        self.assertIn("week 1 to week 2", self.schedule_channel.text)
+        self.assertIn("<@11>", self.schedule_channel.text)
+        self.assertIn("<@22>", self.schedule_channel.text)
+        self.assertIn("posted again with week 2", interaction.text)
+
+    async def test_rejecting_says_the_match_stands(self):
+        await self.ask()
+        interaction = await self.decide(1, granted=False)
+        self.assertIn("turned down", self.schedule_channel.text)
+        self.assertIn("still has to be played in week 1", self.schedule_channel.text)
+        self.assertIn("turned down", interaction.text)
+
+    async def test_a_player_cannot_grant_their_own_extension(self):
+        await self.ask()
+        with self.assertRaises(rules.DraftError) as caught:
+            await self.decide(1, granted=True, moderator=False)
+        self.assertIn("draft moderators", str(caught.exception))
+        self.assertEqual(rules.get_extension(self.conn, self.league_id, 1)["status"],
+                         "pending")
+
+    async def test_a_granted_match_is_posted_again_next_week(self):
+        await self.ask()
+        await self.decide(1, granted=True)
+
+        posting = FakeInteraction(self.bot, self.DRAFT, 99, "Mod", moderator=True)
+        await self.admin.postschedule.callback(self.admin, posting, week=2,
+                                               name="Season")
+
+        matches = [m for m in self.schedule_channel.posted if "**vs**" in m.content]
+        extended = [m for m in matches if "extended from week 1" in m.content]
+        self.assertEqual(len(extended), 1, "the carried match is listed again")
+        self.assertEqual(extended[0].reactions, list(ui.VOTE_EMOJI),
+                         "and it can be voted on like any other match")
+        self.assertIn("carried over on an extension", posting.text)
+
+    async def test_the_listing_shows_every_request(self):
+        await self.ask()
+        await self.decide(1, granted=True)
+        interaction = FakeInteraction(self.bot, self.ADMIN, 99, "Mod", moderator=True)
+        await self.extras.extensions.callback(self.extras, interaction, name="Season")
+        self.assertIn("#1", interaction.text)
+        self.assertIn("granted", interaction.text)
+
+
 class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
     """A channel the bot cannot post in must not break the draft.
 

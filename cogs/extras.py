@@ -416,6 +416,126 @@ class ExtrasCog(commands.Cog):
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
+    # ---- /extension -----------------------------------------------------
+
+    @app_commands.command(
+        name="extension",
+        description="Ask for your match this week to be played next week instead.")
+    @app_commands.describe(reason="Why you need it — the moderators read this")
+    async def extension(self, interaction: discord.Interaction, reason: str = None):
+        pool = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
+        await interaction.response.defer(ephemeral=True)
+
+        record, home, away = rules.request_extension(
+            self.bot.conn, pool, interaction.user.id, reason)
+        league = rules.get_league(self.bot.conn, pool["league_id"])
+        asked_by = rules.get_player_by_id(self.bot.conn, record["requested_by"])
+        next_week = record["week"] + config.MAX_EXTENSION_WEEKS
+
+        summary = (
+            f"⏳ **Extension #{record['number']}** — *pending*\n"
+            f"• Draft: **{league['name']}** — Pool {pool['label']}\n"
+            f"• Week {record['week']} match: **{home['display_name']}** vs "
+            f"**{away['display_name']}**\n"
+            f"• Asked for by: <@{asked_by['user_id']}>\n"
+            f"• Reason: {record['reason'] or '*none given*'}\n\n"
+            f"Granting it posts this match again in week {next_week}, which is as "
+            f"far as it can go.\n"
+            f"`/grantextension number:{record['number']} name:{league['name']}` or "
+            f"`/rejectextension number:{record['number']} name:{league['name']}`."
+        )
+        if not await self.post_to_admins(league, summary, interaction):
+            return
+
+        opponent = home if asked_by["id"] == away["id"] else away
+        await interaction.followup.send(
+            f"⏳ Extension **#{record['number']}** requested for your week "
+            f"{record['week']} match against **{opponent['display_name']}**. "
+            f"A moderator will decide — nothing changes until they do, and "
+            f"the most it can move is to week "
+            f"{record['week'] + config.MAX_EXTENSION_WEEKS}.",
+            ephemeral=True,
+        )
+
+    # ---- /grantextension and /rejectextension ---------------------------
+
+    @app_commands.command(
+        name="grantextension",
+        description="Moderator only: grant an extension, moving the match to next week.")
+    @app_commands.describe(number="The extension number",
+                           name="The league's name, if this channel runs more than one")
+    async def grantextension(self, interaction: discord.Interaction, number: int,
+                             name: str = None):
+        await self.decide_extension(interaction, number, name, granted=True)
+
+    @app_commands.command(
+        name="rejectextension",
+        description="Moderator only: turn down an extension request.")
+    @app_commands.describe(number="The extension number",
+                           name="The league's name, if this channel runs more than one")
+    async def rejectextension(self, interaction: discord.Interaction, number: int,
+                              name: str = None):
+        await self.decide_extension(interaction, number, name, granted=False)
+
+    async def decide_extension(self, interaction, number, name, granted):
+        ui.require_moderator(self.bot, interaction)
+        league = self.resolve_league(interaction, name)
+        await interaction.response.defer(ephemeral=True)
+
+        decide = rules.grant_extension if granted else rules.reject_extension
+        record = decide(self.bot.conn, league["id"], number, interaction.user.id)
+        home = rules.get_player_by_id(self.bot.conn, record["home_player_id"])
+        away = rules.get_player_by_id(self.bot.conn, record["away_player_id"])
+        pool = rules.get_pool(self.bot.conn, record["pool_id"])
+        next_week = record["week"] + config.MAX_EXTENSION_WEEKS
+
+        await interaction.followup.send(
+            f"{'✅' if granted else '❌'} Extension #{number} "
+            + (f"granted. The match will be posted again with week {next_week}."
+               if granted else "turned down."),
+            ephemeral=True,
+        )
+
+        # Both players need to know, so it goes where the schedule lives.
+        where = (self.bot.get_channel(league["schedule_channel_id"])
+                 if league["schedule_channel_id"] else None)
+        await ui.safe_send(
+            where or self.bot.get_channel(pool["channel_id"]),
+            (f"⏳ **Extension granted** — <@{home['user_id']}> vs "
+             f"<@{away['user_id']}> moves from week {record['week']} to week "
+             f"{next_week}. It will be posted again then."
+             if granted else
+             f"⏳ **Extension turned down** — <@{home['user_id']}> vs "
+             f"<@{away['user_id']}> still has to be played in week {record['week']}."),
+        )
+
+    # ---- /extensions ----------------------------------------------------
+
+    @app_commands.command(name="extensions",
+                          description="List this draft's extension requests.")
+    @app_commands.describe(name="The league's name, if this channel runs more than one")
+    async def extensions(self, interaction: discord.Interaction, name: str = None):
+        league = self.resolve_league(interaction, name)
+        rows = rules.league_extensions(self.bot.conn, league["id"])
+        if not rows:
+            await interaction.response.send_message(
+                f"No extensions have been requested in **{league['name']}**.",
+                ephemeral=True)
+            return
+
+        marks = {"pending": "⏳", "granted": "✅", "rejected": "❌"}
+        lines = []
+        for row in rows:
+            home = rules.get_player_by_id(self.bot.conn, row["home_player_id"])
+            away = rules.get_player_by_id(self.bot.conn, row["away_player_id"])
+            lines.append(
+                f"{marks.get(row['status'], '•')} **#{row['number']}** week "
+                f"{row['week']}: {home['display_name']} vs {away['display_name']} "
+                f"— {row['status']}")
+        await interaction.response.send_message(
+            f"⏳ **Extensions — {league['name']}**\n" + "\n".join(lines),
+            ephemeral=True)
+
     # ---- /subrequest ----------------------------------------------------
 
     @app_commands.command(

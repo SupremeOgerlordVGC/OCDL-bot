@@ -2574,6 +2574,150 @@ def remove_player(conn, draft, user_id, release_roster=True):
 #
 # With a template the fixtures live on the spreadsheet. Without one the bot
 # makes its own, so a "draft and schedule" league still has something to
+# --------------------------------------------------------------------------
+# Extensions
+# --------------------------------------------------------------------------
+
+
+def fixture_for(conn, league_id, week, player_id):
+    """A player's match in one week, as (home, away), or None."""
+    for home, away in get_fixtures(conn, league_id, week):
+        if player_id in (home["id"], away["id"]):
+            return home, away
+    return None
+
+
+def get_extension(conn, league_id, number):
+    return conn.execute(
+        "SELECT * FROM extensions WHERE league_id = ? AND number = ?",
+        (league_id, number),
+    ).fetchone()
+
+
+def extensions_into(conn, league_id, week):
+    """Matches granted an extension out of the previous week.
+
+    These are the matches /postschedule lists again when it posts `week`,
+    which is what an extension means in practice.
+    """
+    if week <= 1:
+        return []
+    return conn.execute(
+        "SELECT * FROM extensions WHERE league_id = ? AND week = ? AND status = 'granted' "
+        "ORDER BY number",
+        (league_id, week - config.MAX_EXTENSION_WEEKS),
+    ).fetchall()
+
+
+def league_extensions(conn, league_id):
+    return conn.execute(
+        "SELECT * FROM extensions WHERE league_id = ? ORDER BY number",
+        (league_id,),
+    ).fetchall()
+
+
+def request_extension(conn, draft, user_id, reason=None):
+    """/extension - ask for this week's match to be played next week instead.
+
+    Either player may ask, and it covers the match rather than the person:
+    one request, one decision, both players told.
+    """
+    league = get_league(conn, draft["league_id"])
+    if league["mode"] not in config.SCHEDULE_MODES:
+        raise DraftError(
+            f"❌ **{league['name']}** does not run a schedule, so there is nothing "
+            f"to extend."
+        )
+    week = league["current_week"] or 0
+    if week < 1:
+        raise DraftError(
+            "❌ No week has been posted yet, so there is no match to put off."
+        )
+
+    player = require_player(conn, draft["id"], user_id)
+    match = fixture_for(conn, league["id"], week, player["id"])
+    if match is None:
+        raise DraftError(
+            f"❌ You have no match recorded for week {week}. If the schedule is on "
+            f"the spreadsheet, a moderator may need to run `/sync` so your name "
+            f"there matches your Discord account."
+        )
+    home, away = match
+
+    # Which way round a fixture is written depends on the week, so a match
+    # is always looked up as an unordered pair.
+    existing = conn.execute(
+        "SELECT * FROM extensions WHERE league_id = ? AND week = ? AND "
+        "((home_player_id = ? AND away_player_id = ?) OR "
+        " (home_player_id = ? AND away_player_id = ?))",
+        (league["id"], week, home["id"], away["id"], away["id"], home["id"]),
+    ).fetchone()
+    if existing is not None:
+        if existing["status"] == "pending":
+            raise DraftError(
+                f"❌ Extension **#{existing['number']}** is already waiting for a "
+                f"decision on this match."
+            )
+        if existing["status"] == "granted":
+            raise DraftError(
+                f"❌ This match has already been put off to week "
+                f"{week + config.MAX_EXTENSION_WEEKS}."
+            )
+        raise DraftError(
+            f"❌ Extension **#{existing['number']}** for this match was turned down. "
+            f"Talk to a moderator."
+        )
+
+    # One week is the limit, so a match that arrived here on an extension
+    # cannot be pushed back again.
+    pair = {home["id"], away["id"]}
+    if any({row["home_player_id"], row["away_player_id"]} == pair
+           for row in extensions_into(conn, league["id"], week)):
+        raise DraftError(
+            f"❌ This match was already extended once, which is the most allowed. "
+            f"It has to be played in week {week}."
+        )
+
+    number = conn.execute(
+        "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM extensions WHERE league_id = ?",
+        (league["id"],),
+    ).fetchone()["n"]
+    conn.execute(
+        """INSERT INTO extensions (league_id, pool_id, number, week, home_player_id,
+                                   away_player_id, requested_by, reason, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+        (league["id"], draft["id"], number, week, home["id"], away["id"],
+         player["id"], (reason or "").strip() or None, database.now()),
+    )
+    conn.commit()
+    return get_extension(conn, league["id"], number), home, away
+
+
+def _decide_extension(conn, league_id, number, moderator_user_id, status):
+    extension = get_extension(conn, league_id, number)
+    if extension is None:
+        raise DraftError(f"❌ There is no extension #{number} in this draft.")
+    if extension["status"] != "pending":
+        raise DraftError(
+            f"❌ Extension #{number} has already been {extension['status']}."
+        )
+    conn.execute(
+        "UPDATE extensions SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ?",
+        (status, database.now(), moderator_user_id, extension["id"]),
+    )
+    conn.commit()
+    return get_extension(conn, league_id, number)
+
+
+def grant_extension(conn, league_id, number, moderator_user_id):
+    """The match is listed again when the next week is posted."""
+    return _decide_extension(conn, league_id, number, moderator_user_id, "granted")
+
+
+def reject_extension(conn, league_id, number, moderator_user_id):
+    return _decide_extension(conn, league_id, number, moderator_user_id, "rejected")
+
+
 # post.
 # --------------------------------------------------------------------------
 

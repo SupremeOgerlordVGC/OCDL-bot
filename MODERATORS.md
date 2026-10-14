@@ -173,6 +173,8 @@ Add `name:OCDL Season 1` to any of these if your admin channel runs more than on
 **Each match gets its own message, with 🇦 and 🇧 on it to vote with.** They go to the league's **schedule channel**; set one with `/schedulechannel name:OCDL Season 1 channel:#schedule`, or with `schedule_channel` in `/setup`. With none set they post wherever you run the command, and the bot tells you so. I need **Add Reactions** in that channel for the votes.
 
 **`/reschedule name:... weeks:8`** — rerolls a bot-generated schedule.
+
+**⏳ Extensions.** A player runs `/extension` for their current week's match and it arrives here with a number. **`/grantextension number:2 name:...`** posts that match again with the following week; **`/rejectextension`** leaves it where it is. Either way both players are told in the schedule channel. **`/extensions`** lists every request. One week is the limit, so a match that has already been carried over cannot be put off again.
 ```
 
 ---

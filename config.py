@@ -67,6 +67,10 @@ MAX_TERA_CAPTAINS = 3
 MAX_QUEUE_LENGTH = 5
 
 # Most Pokemon that can appear on either side of a single /trade.
+# A match may be put off by at most this many weeks, so an extension
+# granted in week 3 moves the match to week 4 and no further.
+MAX_EXTENSION_WEEKS = 1
+
 MAX_TRADE_SIZE = 5
 
 # When a full-season pool finishes drafting, every player is pinged and for
