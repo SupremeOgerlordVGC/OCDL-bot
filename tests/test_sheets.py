@@ -202,9 +202,18 @@ class MatchWritingTests(unittest.TestCase):
         self.assertEqual(written["S7:T12"][0], [3, 0], "game 1 kills and deaths in S and T")
         self.assertEqual(written["V14"], [["W"]], "game 2's result")
 
-    def test_replays_go_on_the_match_band(self):
-        self.write(replays=["https://replay.ogreclan.com/a", None])
-        self.assertEqual(self.ranges()["C26"], [["https://replay.ogreclan.com/a"]])
+    def test_replays_go_in_one_cell_on_the_match_band(self):
+        # That row is a single cell merged across the week's columns, so the
+        # links go into its top left together; a write a game apart would be
+        # thrown away by Google without a word.
+        self.write(replays=["https://replay.ogreclan.com/a", None,
+                            "https://replay.ogreclan.com/c"])
+        written = self.ranges()
+        self.assertEqual(written["C26"],
+                         [["Game 1: https://replay.ogreclan.com/a   "
+                           "Game 3: https://replay.ogreclan.com/c"]])
+        self.assertNotIn("F26", written)
+        self.assertNotIn("I26", written)
 
     def test_a_coach_the_sheet_does_not_have_is_refused(self):
         sides = [dict(self.match[0], coach="somebodyelse"), self.match[1]]

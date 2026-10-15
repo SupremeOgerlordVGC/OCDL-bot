@@ -747,13 +747,16 @@ class SheetSync:
                     "values": [[result]],
                 })
 
-        for game, link in enumerate(list(replays or [])[:most_games]):
-            if not link:
-                continue
+        # The Replays row is one cell merged across the week's block, so the
+        # links go into its anchor together. Writing them a game apart looks
+        # right and lands nowhere: Google discards a write to a cell inside a
+        # merge that is not its top left.
+        links = [f"Game {game}: {link}" for game, link
+                 in enumerate(list(replays or [])[:most_games], start=1) if link]
+        if links and rows:
             band = min(rows.values()) + layout["matches_replay_offset"]
-            column = column_letters(first + layout["matches_kills_column"]
-                                    + layout["matches_game_columns"] * game)
-            updates.append({"range": f"{column}{band}", "values": [[link]]})
+            column = column_letters(first + layout["matches_kills_column"])
+            updates.append({"range": f"{column}{band}", "values": [["   ".join(links)]]})
 
         tab = self._tab(doc_url, layout["matches_tab"])
         try:
