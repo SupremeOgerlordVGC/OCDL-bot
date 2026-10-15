@@ -159,10 +159,23 @@ GOOGLE_CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 # Safety switch. While this is False the bot READS the sheet (for autocomplete,
 # /search, /available and cost checks) but never writes to it.
 #
-# On, because the layout below has been checked against the real template and
-# confirmed. Set it back to False for a dry run - everything else still works,
-# the bot just stops writing.
-SHEETS_WRITE_ENABLED = True
+# OFF since 2026-10-15, on purpose, and this is the only reason:
+#
+# The league template generates its schedule from a seed cell that holds
+# `=IF(SetSchedule, IF(B1>0, B1, RANDBETWEEN(1,999999)), -ABS(B1))`. That
+# RANDBETWEEN is volatile, so *any* edit to the document can make Google
+# recalculate it and re-roll the seed - which reshuffles every week's
+# pairings, including ones already published. The bot cannot protect against
+# it from the outside: the seed cell, Schedule and BackendSchedule are all
+# protected against the service account, so it can neither lock nor restore
+# them. The league's owner locks it by unticking "Set Schedule" on the
+# Settings tab, or by typing the seed number over that formula.
+#
+# Turn this back on once the live documents' schedules are locked. Nothing
+# else is affected: the bot still reads the sheet for prices, autocomplete,
+# /search and /available, and the database stays the source of truth, so a
+# `/sync` catches the sheet up afterwards.
+SHEETS_WRITE_ENABLED = False
 
 # ---- Spreadsheet layout -------------------------------------------------
 # This describes the league template. The bot READS the Pokedex and WRITES
