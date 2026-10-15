@@ -20,6 +20,7 @@ from discord.ext import commands
 import config
 import database
 import draft as rules
+import results
 import sheets
 import ui
 from cogs.drafting import tiering_tab_for
@@ -705,6 +706,24 @@ class AdminCog(commands.Cog):
         if not pairs:
             return None
 
+        # The week turning over is the other moment a trade can land: anybody
+        # who finished the week just gone gets theirs, which catches the ones
+        # approved after their match was reported. Anybody who did not play
+        # keeps waiting - their team is the team the week was played with.
+        landed, withheld = [], []
+        if week > 1:
+            previous = week - 1
+            finished = results.finished_players(self.bot.conn, league, previous)
+            if finished:
+                landed = rules.apply_trades(self.bot.conn, league["id"], week,
+                                            player_ids=finished)
+                await ui.trades_landed(
+                    self.bot, landed,
+                    f"their week {previous} match was reported and week {week} is up")
+            waiting = results.unfinished_players(self.bot.conn, league, previous)
+            withheld = rules.waiting_trades(self.bot.conn, league["id"],
+                                            player_ids=waiting) if waiting else []
+
         rules.set_current_week(self.bot.conn, league["id"], week)
         # Sets the weekly cadence, and re-arms automatic posting if a
         # moderator is posting by hand after it gave up.
@@ -712,22 +731,35 @@ class AdminCog(commands.Cog):
         if league["doc_kind"] == "template":
             rules.record_week(self.bot.conn, league["id"], week, matched)
 
-        # Trades are not applied here. Saying how many are waiting is still
-        # worth it: it is the commonest "why has nothing changed?".
+        # What is still waiting after the roll-over, which is the commonest
+        # "why has nothing changed?".
         waiting = rules.waiting_trades(self.bot.conn, league["id"])
         extra = []
+        if landed:
+            extra.append(
+                f"🔁 **{len(landed)} trade(s) are now in effect** for the coaches who "
+                f"reported their week {week - 1} match.")
         if waiting:
             extra.append(
                 f"🔁 **{len(waiting)} approved trade(s) waiting:** "
                 f"#{', #'.join(str(trade['trade_number']) for trade in waiting)}. Each one "
-                f"takes effect once that player's match is reported, and a moderator can "
-                f"put them all through with `/updatetrades`.")
+                f"takes effect once that player's match is reported — report yours and it "
+                f"is yours.")
         if footnote:
             extra.append(footnote)
 
         report = f"✅ Posted {len(pairs)} match(es) for week {week}."
         if extended:
             report += f" {len(extended)} of them carried over on an extension."
+        if landed:
+            report += (f" {len(landed)} approved trade(s) went through for players who "
+                       f"reported week {week - 1}.")
+        if withheld:
+            names = ", ".join(sorted({
+                rules.get_player_by_id(self.bot.conn, trade["proposer_id"])["display_name"]
+                for trade in withheld}))
+            report += (f" {len(withheld)} are being held back because last week's match "
+                       f"was never reported: {names}.")
         if waiting:
             report += (f" {len(waiting)} approved trade(s) are waiting for their players' "
                        f"matches; `/updatetrades` puts them through sooner.")

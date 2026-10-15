@@ -2365,6 +2365,115 @@ class ReportedMatchTradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("already over", str(caught.exception))
 
 
+class WeeklyTradeRollTests(unittest.IsolatedAsyncioTestCase):
+    """The two moments besides a match that put trades into effect.
+
+    The grace period ends and everything approved goes through - nobody has
+    a match to finish yet. Then each week that is posted carries the trades
+    of whoever reported the week just gone, and holds back the trades of
+    whoever did not.
+    """
+
+    async def asyncSetUp(self):
+        from cogs.admin import AdminCog
+        self.conn = database.connect(":memory:")
+        self.channel = FakeChannel(9950)
+        self.bot = FakeBot(self.conn, self.channel)
+        self.pool_id = make_pool(self.conn, 9950,
+                                 [(11, "Larry"), (22, "Alex"), (33, "Sam"), (44, "Kim")],
+                                 max_picks=1, name="Rolling", max_trades=2)
+        pool = rules.get_pool(self.conn, self.pool_id)
+        rules.start_pool(self.conn, pool)
+        for user_id, pokemon, cost in ((11, "Garchomp", 12), (22, "Rotom-Wash", 8),
+                                       (33, "Heatran", 10), (44, "Corviknight", 9)):
+            rules.make_pick(self.conn, rules.get_pool(self.conn, self.pool_id),
+                            user_id, 1, pokemon, cost)
+        self.league_id = pool["league_id"]
+        rules.generate_fixtures(self.conn, self.league_id, weeks=3)
+        self.admin = AdminCog(self.bot)
+        self.bot.cogs["AdminCog"] = self.admin
+
+    async def asyncTearDown(self):
+        self.bot.timers.cancel_all()
+
+    def league(self):
+        return rules.get_league(self.conn, self.league_id)
+
+    def moderator(self):
+        interaction = FakeInteraction(self.bot, 9950, 99, "Mod")
+        interaction.user.guild_permissions = SimpleNamespace(administrator=True)
+        return interaction
+
+    def approve(self, user_id, drops, gets):
+        live = rules.get_pool(self.conn, self.pool_id)
+        record, _ = rules.propose_trade(self.conn, live, user_id, drops, gets)
+        rules.approve_trade(self.conn, live, record["trade_number"], 99)
+        return record["trade_number"]
+
+    def seat(self, user_id):
+        return rules.get_player(self.conn, self.pool_id, user_id)
+
+    def finish(self, week, player_id):
+        """Report a 2-0 for whoever has that player's match that week."""
+        fixture = results_module.find_match(self.conn, self.league_id, week, player_id)
+        for game in (1, 2):
+            results_module.record_game(self.conn, self.league_id, week,
+                                       fixture["match_number"], game, "manual",
+                                       winner_id=player_id)
+
+    async def test_the_grace_period_ending_puts_every_trade_through(self):
+        self.approve(11, ["Garchomp"], ["Heatran"])     # Alex's... no, free agency
+        self.approve(22, ["Rotom-Wash"], ["Hydrapple"])
+        self.conn.execute("UPDATE pools SET status = 'complete', free_trades_until = ? "
+                          "WHERE id = ?", (time.time() - 5, self.pool_id))
+        self.conn.execute("UPDATE leagues SET status = 'complete' WHERE id = ?",
+                          (self.league_id,))
+        self.conn.commit()
+
+        due = rules.grace_ended_pools(self.conn)
+        self.assertEqual([pool["id"] for pool in due], [self.pool_id])
+        applied = await ui.grace_window_closed(self.bot, due[0])
+        self.assertEqual(len(applied), 2, "both go through, with no match to wait for")
+        self.assertEqual(rules.waiting_trades(self.conn, self.league_id), [])
+        self.assertIn("Every approved trade is going through now", self.channel.text)
+        self.assertEqual(rules.get_trade(self.conn, self.league_id, 1)["applied_week"], 1)
+
+    async def test_a_posted_week_carries_only_the_coaches_who_played(self):
+        # Week 1 is played by Larry's match only; the other match is never
+        # reported. Both sides then have a trade approved afterwards.
+        await self.admin.postschedule.callback(self.admin, self.moderator(),
+                                               week=1, name="Rolling")
+        self.finish(1, self.seat(11)["id"])
+        played = results_module.finished_players(self.conn, self.league(), 1)
+        self.assertIn(self.seat(11)["id"], played)
+        missing = results_module.unfinished_players(self.conn, self.league(), 1)
+        self.assertNotIn(self.seat(11)["id"], missing)
+
+        mine = self.approve(11, ["Garchomp"], ["Heatran"])
+        theirs = self.approve(next(u for u in (22, 33, 44)
+                                   if self.seat(u)["id"] in missing),
+                              [], ["Hydrapple"])
+        self.assertEqual(
+            [t["trade_number"] for t in rules.waiting_trades(self.conn, self.league_id)],
+            [mine, theirs])
+
+        posting = self.moderator()
+        await self.admin.postschedule.callback(self.admin, posting, week=2, name="Rolling")
+        self.assertIsNotNone(rules.get_trade(self.conn, self.league_id, mine)["applied_at"],
+                             "reported their match, so their trade went through")
+        self.assertIsNone(rules.get_trade(self.conn, self.league_id, theirs)["applied_at"],
+                          "never reported, so theirs is held back")
+        self.assertIn("went through for players who reported week 1", posting.text)
+        self.assertIn("held back because last week's match was never reported", posting.text)
+
+    async def test_week_one_carries_nothing_because_nothing_has_been_played(self):
+        number = self.approve(11, ["Garchomp"], ["Heatran"])
+        interaction = self.moderator()
+        await self.admin.postschedule.callback(self.admin, interaction, week=1, name="Rolling")
+        self.assertIsNone(rules.get_trade(self.conn, self.league_id, number)["applied_at"])
+        self.assertIn("are waiting for their players' matches", interaction.text)
+
+
 class GraceWindowTests(unittest.IsolatedAsyncioTestCase):
     """The end of the free-transaction window is announced, once.
 

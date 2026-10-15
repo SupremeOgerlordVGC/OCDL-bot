@@ -413,6 +413,35 @@ def sheet_match(conn, league, week, match_number):
             "walkover": view["walkover"], "decided": view["decided"]}
 
 
+def finished_players(conn, league, week):
+    """The players whose match that week is over, as seat ids.
+
+    What the weekly roll-over goes on: somebody who has not played does not
+    get their transactions, because the team they fielded is the team the
+    week was played with.
+    """
+    seats = []
+    for number in decided_matches(conn, league, week):
+        fixture = conn.execute(
+            "SELECT * FROM fixtures WHERE league_id = ? AND week = ? AND match_number = ?",
+            (league["id"], week, number)).fetchone()
+        if fixture is not None:
+            seats += [fixture["home_player_id"], fixture["away_player_id"]]
+    return seats
+
+
+def unfinished_players(conn, league, week):
+    """The players whose match that week is not over, as seat ids."""
+    done = set(finished_players(conn, league, week))
+    seats = []
+    for row in conn.execute(
+            "SELECT home_player_id, away_player_id FROM fixtures "
+            "WHERE league_id = ? AND week = ?", (league["id"], week)):
+        seats += [seat for seat in (row["home_player_id"], row["away_player_id"])
+                  if seat not in done]
+    return seats
+
+
 def decided_matches(conn, league, week):
     """The week's match numbers that are over, in order."""
     numbers = [row["match_number"] for row in conn.execute(

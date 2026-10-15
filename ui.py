@@ -450,11 +450,15 @@ def sync_pick_to_sheet(bot, pool_id, event):
 
 
 async def grace_window_closed(bot, pool):
-    """Tell a pool its free-transaction window has closed, once.
+    """Close a pool's free-transaction window: say so, and put every approved
+    trade through.
 
     Nothing marks the end of the grace period except the clock, so without
     this the rules change under the players in silence - which is exactly
-    what happened in Cornerstone's pool A.
+    what happened in Cornerstone's pool A. And the grace period is when the
+    rush of transactions happens, before anybody has a match to finish, so
+    this is their moment: holding them back until somebody plays would mean
+    teams going into week 1 as they were drafted.
     """
     limit = (f"Each of you may pick up **{pool['max_trades']}** Pokémon in trades from "
              f"here on." if pool["max_trades"] else
@@ -464,8 +468,24 @@ async def grace_window_closed(bot, pool):
         f"⏳ **Pool {pool['label']}'s free-transaction window has closed.**\n"
         f"{limit} `/trade` works the same way and a moderator still approves every "
         f"one — what changes is that these count towards your allowance.\n"
-        f"An approved trade takes effect once you have finished that week's match.")
+        f"Every approved trade is going through now; from here on one takes effect "
+        f"when you have finished that week's match.")
     rules.record_grace_ended(bot.conn, pool["id"])
+
+    league = rules.get_league(bot.conn, pool["league_id"])
+    week = (league["current_week"] or 0) + 1 if league else 1
+    applied = rules.apply_trades(bot.conn, pool["league_id"], week, pool_id=pool["id"])
+    await trades_landed(bot, applied, "the free-transaction window has closed")
+    held = rules.held_trades(bot.conn, pool["league_id"], pool_id=pool["id"])
+    if held:
+        await safe_send(
+            bot.get_channel(league["admin_channel_id"]) if league else None,
+            f"🔁 Pool {pool['label']}'s window closed and "
+            f"{len(applied)} trade(s) went through, but "
+            + ", ".join(f"**#{trade['trade_number']}** is waiting for "
+                        f"**#{blocker['trade_number']}**" for trade, blocker in held)
+            + ". Approve the one it is waiting for, or run `/updatetrades`.")
+    return applied
 
 
 # --------------------------------------------------------------------------
@@ -675,6 +695,26 @@ def resync_match(bot, league, week, match_number, admin_channel=None):
     asyncio.create_task(worker())
 
 
+# The last sheet complaint made about each league, so that a refusal which
+# only a person can clear is said once rather than after every trade.
+_last_sheet_warning = {}
+
+
+async def warn_about_sheet(bot, league, message):
+    """Tell a league's moderators that its spreadsheet is out of step - once.
+
+    The same refusal every time anybody trades is noise, and noise is how a
+    real warning gets ignored. It is said again if it changes, or after a
+    restart.
+    """
+    if league is None:
+        return False
+    if _last_sheet_warning.get(league["id"]) == message:
+        return False
+    _last_sheet_warning[league["id"]] = message
+    return await safe_send(bot.get_channel(league["admin_channel_id"]), message)
+
+
 def resync_sheet(bot, pool_id):
     """Rewrite the whole league on the sheet, in the background.
 
@@ -699,7 +739,6 @@ def resync_sheet(bot, pool_id):
                     draft["league_id"], overflow)
 
     league = rules.get_league(bot.conn, draft["league_id"])
-    admin_channel = bot.get_channel(league["admin_channel_id"]) if league else None
 
     async def worker():
         """Sheet writing is best effort - the database is the league - but a
@@ -710,8 +749,8 @@ def resync_sheet(bot, pool_id):
                                              coaches, rosters)
         except Exception as error:
             log.exception("sheet resync failed for pool %s (local data is fine)", pool_id)
-            await safe_send(
-                admin_channel,
+            await warn_about_sheet(
+                bot, league,
                 f"⚠️ I could not write the rosters to **{league['name']}**'s "
                 f"spreadsheet: {error}\nNothing is lost — the bot's own record is "
                 f"right — but the document is now behind. Run `/sync` once that is "
@@ -720,8 +759,8 @@ def resync_sheet(bot, pool_id):
         if report.get("coaches_error"):
             log.warning("coach names not written for pool %s: %s",
                         pool_id, report["coaches_error"])
-            await safe_send(
-                admin_channel,
+            await warn_about_sheet(
+                bot, league,
                 f"⚠️ The rosters are written, but I could not update the coach names "
                 f"on **{league['name']}**'s Coaches tab: {report['coaches_error']}")
 
