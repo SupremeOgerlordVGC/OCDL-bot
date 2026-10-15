@@ -137,7 +137,7 @@ class CommandOptionTests(unittest.TestCase):
         # confirmation happens on a button rather than a flag.
         "finishdrafting": set(),
         "substitute": {"out", "into"},
-        "trade": {"drops", "gets", "partner", "for_player"},
+        "trade": {"drops", "gets", "partner", "tera_on", "tera_off", "for_player"},
         "approvetrade": {"trade_id", "name"},
         "unapprovetrade": {"trade_id", "name"},
         "edittrade": {"trade_id", "drops", "gets", "name"},

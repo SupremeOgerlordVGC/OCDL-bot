@@ -10,6 +10,7 @@ two #1s in it.
 """
 
 import asyncio
+import json
 import logging
 
 import discord
@@ -122,15 +123,46 @@ class ExtrasCog(commands.Cog):
             )
         return prices
 
+    async def resolve_tera_sides(self, pool, tera_on, tera_off):
+        """The Tera Captain changes in a trade, priced from the tiering list.
+
+        Returns two lists of {"name", "cost", "tera", "tera_banned"}: the
+        prices the moderators will see, which are stored with the trade and
+        used when it takes effect, so a re-priced list cannot change a
+        transaction after it was approved.
+        """
+        resolved = []
+        for names in (tera_on, tera_off):
+            entries = []
+            for name in names:
+                status, entry = await lookup_price(self.bot, pool, name)
+                if status == "missing":
+                    raise rules.DraftError(
+                        f"❌ **{name}** is not in this league's tiering list. "
+                        f"`/search {name}` finds the right spelling.")
+                if status != "ok":
+                    raise rules.DraftError(
+                        "❌ I cannot read this league's tiering list, and a Tera Captain "
+                        "is charged its Tera price, so I will not guess. Try again shortly.")
+                entries.append({"name": entry["name"], "cost": entry["cost"],
+                                "tera": entry["tera_cost"],
+                                "tera_banned": bool(entry["tera_banned"])})
+            resolved.append(entries)
+        return resolved
+
     @app_commands.command(name="trade", description="Propose a trade for a moderator to approve.")
     @app_commands.describe(
         drops="Up to 5 Pokémon you are giving up, separated by commas, or nil / 0 to give up nothing",
-        gets="Up to 5 Pokémon you want, separated by commas",
+        gets="Up to 5 Pokémon you want, separated by commas. Leave it out for a Tera change only.",
         partner="The player you are trading with. Leave blank for the undrafted pool.",
+        tera_on="Tera formats: Pokémon of yours to make Tera Captains, separated by commas",
+        tera_off="Tera formats: Tera Captains of yours to give up, separated by commas",
         for_player="Moderators only: file this trade on somebody else's behalf",
     )
-    async def trade(self, interaction: discord.Interaction, drops: str, gets: str,
-                    partner: discord.Member = None, for_player: discord.Member = None):
+    async def trade(self, interaction: discord.Interaction, drops: str = None,
+                    gets: str = None, partner: discord.Member = None,
+                    tera_on: str = None, tera_off: str = None,
+                    for_player: discord.Member = None):
         pool = rules.require_channel_pool(self.bot.conn, interaction.channel_id)
         if pool["mode"] != "full_season":
             raise rules.DraftError(
@@ -149,10 +181,20 @@ class ExtrasCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        drop_list = rules.parse_pokemon_list(drops, config.MAX_TRADE_SIZE, allow_nothing=True)
-        get_list = rules.parse_pokemon_list(gets, config.MAX_TRADE_SIZE)
+        def listed(raw, limit=config.MAX_TRADE_SIZE):
+            """Nothing typed at all is nothing, the same as `nil`: a trade may
+            be only a Tera Captain change."""
+            if raw is None or not str(raw).strip():
+                return []
+            return rules.parse_pokemon_list(raw, limit, allow_nothing=True)
+
+        drop_list = listed(drops)
+        get_list = listed(gets)
+        on_names = listed(tera_on, config.MAX_TERA_CAPTAINS)
+        off_names = listed(tera_off, config.MAX_TERA_CAPTAINS)
 
         prices = await self.resolve_trade_sides(pool, drop_list, get_list)
+        on_entries, off_entries = await self.resolve_tera_sides(pool, on_names, off_names)
 
         # Then the mechanical rules, so the admins only ever judge a trade
         # that could actually go through.
@@ -162,11 +204,13 @@ class ExtrasCog(commands.Cog):
         partner_player = (rules.require_player(self.bot.conn, pool["id"], partner.id)
                           if partner is not None else None)
         maths = rules.check_trade(self.bot.conn, pool, proposer, partner_player,
-                                  drop_list, get_list, prices)
+                                  drop_list, get_list, prices,
+                                  tera_on=on_entries, tera_off=off_entries)
 
         record, warnings = rules.propose_trade(
             self.bot.conn, pool, proposer_id, drop_list, get_list,
             partner_user_id=partner.id if partner else None,
+            tera_on=on_entries, tera_off=off_entries,
         )
 
         # The bot does not judge trades - moderators do - but anything that
@@ -186,6 +230,15 @@ class ExtrasCog(commands.Cog):
         budget_line = (
             f"\n• Budget: **{proposer['budget_remaining']} → {maths['after']}** "
             f"(back {maths['refund']}, costs {maths['charge']})")
+        if on_entries or off_entries:
+            budget_line += (
+                f"\n• ⭐ Tera Captains: "
+                + (f"**+ {rules.tera_side(on_entries)}**" if on_entries else "")
+                + (" · " if on_entries and off_entries else "")
+                + (f"**− {rules.tera_side(off_entries)}**" if off_entries else "")
+                + f"\n• Tera budget: **{proposer['tera_budget_remaining']} → "
+                  f"{maths['tera_after']}** ({maths['captains']} of "
+                  f"{config.MAX_TERA_CAPTAINS} captains)")
         for note in maths["notes"]:
             budget_line += f"\n• 🕒 {note}"
         if maths["partner_after"] is not None:
@@ -204,7 +257,7 @@ class ExtrasCog(commands.Cog):
             f"• Proposed by: <@{proposer_id}>{entered_by}\n"
             f"• Partner: {partner_text}\n"
             f"• Giving up: {rules.trade_side(drop_list)}\n"
-            f"• Receiving: {', '.join(get_list)}\n"
+            f"• Receiving: {rules.trade_side(get_list)}\n"
             f"• Proposed at: {record['created_at']} UTC"
             f"{budget_line}{allowance}\n\n"
             f"Approve with `/approvetrade trade_id:{record['trade_number']} "
@@ -328,6 +381,10 @@ class ExtrasCog(commands.Cog):
             f"• **{proposer['display_name']}** receives: {gets}\n"
             + (f"• Partner: **{partner['display_name']}**\n" if partner else
                "• Traded with the undrafted pool\n")
+            + (f"• ⭐ Becoming a Tera Captain: {rules.tera_side(record['tera_on'])}\n"
+               if json.loads(record["tera_on"] or "[]") else "")
+            + (f"• ⭐ No longer a Tera Captain: {rules.tera_side(record['tera_off'])}\n"
+               if json.loads(record["tera_off"] or "[]") else "")
             + f"Rosters and budgets change {ui.when_trades_land(league)}.",
         )
 
@@ -498,10 +555,15 @@ class ExtrasCog(commands.Cog):
                 label = status
             if row["free"]:
                 label += ", free window"
+            tera = ""
+            if json.loads(row["tera_on"] or "[]"):
+                tera += f" ⭐ +{rules.tera_side(row['tera_on'])}"
+            if json.loads(row["tera_off"] or "[]"):
+                tera += f" ⭐ −{rules.tera_side(row['tera_off'])}"
             lines.append(
                 f"{icons.get(status, '•')} **#{row['trade_number']}** "
                 f"{proposer['display_name']}: {rules.trade_side(row['drops'])} → "
-                f"{rules.trade_side(row['gets'])} *({label})*"
+                f"{rules.trade_side(row['gets'])}{tera} *({label})*"
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 

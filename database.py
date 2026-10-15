@@ -240,6 +240,13 @@ CREATE TABLE IF NOT EXISTS trades (
     -- 1 when proposed in the free-trade window after the draft: it doesn't
     -- count toward the league's trade limit
     free          INTEGER NOT NULL DEFAULT 0,
+    -- Tera Captain changes that are part of the same transaction, as JSON
+    -- lists of {"name", "cost", "tera"} - the prices the moderators saw and
+    -- approved, so that applying the trade needs no price list of its own.
+    -- A captaincy change is a transaction like any other, which is how
+    -- "swap my captain from X to Y" is asked for and approved.
+    tera_on       TEXT NOT NULL DEFAULT '[]',
+    tera_off      TEXT NOT NULL DEFAULT '[]',
     UNIQUE (league_id, trade_number)
 );
 
@@ -441,6 +448,8 @@ ADDED_COLUMNS = [
     ("pools", "grace_ended_at", "TEXT"),
     ("players", "sub_window_until", "REAL"),
     ("trades", "apply_at", "REAL"),
+    ("trades", "tera_on", "TEXT NOT NULL DEFAULT '[]'"),
+    ("trades", "tera_off", "TEXT NOT NULL DEFAULT '[]'"),
     ("leagues", "season_weeks", "INTEGER NOT NULL DEFAULT 0"),
     ("leagues", "schedule_channel_id", "INTEGER"),
     ("leagues", "official", "INTEGER NOT NULL DEFAULT 0"),

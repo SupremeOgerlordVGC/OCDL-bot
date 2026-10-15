@@ -7,6 +7,7 @@ it separate means the rules stay testable and the cogs stay short.
 """
 
 import asyncio
+import json
 import logging
 import random
 import re
@@ -602,6 +603,14 @@ async def trades_landed(bot, applied, because):
                  f"• Received: {rules.trade_side(trade['gets'])}")
         if partner is not None:
             lines += f"\n• With: **{partner['display_name']}**"
+        if json.loads(trade["tera_on"] or "[]"):
+            lines += f"\n• ⭐ Now a Tera Captain: {rules.tera_side(trade['tera_on'])}"
+        if json.loads(trade["tera_off"] or "[]"):
+            lines += f"\n• No longer a Tera Captain: {rules.tera_side(trade['tera_off'])}"
+        updated = rules.get_player_by_id(bot.conn, trade["proposer_id"])
+        if json.loads(trade["tera_on"] or "[]") or json.loads(trade["tera_off"] or "[]"):
+            lines += (f"\n• Tera points remaining: "
+                      f"**{updated['tera_budget_remaining']}**")
         if notes:
             lines += "\n" + "\n".join(f"• ⚠️ {note}" for note in notes)
         await safe_send(bot.get_channel(pool["channel_id"]), lines)
