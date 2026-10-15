@@ -241,6 +241,57 @@ class MatchWritingTests(unittest.TestCase):
             self.sync.write_match("doc", 1, self.match)
 
 
+class ProtectedCoachesTests(unittest.TestCase):
+    """A protected Coaches tab must not cost the rosters their sync.
+
+    Teal's sheet sat three days out of date because the bot wanted to write
+    one coach's name - 'Weredude' over 'weredude0454' - the tab was
+    protected, and the whole sync was refused with it, in the background,
+    where nobody saw it.
+    """
+
+    class Tab:
+        def __init__(self, refuse_write=False):
+            self.refuse_write = refuse_write
+            self.updates = []
+
+        def batch_get(self, ranges, value_render_option=None):
+            # Two coaches on the sheet; the second name disagrees.
+            return [[["one"], ["weredude0454"]], [["A"], ["B"]]]
+
+        def batch_update(self, updates, value_input_option=None):
+            if self.refuse_write:
+                raise Exception("You are trying to edit a protected cell or object.")
+            self.updates += updates
+
+    def sync(self, refuse):
+        sheets_api = sheets.SheetSync.__new__(sheets.SheetSync)
+        coaches_tab = self.Tab(refuse_write=refuse)
+        roster_tab = self.Tab()
+        sheets_api._tab = lambda doc_url, name: (
+            coaches_tab if name == config.SHEET_LAYOUT["coaches_tab"] else roster_tab)
+        sheets_api.forget_cache = lambda doc_url: None
+        with unittest.mock.patch.object(type(sheets_api), "can_write", True):
+            report = sheets_api.full_sync(
+                "doc", False, {1: ("one", "A"), 2: ("Weredude", "B")},
+                {1: [("Garchomp", False)], 2: [("Heatran", False)]})
+        return report, roster_tab
+
+    def test_the_rosters_still_go_in_and_the_refusal_is_reported(self):
+        report, roster_tab = self.sync(refuse=True)
+        self.assertEqual(report["rosters"], 2)
+        self.assertTrue(roster_tab.updates, "the rosters were written anyway")
+        self.assertIn("protected", report["coaches_error"])
+        self.assertIn("Weredude", report["coaches_error"],
+                      "and it says which name it could not write")
+
+    def test_nothing_is_reported_when_the_names_go_in(self):
+        report, roster_tab = self.sync(refuse=False)
+        self.assertIsNone(report["coaches_error"])
+        self.assertEqual(report["coaches"], 2)
+        self.assertTrue(roster_tab.updates)
+
+
 class DisabledBehaviourTests(unittest.TestCase):
     def test_a_draft_works_with_sheets_switched_off(self):
         stub = sheets.DisabledSheets()

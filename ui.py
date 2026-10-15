@@ -698,12 +698,32 @@ def resync_sheet(bot, pool_id):
         log.warning("league %s: rosters too big for the sheet blocks: %s",
                     draft["league_id"], overflow)
 
+    league = rules.get_league(bot.conn, draft["league_id"])
+    admin_channel = bot.get_channel(league["admin_channel_id"]) if league else None
+
     async def worker():
+        """Sheet writing is best effort - the database is the league - but a
+        failure has to be *said*, because it means the document everybody
+        reads is now out of step and only a person can fix that."""
         try:
-            await asyncio.to_thread(bot.sheets.full_sync, doc_url, tera_format,
-                                    coaches, rosters)
-        except Exception:
+            report = await asyncio.to_thread(bot.sheets.full_sync, doc_url, tera_format,
+                                             coaches, rosters)
+        except Exception as error:
             log.exception("sheet resync failed for pool %s (local data is fine)", pool_id)
+            await safe_send(
+                admin_channel,
+                f"⚠️ I could not write the rosters to **{league['name']}**'s "
+                f"spreadsheet: {error}\nNothing is lost — the bot's own record is "
+                f"right — but the document is now behind. Run `/sync` once that is "
+                f"sorted out.")
+            return
+        if report.get("coaches_error"):
+            log.warning("coach names not written for pool %s: %s",
+                        pool_id, report["coaches_error"])
+            await safe_send(
+                admin_channel,
+                f"⚠️ The rosters are written, but I could not update the coach names "
+                f"on **{league['name']}**'s Coaches tab: {report['coaches_error']}")
 
     asyncio.create_task(worker())
 

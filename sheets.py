@@ -581,7 +581,10 @@ class SheetSync:
             try:
                 tab.batch_update(updates, value_input_option="USER_ENTERED")
             except Exception as error:
-                raise _as_sheet_error(error, f"writing to the {layout['coaches_tab']} tab")
+                wanted = ", ".join(f"{update['range']} → {update['values'][0][0]!r}"
+                                   for update in updates[:6])
+                raise _as_sheet_error(
+                    error, f"writing to the {layout['coaches_tab']} tab ({wanted})")
 
         return sum(1 for number in rows if coaches.get(number, ("", ""))[0])
 
@@ -607,7 +610,16 @@ class SheetSync:
         rows = layout["roster_rows"]
         block_count = len(layout["roster_blocks"])
 
-        written_coaches = self.write_coaches(doc_url, coaches, manage_rows)
+        # A protected Coaches tab must not cost the rosters their sync. The
+        # names there are cosmetic and often typed by the host; the rosters
+        # are the league. So a refusal is carried back as a note instead of
+        # taking everything down with it - which is what hid a Teal sync
+        # failing for three days over a single disagreeing name.
+        coaches_error = None
+        try:
+            written_coaches = self.write_coaches(doc_url, coaches, manage_rows)
+        except SheetError as error:
+            written_coaches, coaches_error = 0, str(error)
 
         # Only rewrite the roster blocks the bot is responsible for, for the
         # same reason: an untouched block may be somebody else's business.
@@ -643,7 +655,8 @@ class SheetSync:
 
         self.forget_cache(doc_url)
         return {"coaches": written_coaches, "rosters": len(managed),
-                "tab": self.roster_tab_name(tera_format)}
+                "tab": self.roster_tab_name(tera_format),
+                "coaches_error": coaches_error}
 
     # ---- match results --------------------------------------------------
 
