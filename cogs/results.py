@@ -160,6 +160,75 @@ class ResultsCog(commands.Cog):
             f"{describe(self.bot.conn, league['id'], view, players)}", ephemeral=True)
 
     @app_commands.command(
+        name="syncmatch",
+        description="Moderator only: write a week's finished matches to the spreadsheet.")
+    @app_commands.describe(week="The week", player="Only this player's match",
+                           name="The league's name, if this isn't its draft channel")
+    async def syncmatch(self, interaction: discord.Interaction, week: int,
+                        player: discord.Member = None, name: str = None):
+        """A finished match goes on the sheet by itself. This is for the ones
+        that finished before the bot could, and for after a correction."""
+        ui.require_moderator(self.bot, interaction)
+        league = self.league_for(interaction, name)
+        await interaction.response.defer(ephemeral=True)
+
+        if league["doc_kind"] != "template":
+            raise rules.DraftError(
+                "❌ Kills and deaths are written to a league **template**; this league has "
+                "no template linked.")
+        if not self.bot.sheets.can_write:
+            raise rules.DraftError(
+                f"❌ I cannot write to Google Sheets right now: {self.bot.sheets.reason}"
+                if not self.bot.sheets.enabled else
+                "❌ Sheet writing is switched off in the bot's configuration.")
+
+        if player is not None:
+            seat = results.player_in_league(self.bot.conn, league["id"], player.id)
+            wanted = [results.find_match(self.bot.conn, league["id"], week,
+                                         seat["id"])["match_number"]]
+        else:
+            wanted = results.decided_matches(self.bot.conn, league, week)
+        if not wanted:
+            await interaction.followup.send(
+                f"No match in week {week} of **{league['name']}** is finished yet, so "
+                f"there is nothing to write. A match goes on the sheet by itself as "
+                f"soon as it is.", ephemeral=True)
+            return
+
+        written, problems = [], []
+        for number in wanted:
+            try:
+                report = await ui.write_match_sheet(self.bot, league, week, number)
+            except Exception as error:
+                log.exception("writing week %s match %s failed", week, number)
+                problems.append(f"• Match {number}: {error}")
+                continue
+            if report is None:
+                problems.append(f"• Match {number} is not finished, so it was left alone.")
+                continue
+            written.append((number, report))
+
+        lines = [f"📊 **{league['name']} — week {week}** on the "
+                 f"**{config.SHEET_LAYOUT['matches_tab']}** tab"]
+        for number, report in written:
+            where = ", ".join(f"{coach} (row {row})"
+                              for coach, row in report["rows"].items())
+            lines.append(f"• Match {number}: {report['games']} game(s) — {where}")
+            for coach, left_out in (report["overflow"] or {}).items():
+                lines.append(f"  ⚠️ {coach} used more than six Pokémon; "
+                             f"{', '.join(left_out)} did not fit.")
+            if report["skipped_games"]:
+                lines.append(f"  ⚠️ the sheet has room for three games, so "
+                             f"{report['skipped_games']} more were not written.")
+        lines += problems
+        if not written:
+            lines.append("Nothing was written.")
+        else:
+            lines.append("Kills, deaths and each game's W/L only — every K/D, total and "
+                         "result on that tab is a formula and was left alone.")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(
         name="setresult",
         description="Moderator only: award a match that was not played out.")
     @app_commands.describe(week="The week", player="Who gets the win",

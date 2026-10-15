@@ -8,6 +8,7 @@ cell a pick belongs in, and deciding whether a Pokémon is banned.
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -106,6 +107,130 @@ class ReferenceParsingTests(unittest.TestCase):
         self.assertEqual(sheets.extract_key(url), "1bdBCB-W_qJlY0fn1wPwNhHbwYqdne5rpTMCVAPOx7PM")
         self.assertEqual(sheets.extract_key("plain-key"), "plain-key")
         self.assertIsNone(sheets.extract_key(None))
+
+
+class FakeTab:
+    """A worksheet that records what was written to it."""
+
+    def __init__(self, coaches):
+        self.coaches = coaches          # {cell: name} for the coach cells
+        self.updates = []
+        self.option = None
+
+    def batch_get(self, ranges, value_render_option=None):
+        return [[[self.coaches[cell]]] if self.coaches.get(cell) else []
+                for cell in ranges]
+
+    def batch_update(self, updates, value_input_option=None):
+        self.updates += updates
+        self.option = value_input_option
+
+
+class MatchWritingTests(unittest.TestCase):
+    """Where a match's kills and deaths land.
+
+    The geometry was read off the live Cornerstone document and is described
+    in KD-NOTES.md: week 1 starts at column B, side 0's block at row 4, the
+    second side eleven rows below, each match band 26 rows.
+    """
+
+    def setUp(self):
+        self.sync = sheets.SheetSync.__new__(sheets.SheetSync)       # no credentials
+        self.tab = FakeTab({"B4": "nirvanacokun", "B15": "bananamilker_",
+                            "B30": "someone else",
+                            # week 2's coach cells, sixteen columns right
+                            "R4": "nirvanacokun", "R15": "bananamilker_"})
+        self.sync._tab = lambda doc_url, tab_name: self.tab
+        self.sync.forget_cache = lambda doc_url: None
+        self.match = [
+            {"coach": "nirvanacokun",
+             "pokemon": [{"name": "Goodra-Hisui", "games": [(3, 0), (3, 0)]},
+                         {"name": "Sneasler", "games": [(0, 0), (1, 1)]},
+                         {"name": "Volcarona", "games": [(1, 1), None]}],
+             "results": ["W", "W"]},
+            {"coach": "bananamilker_",
+             "pokemon": [{"name": "Alcremie", "games": [(0, 1), (1, 1)]}],
+             "results": ["L", "L"]},
+        ]
+
+    def write(self, week=1, replays=None, sides=None):
+        with unittest.mock.patch.object(type(self.sync), "can_write", True):
+            return self.sync.write_match("doc", week, sides or self.match, replays)
+
+    def ranges(self):
+        return {update["range"]: update["values"] for update in self.tab.updates}
+
+    def test_each_side_is_found_by_name_not_by_seat(self):
+        report = self.write()
+        self.assertEqual(report["rows"], {"nirvanacokun": 4, "bananamilker_": 15})
+        self.assertEqual(report["games"], 2)
+
+    def test_the_cells_are_the_ones_the_template_leaves_for_data(self):
+        self.write()
+        written = self.ranges()
+        # Six name rows under the coach, in column B for week 1.
+        self.assertEqual(written["B7:B12"],
+                         [["Goodra-Hisui"], ["Sneasler"], ["Volcarona"], [""], [""], [""]])
+        # Game 1 kills and deaths in C and D; game 2 in F and G.
+        self.assertEqual(written["C7:D12"],
+                         [[3, 0], [0, 0], [1, 1], ["", ""], ["", ""], ["", ""]])
+        self.assertEqual(written["F7:G12"],
+                         [[3, 0], [1, 1], ["", ""], ["", ""], ["", ""], ["", ""]],
+                         "Volcarona did not play game 2, so its cells are cleared")
+        # The W/L row is ten rows under the coach.
+        self.assertEqual(written["C14"], [["W"]])
+        self.assertEqual(written["F14"], [["W"]])
+        # The second side sits eleven rows down.
+        self.assertEqual(written["B18:B23"],
+                         [["Alcremie"], [""], [""], [""], [""], [""]])
+        self.assertEqual(written["C25"], [["L"]])
+
+    def test_nothing_is_written_over_a_formula(self):
+        self.write()
+        # E, H, K are per-game K/D; L, M, N are totals; rows 13 and 24 are
+        # the Total rows. None of them may appear in an update.
+        forbidden = {f"{column}{row}" for column in "EHKLMN" for row in range(4, 30)}
+        forbidden |= {f"{column}{row}" for column in "BCDEFGHIJKLMN" for row in (13, 24)}
+        for update in self.tab.updates:
+            for cell in str(update["range"]).split(":"):
+                self.assertNotIn(cell, forbidden, f"{update['range']} touches a formula")
+
+    def test_week_two_is_sixteen_columns_right(self):
+        self.write(week=2)
+        written = self.ranges()
+        self.assertIn("R7:R12", written, "week 2's names are in column R")
+        self.assertEqual(written["S7:T12"][0], [3, 0], "game 1 kills and deaths in S and T")
+        self.assertEqual(written["V14"], [["W"]], "game 2's result")
+
+    def test_replays_go_on_the_match_band(self):
+        self.write(replays=["https://replay.ogreclan.com/a", None])
+        self.assertEqual(self.ranges()["C26"], [["https://replay.ogreclan.com/a"]])
+
+    def test_a_coach_the_sheet_does_not_have_is_refused(self):
+        sides = [dict(self.match[0], coach="somebodyelse"), self.match[1]]
+        with self.assertRaises(sheets.SheetError) as caught:
+            self.write(sides=sides)
+        self.assertIn("not on the Matches tab", str(caught.exception))
+        self.assertEqual(self.tab.updates, [], "and nothing was written")
+
+    def test_a_seventh_pokemon_is_reported_rather_than_dropped_quietly(self):
+        many = [{"name": f"Mon{index}", "games": [(1, 0)]} for index in range(8)]
+        report = self.write(sides=[dict(self.match[0], pokemon=many), self.match[1]])
+        self.assertEqual(report["overflow"], {"nirvanacokun": ["Mon6", "Mon7"]})
+        self.assertEqual(len(self.ranges()["B7:B12"]), 6)
+
+    def test_more_games_than_the_sheet_holds_are_reported(self):
+        five = ["W", "L", "W", "L", "W"]
+        report = self.write(sides=[dict(self.match[0], results=five),
+                                   dict(self.match[1], results=five)])
+        self.assertEqual((report["games"], report["skipped_games"]), (3, 2))
+        self.assertIn("I14", self.ranges(), "game 3 is written")
+        self.assertNotIn("L14", self.ranges(), "game 4 would land on a formula")
+
+    def test_writing_can_be_switched_off(self):
+        self.sync.client = None
+        with self.assertRaises(sheets.SheetError):
+            self.sync.write_match("doc", 1, self.match)
 
 
 class DisabledBehaviourTests(unittest.TestCase):

@@ -353,6 +353,74 @@ def clear_game(conn, league_id, week, match_number, game):
     return match_view(conn, league_id, week, match_number)
 
 
+def sheet_match(conn, league, week, match_number):
+    """One match in the shape the spreadsheet's Matches tab wants.
+
+    Returns {"sides": [{"coach", "pokemon": [{"name", "games": [(kills,
+    deaths) or None]}], "results": [...]}], "replays": [...], "walkover"}.
+
+    The sheet gives each side six rows for the whole match, so the Pokémon
+    are the ones that actually appeared, in the order they first did -
+    anything past six is handed back by the writer as overflow rather than
+    being dropped quietly.
+
+    A walkover has no games to show. The template works a match result out
+    by counting W's, so an awarded match is written as the wins it takes and
+    no kills or deaths at all: the standings are then right, and the empty
+    rows say plainly that nothing was played.
+    """
+    fixture = conn.execute(
+        "SELECT * FROM fixtures WHERE league_id = ? AND week = ? AND match_number = ?",
+        (league["id"], week, match_number)).fetchone()
+    if fixture is None:
+        raise rules.DraftError(f"❌ There is no match {match_number} in week {week}.")
+
+    view = match_view(conn, league["id"], week, match_number)
+    seats = [fixture["home_player_id"], fixture["away_player_id"]]
+    needed = wins_needed(league)
+    games = view["games"]
+
+    sides = []
+    for seat in seats:
+        player = rules.get_player_by_id(conn, seat)
+        order, stats = [], {}
+        for index, game in enumerate(games):
+            for pokemon, kills, deaths in game["stats"].get(seat, []):
+                if pokemon not in stats:
+                    order.append(pokemon)
+                    stats[pokemon] = {}
+                stats[pokemon][index] = (kills, deaths)
+        results_row = []
+        if view["walkover"]:
+            # Enough W's (or L's) for the template's result formula, and
+            # nothing else: a forfeit is a 2-0 in the standings.
+            results_row = ["W" if view["winner_id"] == seat else "L"] * needed
+        else:
+            for game in games:
+                if game["winner_id"] is None:
+                    results_row.append("")
+                else:
+                    results_row.append("W" if game["winner_id"] == seat else "L")
+        sides.append({
+            "coach": player["display_name"],
+            "pokemon": [{"name": name,
+                         "games": [stats[name].get(index) for index in range(len(games))]}
+                        for name in order],
+            "results": results_row,
+        })
+
+    return {"sides": sides, "replays": [game["replay"] for game in games],
+            "walkover": view["walkover"], "decided": view["decided"]}
+
+
+def decided_matches(conn, league, week):
+    """The week's match numbers that are over, in order."""
+    numbers = [row["match_number"] for row in conn.execute(
+        "SELECT match_number FROM fixtures WHERE league_id = ? AND week = ? "
+        "ORDER BY match_number", (league["id"], week))]
+    return [number for number in numbers if match_finished(conn, league, week, number)]
+
+
 def match_view(conn, league_id, week, match_number):
     """Everything reported for a match: {champions, winner_id, games: [{game, winner_id, source, replay,
     stats: {player_id: [(pokemon, kills, deaths)]}}], pokepastes: {player_id: url}, totals: {...}},

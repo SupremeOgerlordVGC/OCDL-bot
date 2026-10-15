@@ -128,6 +128,7 @@ class CommandOptionTests(unittest.TestCase):
         "matchresult": {"week", "player", "name"},
         "cleargame": {"week", "game", "player", "name"},
         "setresult": {"week", "player", "reason", "clear", "name"},
+        "syncmatch": {"week", "player", "name"},
         "removeplayer": {"player", "keep_roster"},
         "setskips": {"player", "skips", "timer"},
         "skipturn": {"player", "penalty"},

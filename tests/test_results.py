@@ -215,3 +215,94 @@ class MatchOverTests(unittest.TestCase):
         self.win(1, self.one)
         self.win(2, self.one)
         self.assertEqual(results.trades_after_match(self.conn, self.league(), 1, 99), [])
+
+
+class SheetShapeTests(unittest.TestCase):
+    """Turning a reported match into what the spreadsheet's Matches tab wants.
+
+    The numbers are the real Cornerstone week 1 match 8: nirvanacokun beat
+    bananamilker_ 2-0, recorded from two Ready battles.
+    """
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.pool = make_draft(self.conn, channel_id=7200, players=2, min_picks=1, max_picks=4)
+        for name, cost in [("Goodra-Hisui", 12), ("Alcremie", 4), ("Sneasler", 10),
+                           ("Hatterene", 8), ("Volcarona", 9), ("Mimikyu", 7),
+                           ("Toxapex", 6), ("Mr. Mime", 3)]:
+            live = draft.get_pool(self.conn, self.pool["id"])
+            player = draft.current_player(self.conn, live)
+            draft.make_pick(self.conn, live, player["user_id"], live["current_round"], name, cost)
+        self.league_id = self.pool["league_id"]
+        draft.generate_fixtures(self.conn, self.league_id, weeks=1)
+        self.one = draft.get_player(self.conn, self.pool["id"], user(1))
+        self.two = draft.get_player(self.conn, self.pool["id"], user(2))
+        self.match = results.find_match(self.conn, self.league_id, 1, self.one["id"])["match_number"]
+
+    def league(self):
+        return draft.get_league(self.conn, self.league_id)
+
+    def record(self, game, winner, stats, replay=None):
+        results.record_game(self.conn, self.league_id, 1, self.match, game, "battle",
+                            winner_id=winner["id"] if winner else None,
+                            stats=stats, replay=replay)
+
+    def sides(self):
+        shape = results.sheet_match(self.conn, self.league(), 1, self.match)
+        return {side["coach"]: side for side in shape["sides"]}, shape
+
+    def test_the_pokemon_are_the_ones_that_played_in_the_order_they_appeared(self):
+        self.record(1, self.one,
+                    {self.one["id"]: [("Goodra-Hisui", 3, 0), ("Volcarona", 1, 1)],
+                     self.two["id"]: [("Alcremie", 0, 1), ("Hatterene", 0, 1)]},
+                    replay="https://replay.ogreclan.com/a")
+        self.record(2, self.one,
+                    {self.one["id"]: [("Goodra-Hisui", 3, 0), ("Sneasler", 1, 1)],
+                     self.two["id"]: [("Mimikyu", 0, 1), ("Alcremie", 1, 1)]},
+                    replay="https://replay.ogreclan.com/b")
+        sides, shape = self.sides()
+
+        mine = sides[self.one["display_name"]]
+        self.assertEqual([entry["name"] for entry in mine["pokemon"]],
+                         ["Goodra-Hisui", "Volcarona", "Sneasler"],
+                         "first appearance order, so game 1's team comes first")
+        self.assertEqual(mine["pokemon"][0]["games"], [(3, 0), (3, 0)])
+        self.assertEqual(mine["pokemon"][1]["games"], [(1, 1), None],
+                         "None is a game it did not play, which clears those cells")
+        self.assertEqual(mine["results"], ["W", "W"])
+
+        theirs = sides[self.two["display_name"]]
+        self.assertEqual([entry["name"] for entry in theirs["pokemon"]],
+                         ["Alcremie", "Hatterene", "Mimikyu"])
+        self.assertEqual(theirs["results"], ["L", "L"])
+        self.assertEqual(shape["replays"],
+                         ["https://replay.ogreclan.com/a", "https://replay.ogreclan.com/b"])
+        self.assertTrue(shape["decided"])
+        self.assertFalse(shape["walkover"])
+
+    def test_a_game_nobody_has_said_the_winner_of_has_no_result(self):
+        self.record(1, None, {self.one["id"]: [("Goodra-Hisui", 1, 0)]})
+        sides, shape = self.sides()
+        self.assertEqual(sides[self.one["display_name"]]["results"], [""])
+        self.assertFalse(shape["decided"])
+
+    def test_a_walkover_is_written_as_the_wins_it_takes_and_nothing_else(self):
+        results.award_match(self.conn, self.league(), 1, self.match, self.two["id"],
+                            "no-show")
+        sides, shape = self.sides()
+        self.assertTrue(shape["walkover"])
+        self.assertEqual(sides[self.two["display_name"]]["results"], ["W", "W"])
+        self.assertEqual(sides[self.one["display_name"]]["results"], ["L", "L"])
+        self.assertEqual(sides[self.one["display_name"]]["pokemon"], [],
+                         "nothing was played, so no kills or deaths")
+
+    def test_only_finished_matches_are_offered(self):
+        self.assertEqual(results.decided_matches(self.conn, self.league(), 1), [])
+        self.record(1, self.one, {self.one["id"]: [("Goodra-Hisui", 1, 0)]})
+        self.assertEqual(results.decided_matches(self.conn, self.league(), 1), [])
+        self.record(2, self.one, {self.one["id"]: [("Goodra-Hisui", 1, 0)]})
+        self.assertEqual(results.decided_matches(self.conn, self.league(), 1), [self.match])
+
+    def test_a_match_that_does_not_exist_is_refused(self):
+        with self.assertRaises(draft.DraftError):
+            results.sheet_match(self.conn, self.league(), 1, 99)

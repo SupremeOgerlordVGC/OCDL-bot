@@ -645,6 +645,127 @@ class SheetSync:
         return {"coaches": written_coaches, "rosters": len(managed),
                 "tab": self.roster_tab_name(tera_format)}
 
+    # ---- match results --------------------------------------------------
+
+    def match_rows(self, doc_url, week):
+        """{coach name, normalised: the row their block starts on} for a week.
+
+        The coach cells are formulas fed from the Schedule tab, so this is
+        also the answer to "which side is this coach on this week?" - it is
+        read rather than worked out, because the schedule decides it.
+        """
+        layout = config.SHEET_LAYOUT
+        tab = self._tab(doc_url, layout["matches_tab"])
+        column = column_letters(layout["matches_first_column"]
+                                + layout["matches_week_width"] * (int(week) - 1))
+        rows = [layout["matches_first_row"]
+                + layout["matches_match_height"] * (side // 2)
+                + layout["matches_side_offset"] * (side % 2)
+                for side in range(layout["matches_sides"])]
+        try:
+            blocks = tab.batch_get([f"{column}{row}" for row in rows],
+                                   value_render_option="FORMATTED_VALUE")
+        except Exception as error:
+            raise _as_sheet_error(error, f"reading week {week} of the "
+                                         f"{layout['matches_tab']} tab")
+        found = {}
+        for row, block in zip(rows, blocks):
+            name = str(block[0][0]).strip() if block and block[0] else ""
+            if name:
+                found.setdefault(normalize(name), (name, row))
+        return found
+
+    def write_match(self, doc_url, week, sides, replays=None):
+        """Fill in one match: each side's Pokémon, their kills and deaths game
+        by game, and each game's W/L.
+
+        `sides` is [{"coach", "pokemon": [{"name", "games": [(kills, deaths)
+        or None, ...]}], "results": ["W", "L", ""]}]. Only the cells the
+        template leaves for data are written: the per-game kills and deaths,
+        the names beside them and the W/L row. Every K/D, every total and the
+        match result are formulas and are left alone.
+
+        Returns {"tab", "rows": {coach: row}, "games": how many were written,
+        "skipped_games", "overflow": {coach: [names that did not fit]}}.
+        """
+        if not self.can_write:
+            raise SheetError(
+                "Sheet writing is switched off. Set `SHEETS_WRITE_ENABLED = True` in "
+                "config.py once the template layout has been confirmed.")
+        if not doc_url:
+            raise SheetError("This draft has no document configured.")
+
+        layout = config.SHEET_LAYOUT
+        first = layout["matches_first_column"] + layout["matches_week_width"] * (int(week) - 1)
+        capacity = layout["matches_roster_rows"]
+        most_games = layout["matches_games"]
+        known = self.match_rows(doc_url, week)
+
+        updates = []
+        rows, overflow = {}, {}
+        wanted_games = max((len(side["results"]) for side in sides), default=0)
+        for side in sides:
+            key = normalize(side["coach"])
+            if key not in known:
+                raise SheetError(
+                    f"{side['coach']} is not on the {layout['matches_tab']} tab for week "
+                    f"{week}. The coach names there come from the Schedule tab, so check "
+                    f"the schedule (and `/sync`, which writes the names the bot uses).")
+            _, row = known[key]
+            rows[side["coach"]] = row
+
+            entries = list(side["pokemon"])
+            if len(entries) > capacity:
+                overflow[side["coach"]] = [entry["name"] for entry in entries[capacity:]]
+                entries = entries[:capacity]
+            padded = entries + [None] * (capacity - len(entries))
+            top = row + layout["matches_name_offset"]
+            bottom = top + capacity - 1
+
+            name_column = column_letters(first)
+            updates.append({
+                "range": f"{name_column}{top}:{name_column}{bottom}",
+                "values": [[entry["name"] if entry else ""] for entry in padded],
+            })
+
+            for game in range(min(wanted_games, most_games)):
+                kills = first + layout["matches_kills_column"] + \
+                    layout["matches_game_columns"] * game
+                deaths = first + layout["matches_deaths_column"] + \
+                    layout["matches_game_columns"] * game
+                values = []
+                for entry in padded:
+                    played = entry["games"][game] if entry and game < len(entry["games"]) else None
+                    values.append(["", ""] if played is None else [played[0], played[1]])
+                updates.append({
+                    "range": f"{column_letters(kills)}{top}:{column_letters(deaths)}{bottom}",
+                    "values": values,
+                })
+                result = side["results"][game] if game < len(side["results"]) else ""
+                updates.append({
+                    "range": f"{column_letters(kills)}{row + layout['matches_result_offset']}",
+                    "values": [[result]],
+                })
+
+        for game, link in enumerate(list(replays or [])[:most_games]):
+            if not link:
+                continue
+            band = min(rows.values()) + layout["matches_replay_offset"]
+            column = column_letters(first + layout["matches_kills_column"]
+                                    + layout["matches_game_columns"] * game)
+            updates.append({"range": f"{column}{band}", "values": [[link]]})
+
+        tab = self._tab(doc_url, layout["matches_tab"])
+        try:
+            tab.batch_update(updates, value_input_option="USER_ENTERED")
+        except Exception as error:
+            raise _as_sheet_error(error, f"writing week {week} to the "
+                                        f"{layout['matches_tab']} tab")
+        return {"tab": layout["matches_tab"], "rows": rows,
+                "games": min(wanted_games, most_games),
+                "skipped_games": max(0, wanted_games - most_games),
+                "overflow": overflow}
+
     # ---- the schedule ---------------------------------------------------
 
     def read_schedule(self, doc_url, week):

@@ -227,6 +227,33 @@ SHEET_LAYOUT = {
     # The Tera Captain tick box sits this many columns right of the name.
     "tera_flag_offset": 3,
 
+    # ---- Matches: the bot WRITES kills, deaths and each game's W/L. ----
+    # Verified against the live Cornerstone document; the layout is described
+    # by the template itself in BackendMatchLog!A2, and KD-NOTES.md explains
+    # it cell by cell. Every other results tab is formulas fed from here.
+    #
+    # A week is a block of `week_width` columns starting at `first_column`,
+    # and holds `sides` coach blocks: side s sits at
+    #     row = first_row + match_height * (s // 2) + side_offset * (s % 2)
+    # The coach's name is a formula from the Schedule tab, so the bot reads
+    # those cells to find which row a coach is on and never writes them.
+    "matches_tab": "Matches",
+    "matches_first_column": 2,          # week 1 starts at column B
+    "matches_week_width": 16,
+    "matches_first_row": 4,             # side 0's coach row
+    "matches_match_height": 26,
+    "matches_side_offset": 11,          # the second side of the same match
+    "matches_sides": 20,                # ten matches a week
+    # Offsets from a side's coach row, and from the week's first column.
+    "matches_name_offset": 3,           # first of the six Pokemon rows
+    "matches_roster_rows": 6,
+    "matches_result_offset": 10,        # the W/L row
+    "matches_replay_offset": 22,        # the "Replays" row of the match band
+    "matches_game_columns": 3,          # kills, deaths, K/D for each game
+    "matches_games": 3,                 # the template has room for three
+    "matches_kills_column": 1,          # kills, from the week's first column
+    "matches_deaths_column": 2,
+
     # ---- Schedule: READ ONLY, for /postschedule. ----
     "schedule_tab": "BackendSchedule",
     "schedule_first_row": 4,

@@ -550,6 +550,9 @@ async def finish_match(bot, league, week, fixture, players, was_decided):
             bot, applied,
             f"**{players[0]['display_name']}** and **{players[1]['display_name']}** "
             f"have finished their week {week} match")
+    # The spreadsheet is where the standings and the Pokémon leaderboard come
+    # from, so a finished match goes on it without anybody asking.
+    resync_match(bot, league, week, fixture["match_number"])
     return {"decided": True, "applied": applied}
 
 
@@ -606,6 +609,61 @@ async def trades_landed(bot, applied, because):
     for pool_id in {trade["pool_id"] for trade, _ in applied}:
         resync_sheet(bot, pool_id)
     return applied
+
+
+async def write_match_sheet(bot, league, week, match_number):
+    """Put a finished match's kills and deaths on the league's spreadsheet.
+
+    Returns the writer's report, or None when there is nothing to write to:
+    no document, a tiering list rather than a full template, or writing off.
+    Raises whatever Google raises, so a caller that can report it does.
+    """
+    if not bot.sheets.can_write:
+        return None
+    if league["doc_kind"] != "template" or not league["doc_url"]:
+        return None
+    match = results.sheet_match(bot.conn, league, week, match_number)
+    if not match["decided"]:
+        return None
+    return await asyncio.to_thread(
+        bot.sheets.write_match, league["doc_url"], week, match["sides"],
+        match["replays"])
+
+
+def resync_match(bot, league, week, match_number, admin_channel=None):
+    """The same write, in the background, for when nobody is waiting on it.
+
+    Sheet writing is best effort everywhere else in the bot and this is no
+    different: the database already has the result. Anything a moderator
+    would want to know - six rows is all the sheet has for a side - is told
+    to the admin channel rather than only logged.
+    """
+    async def worker():
+        try:
+            report = await write_match_sheet(bot, league, week, match_number)
+        except Exception:
+            log.exception("could not write week %s match %s of league %s to the sheet",
+                          week, match_number, league["id"])
+            return
+        if report is None:
+            return
+        log.info("wrote week %s match %s of %s to the %s tab",
+                 week, match_number, league["name"], report["tab"])
+        notes = []
+        for coach, left_out in (report["overflow"] or {}).items():
+            notes.append(f"• **{coach}** used {6 + len(left_out)} Pokémon across the "
+                         f"series and the sheet has six rows, so {', '.join(left_out)} "
+                         f"{'is' if len(left_out) == 1 else 'are'} not on it.")
+        if report["skipped_games"]:
+            notes.append(f"• The sheet has room for three games, so "
+                         f"{report['skipped_games']} more were not written.")
+        if notes:
+            await safe_send(
+                admin_channel or bot.get_channel(league["admin_channel_id"]),
+                f"📊 Week {week}, match {match_number} is on the **{report['tab']}** tab, "
+                f"with something to look at:\n" + "\n".join(notes))
+
+    asyncio.create_task(worker())
 
 
 def resync_sheet(bot, pool_id):
