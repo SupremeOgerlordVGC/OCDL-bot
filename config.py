@@ -159,23 +159,22 @@ GOOGLE_CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 # Safety switch. While this is False the bot READS the sheet (for autocomplete,
 # /search, /available and cost checks) but never writes to it.
 #
-# OFF since 2026-10-15, on purpose, and this is the only reason:
+# On, and there is one thing to know before a new league turns it on.
 #
-# The league template generates its schedule from a seed cell that holds
+# The template generates its schedule from a seed cell holding
 # `=IF(SetSchedule, IF(B1>0, B1, RANDBETWEEN(1,999999)), -ABS(B1))`. That
-# RANDBETWEEN is volatile, so *any* edit to the document can make Google
-# recalculate it and re-roll the seed - which reshuffles every week's
-# pairings, including ones already published. The bot cannot protect against
-# it from the outside: the seed cell, Schedule and BackendSchedule are all
-# protected against the service account, so it can neither lock nor restore
-# them. The league's owner locks it by unticking "Set Schedule" on the
-# Settings tab, or by typing the seed number over that formula.
+# RANDBETWEEN is volatile: while **Set Schedule is ticked**, any edit to the
+# document can make Google recalculate it, re-roll the seed, and reshuffle
+# every week's pairings - including a week already published. Writing kills
+# and deaths is an edit like any other, so the bot can set that off.
 #
-# Turn this back on once the live documents' schedules are locked. Nothing
-# else is affected: the bot still reads the sheet for prices, autocomplete,
-# /search and /available, and the database stays the source of truth, so a
-# `/sync` catches the sheet up afterwards.
-SHEETS_WRITE_ENABLED = False
+# Unticking **Set Schedule** on the Settings tab locks it: the seed goes
+# negative, that branch can never fire again, and the pairings do not move
+# because the generator uses ABS(seed). The three live leagues are locked.
+# The bot cannot do it itself - Settings, Schedule and BackendSchedule are
+# protected against the service account - so a league should lock its
+# schedule before its first week is posted.
+SHEETS_WRITE_ENABLED = True
 
 # ---- Spreadsheet layout -------------------------------------------------
 # This describes the league template. The bot READS the Pokedex and WRITES
