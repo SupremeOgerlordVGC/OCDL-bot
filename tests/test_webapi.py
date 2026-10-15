@@ -39,7 +39,8 @@ class SiteBot(FakeBot):
     guilds = []
 
     def get_cog(self, name):
-        return {"DraftingCog": self.cog, "AdminCog": self.admin_cog}.get(name)
+        return {"DraftingCog": self.cog, "AdminCog": self.admin_cog,
+                "ExtrasCog": self.extras_cog}.get(name)
 
     def get_guild(self, guild_id):
         return None
@@ -53,7 +54,9 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.bot.sheets = PriceList()
         self.bot.cog = DraftingCog(self.bot)
         from cogs.admin import AdminCog
+        from cogs.extras import ExtrasCog
         self.bot.admin_cog = AdminCog(self.bot)
+        self.bot.extras_cog = ExtrasCog(self.bot)
         self.pool_id = make_pool(
             self.conn, 4242, [(11, "Larry"), (22, "Alex")], budget=100, min_picks=1, max_picks=3, base_timer=120,
             doc_url="https://docs.google.com/spreadsheets/d/TEST/edit")
@@ -309,6 +312,44 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self.call("/setresult", week=1, match=1, winner_user_id="77")
         self.assertEqual(status, 400)
         self.assertIn("one of the match's two players", body["error"])
+
+    async def test_the_site_is_held_to_the_same_trade_checks(self):
+        await self.start_draft()
+        await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
+        await self.call("/pick", user_id="22", round=1, pokemon="Rotom-Wash")
+
+        status, body = await self.call("/trade", user_id="11", drops=["Garchomp"],
+                                       gets=["Garchmop"])
+        self.assertEqual(status, 400, body)
+        self.assertIn("tiering list", body["error"], "the spelling is checked now")
+
+        # And the budget, which the site used to skip entirely.
+        larry = rules.get_player(self.conn, self.pool_id, 11)
+        self.conn.execute("UPDATE players SET budget_remaining = 2 WHERE id = ?",
+                          (larry["id"],))
+        self.conn.commit()
+        status, body = await self.call("/trade", user_id="11", drops=[], gets=["Heatran"])
+        self.assertEqual(status, 400, body)
+        self.assertIn("over budget", body["error"])
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 0,
+            "and no trade was filed for the moderators to judge")
+
+    async def test_updatetrades_from_the_site_puts_them_through(self):
+        await self.start_draft()
+        await self.call("/pick", user_id="11", round=1, pokemon="Garchomp")
+        await self.call("/pick", user_id="22", round=1, pokemon="Rotom-Wash")
+        status, body = await self.call("/trade", user_id="11", drops=["Garchomp"],
+                                       gets=["Heatran"])
+        self.assertEqual(status, 200, body)
+        number = body["trade_number"]
+        await self.call("/approvetrade", trade_number=number, user_id="99")
+        self.assertIsNotNone(rules.find_owner(self.conn, self.pool_id, "garchomp"))
+
+        status, body = await self.call("/updatetrades")
+        self.assertEqual((status, body["applied"]), (200, [number]), body)
+        self.assertIsNone(rules.find_owner(self.conn, self.pool_id, "garchomp"))
+        self.assertIsNotNone(rules.find_owner(self.conn, self.pool_id, "heatran"))
 
     async def test_a_tera_captain_can_be_nominated_from_the_site(self):
         # The site's league is not a Tera format, so this one gets its own.

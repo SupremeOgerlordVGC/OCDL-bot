@@ -55,6 +55,7 @@ class WebApi:
             ("/archive", self.archive), ("/deleteleague", self.delete_league),
             ("/guilds", self.guilds), ("/setup", self.setup), ("/start", self.start_draft),
             ("/postweek", self.post_week), ("/trade", self.trade), ("/approvetrade", self.approve_trade),
+            ("/updatetrades", self.update_trades),
             ("/rejecttrade", self.reject_trade), ("/gameresult", self.game_result), ("/champions", self.champions),
             ("/pokepaste", self.pokepaste), ("/cleargame", self.clear_game), ("/setresult", self.set_result), ("/prices", self.prices), ("/tierlist", self.tierlist),
             ("/queue", self.queue), ("/queue/set", self.set_queue), ("/queue/cancel", self.cancel_queue),
@@ -239,6 +240,10 @@ class WebApi:
     def admin_cog(self):
         return self.bot.get_cog("AdminCog")
 
+    @property
+    def extras_cog(self):
+        return self.bot.get_cog("ExtrasCog")
+
     async def guilds(self, body):
         """The Discord servers the bot is in, with their text channels, for the site's league form"""
         return {"guilds": [{
@@ -389,16 +394,38 @@ class WebApi:
 
     async def trade(self, body):
         """/trade from draft.ogreclan.com: user_id proposes; with partner_user_id it's a swap,
-        without it free agency. drops can be empty (a pickup paid with points left)."""
+        without it free agency. drops can be empty (a pickup paid with points left), and
+        tera_on / tera_off change Tera Captains as part of the same transaction."""
         draft = self.pool(body)
         if draft["mode"] != "full_season":
             raise rules.DraftError("This league doesn't have trades.")
-        drops = [str(name).strip() for name in body.get("drops") or [] if str(name).strip()]
-        drops = rules.parse_pokemon_list(", ".join(drops), config.MAX_TRADE_SIZE) if drops else []
-        gets = rules.parse_pokemon_list(", ".join(str(name) for name in body.get("gets") or []), config.MAX_TRADE_SIZE)
+
+        def listed(key, limit=config.MAX_TRADE_SIZE):
+            names = [str(name).strip() for name in body.get(key) or [] if str(name).strip()]
+            return rules.parse_pokemon_list(", ".join(names), limit) if names else []
+
+        drops, gets = listed("drops"), listed("gets")
+        tera_on = listed("tera_on", config.MAX_TERA_CAPTAINS)
+        tera_off = listed("tera_off", config.MAX_TERA_CAPTAINS)
         partner = int(body["partner_user_id"]) if body.get("partner_user_id") else None
+
+        # The same checks the slash command makes, which is why they live on
+        # the cog: spelling against the tiering list, both budgets, and the
+        # Tera arithmetic, before any moderator is asked to judge it.
+        on_entries, off_entries = [], []
+        if self.extras_cog is not None:
+            prices = await self.extras_cog.resolve_trade_sides(draft, drops, gets)
+            on_entries, off_entries = await self.extras_cog.resolve_tera_sides(
+                draft, tera_on, tera_off)
+            proposer = rules.require_player(self.bot.conn, draft["id"], int(body["user_id"]))
+            partner_player = (rules.require_player(self.bot.conn, draft["id"], partner)
+                              if partner else None)
+            rules.check_trade(self.bot.conn, draft, proposer, partner_player, drops, gets,
+                              prices, tera_on=on_entries, tera_off=off_entries)
+
         record, warnings = rules.propose_trade(self.bot.conn, draft, int(body["user_id"]), drops, gets,
-                                               partner_user_id=partner)
+                                               partner_user_id=partner,
+                                               tera_on=on_entries, tera_off=off_entries)
         if not draft["site_only"]:
             league = rules.get_league(self.bot.conn, draft["league_id"])
             proposer = rules.get_player_by_id(self.bot.conn, record["proposer_id"])
@@ -408,11 +435,47 @@ class WebApi:
                 f"• Draft: **{league['name']}** — Pool {draft['label']}\n"
                 f"• Proposed by: <@{proposer['user_id']}>\n"
                 f"• Partner: {f'<@{partner}>' if partner else '*undrafted pool (free agency)*'}\n"
-                f"• Giving up: {rules.trade_side(drops)}\n• Receiving: {', '.join(gets)}\n\n"
+                f"• Giving up: {rules.trade_side(drops)}\n"
+                f"• Receiving: {rules.trade_side(gets)}\n"
+                + (f"• ⭐ Becoming a Tera Captain: {rules.tera_side(on_entries)}\n"
+                   if on_entries else "")
+                + (f"• ⭐ No longer a Tera Captain: {rules.tera_side(off_entries)}\n"
+                   if off_entries else "")
+                + "\n"
                 f"Approve with `/approvetrade trade_id:{record['trade_number']} name:{league['name']}`, "
                 f"reject with `/rejecttrade`, or decide it on the site.{notes}")
         return {"trade_number": record["trade_number"], "free": bool(record["free"]),
                 "warnings": [plain(w) for w in warnings]}
+
+    async def update_trades(self, body):
+        """/updatetrades from draft.ogreclan.com: put approved trades into effect now,
+        for one player, one pool, or the whole league."""
+        league = self.league(body)
+        seats, pool_id = None, None
+        if body.get("user_id"):
+            where, seat = rules.player_in_league(self.bot.conn, league["id"],
+                                                 int(body["user_id"]))
+            if seat is None:
+                raise rules.DraftError("They aren't playing in this league.")
+            seats, pool_id = [seat["id"]], where["id"]
+        elif body.get("pool"):
+            found = next((row for row in rules.get_league_pools(self.bot.conn, league["id"])
+                          if row["label"] == str(body["pool"])), None)
+            if found is None:
+                raise rules.DraftError(f"{league['name']} has no pool {body['pool']}.")
+            pool_id = found["id"]
+
+        week = (league["current_week"] or 0) + 1
+        applied = rules.apply_trades(self.bot.conn, league["id"], week,
+                                     pool_id=pool_id, player_ids=seats)
+        await ui.trades_landed(self.bot, applied, "a moderator put it through")
+        held = rules.held_trades(self.bot.conn, league["id"], pool_id=pool_id,
+                                 player_ids=seats)
+        return {"applied": [trade["trade_number"] for trade, _ in applied],
+                "week": week,
+                "notes": [plain(note) for _, notes in applied for note in notes],
+                "waiting": [{"trade": trade["trade_number"],
+                             "for": blocker["trade_number"]} for trade, blocker in held]}
 
     async def approve_trade(self, body):
         """/approvetrade from draft.ogreclan.com (user_id is the approving staff member's Discord ID)"""

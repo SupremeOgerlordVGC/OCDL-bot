@@ -3129,6 +3129,174 @@ class NominateTeraCaptainTests(unittest.TestCase):
         self.assertIsNone(self.row("Hydrapple"))
 
 
+class TradeWithTeraTests(unittest.TestCase):
+    """A trade that also changes Tera Captains, approved as one package.
+
+    The numbers are two real Teal pool B requests. buffcat70: drop Klefki (8)
+    and Gengar (7) for Pecharunt (14), and make Diancie (7) and Snorlax (3)
+    captains. ryanxo: captains to Hawlucha and Gholdengo, which means giving
+    up Heatran (9 / Tera 11) and Slither Wing (7/7) and taking on Gholdengo
+    (13 / Tera 15) - no Pokémon moving at all.
+    """
+
+    PRICES = {"klefki": (8, 8), "gengar": (7, 7), "pecharunt": (14, 14),
+              "diancie": (7, 7), "snorlax": (3, 3), "great tusk": (17, 18),
+              "heatran": (9, 11), "slither wing": (7, 7), "gholdengo": (13, 15),
+              "hawlucha": (7, 7), "glimmora": (11, None)}
+
+    def setUp(self):
+        self.conn = database.connect(":memory:")
+        self.PRICES = dict(self.PRICES)      # one test re-prices the list
+        self.pool = make_draft(self.conn, channel_id=2400, players=2, budget=57,
+                               min_picks=1, max_picks=6, tera_budget=28)
+        # In snake order with two players the clock goes 1, 2, 2, 1, 1, 2, 2, 1.
+        for name, cost in (("Klefki", 8), ("Heatran", 11), ("Slither Wing", 7),
+                           ("Gengar", 7), ("Diancie", 7), ("Gholdengo", 13),
+                           ("Hawlucha", 7), ("Snorlax", 3)):
+            live = draft.get_pool(self.conn, self.pool["id"])
+            on_clock = draft.current_player(self.conn, live)
+            draft.make_pick(self.conn, live, on_clock["user_id"], live["current_round"],
+                            name, cost,
+                            tera_captain=name in ("Heatran", "Slither Wing", "Hawlucha"))
+        self.live = draft.get_pool(self.conn, self.pool["id"])
+        self.league_id = self.pool["league_id"]
+
+    def player(self, seat):
+        return draft.get_player(self.conn, self.pool["id"], user(seat))
+
+    def entries(self, names):
+        return [{"name": name, "cost": self.PRICES[draft.normalize(name)][0],
+                 "tera": self.PRICES[draft.normalize(name)][1],
+                 "tera_banned": self.PRICES[draft.normalize(name)][1] is None}
+                for name in names]
+
+    def costs(self):
+        return {key: price[0] for key, price in self.PRICES.items()}
+
+    def check(self, seat, drops, gets, on=(), off=()):
+        return draft.check_trade(self.conn, self.live, self.player(seat), None,
+                                 drops, gets, self.costs(),
+                                 tera_on=self.entries(on), tera_off=self.entries(off))
+
+    def propose(self, seat, drops, gets, on=(), off=()):
+        record, _ = draft.propose_trade(self.conn, self.live, user(seat), drops, gets,
+                                        tera_on=self.entries(on), tera_off=self.entries(off))
+        draft.approve_trade(self.conn, self.live, record["trade_number"], 99)
+        return record
+
+    def row(self, pokemon):
+        return draft.find_owner(self.conn, self.pool["id"], draft.normalize(pokemon))
+
+    def test_the_whole_package_is_checked_and_applied_together(self):
+        maths = self.check(1, ["Klefki", "Gengar"], ["Pecharunt"], on=["Diancie", "Snorlax"])
+        # 57 - 25 spent, 15 back for the two dropped, 14 for Pecharunt. The
+        # two captains cost nothing extra on the main budget: their Tera
+        # price is their plain price.
+        self.assertEqual((maths["refund"], maths["charge"]), (15, 14))
+        self.assertEqual(maths["after"], 32 + 15 - 14)
+        self.assertEqual(maths["tera_after"], 28 - 7 - 3)
+        self.assertEqual(maths["captains"], 2)
+
+        self.propose(1, ["Klefki", "Gengar"], ["Pecharunt"], on=["Diancie", "Snorlax"])
+        draft.apply_trades(self.conn, self.league_id, 1)
+        player = self.player(1)
+        self.assertEqual(player["tera_budget_remaining"], 18)
+        self.assertEqual(draft.tera_captains(self.conn, self.pool["id"], player["id"]), 2)
+        self.assertEqual(self.row("Diancie")["tera_captain"], 1)
+        self.assertIsNone(self.row("Klefki"), "and the Pokémon moved as well")
+        self.assertIsNotNone(self.row("Pecharunt"))
+
+    def test_a_captain_swap_moves_no_pokemon_at_all(self):
+        maths = self.check(2, [], [], on=["Gholdengo"], off=["Heatran", "Slither Wing"])
+        # Heatran was charged its Tera price of 11 and goes back to 9, so two
+        # points come back; Gholdengo goes from 13 to its Tera price of 15.
+        self.assertEqual(maths["refund"], 2)
+        self.assertEqual(maths["charge"], 2)
+        self.assertEqual(maths["tera_after"], 3 + 11 + 7 - 15)
+        self.assertEqual(maths["captains"], 2)
+
+        self.propose(2, [], [], on=["Gholdengo"], off=["Heatran", "Slither Wing"])
+        draft.apply_trades(self.conn, self.league_id, 1)
+        self.assertEqual(self.player(2)["tera_budget_remaining"], 6)
+        self.assertEqual([self.row(name)["tera_captain"] for name in
+                          ("Hawlucha", "Gholdengo", "Heatran", "Slither Wing")],
+                         [1, 1, 0, 0])
+        self.assertEqual(self.row("Gholdengo")["cost"], 15, "a captain carries its Tera price")
+        self.assertEqual(self.row("Heatran")["cost"], 9, "and back to the plain one")
+
+    def test_the_tera_budget_is_enforced_across_the_package(self):
+        self.conn.execute("UPDATE players SET tera_budget_remaining = 5 WHERE id = ?",
+                          (self.player(1)["id"],))
+        self.conn.commit()
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(1, [], [], on=["Diancie"])        # 7 against 5 left
+        self.assertIn("over the Tera budget", str(caught.exception))
+        self.assertEqual(self.row("Diancie")["tera_captain"], 0, "and nothing changed")
+
+    def test_the_captain_limit_is_enforced_across_the_package(self):
+        # Player2 has three already, so a fourth is refused even with the
+        # points for it - and that is the refusal they are given first.
+        self.conn.execute("UPDATE players SET tera_budget_remaining = 28 WHERE id = ?",
+                          (self.player(2)["id"],))
+        self.conn.commit()
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(2, [], [], on=["Gholdengo"])
+        self.assertIn("most anybody may have is 3", str(caught.exception))
+        # Giving one up in the same package makes room for it.
+        maths = self.check(2, [], [], on=["Gholdengo"], off=["Slither Wing"])
+        self.assertEqual(maths["captains"], 3)
+
+    def test_something_being_given_up_cannot_be_made_a_captain(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(1, ["Diancie"], ["Pecharunt"], on=["Diancie"])
+        self.assertIn("being given up in this trade", str(caught.exception))
+
+    def test_only_a_real_captain_can_be_given_up(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(1, [], ["Pecharunt"], off=["Diancie"])
+        self.assertIn("not one of", str(caught.exception))
+
+    def test_one_arriving_in_the_same_trade_can_be_made_a_captain(self):
+        maths = self.check(1, ["Klefki", "Gengar"], ["Great Tusk"], on=["Great Tusk"])
+        # Charged 17 to pick up and one more for the Tera price of 18.
+        self.assertEqual(maths["charge"], 17 + 1)
+        self.assertEqual(maths["tera_after"], 28 - 18)
+        self.propose(1, ["Klefki", "Gengar"], ["Great Tusk"], on=["Great Tusk"])
+        draft.apply_trades(self.conn, self.league_id, 1)
+        self.assertEqual(self.row("Great Tusk")["tera_captain"], 1)
+        self.assertEqual(self.row("Great Tusk")["cost"], 18)
+
+    def test_one_that_cannot_be_a_captain_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            self.check(1, [], ["Glimmora"], on=["Glimmora"])
+        self.assertIn("cannot be a Tera Captain", str(caught.exception))
+
+    def test_a_trade_with_nothing_in_it_is_refused(self):
+        with self.assertRaises(draft.DraftError) as caught:
+            draft.propose_trade(self.conn, self.live, user(1), [], [])
+        self.assertIn("at least one Pokémon to receive, or a Tera Captain",
+                      str(caught.exception))
+
+    def test_the_approved_prices_are_what_apply(self):
+        """The list can be re-priced between approval and effect; what the
+        moderators approved is what happens."""
+        self.propose(1, [], [], on=["Diancie"])
+        self.PRICES["diancie"] = (99, 99)
+        draft.apply_trades(self.conn, self.league_id, 1)
+        self.assertEqual(self.row("Diancie")["cost"], 7)
+        self.assertEqual(self.player(1)["tera_budget_remaining"], 21)
+
+    def test_a_captaincy_that_went_away_before_it_applied_is_reported(self):
+        record = self.propose(2, [], [], off=["Heatran"])
+        draft.set_tera_captain(self.conn, self.live, self.player(2), "Heatran", 9, 11,
+                               on=False)
+        applied = draft.apply_trades(self.conn, self.league_id, 1)
+        notes = applied[0][1]
+        self.assertTrue(any("not" in note and "Tera" in note for note in notes), notes)
+        self.assertEqual(self.player(2)["tera_budget_remaining"], 3 + 11,
+                         "given back once, not twice")
+
+
 class PendingDropTests(unittest.TestCase):
     """Picking up something an approved trade has not got round to dropping.
 
