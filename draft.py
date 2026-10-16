@@ -2589,6 +2589,14 @@ def set_official(conn, league_id, official):
     return get_league(conn, league_id)
 
 
+def set_planner_room(conn, league_id, roomid):
+    """Which Showdown room this league is published to for the Draft Planner."""
+    conn.execute("UPDATE leagues SET planner_room = ? WHERE id = ?",
+                 (roomid or None, league_id))
+    conn.commit()
+    return get_league(conn, league_id)
+
+
 def set_schedule_channel(conn, league_id, channel_id):
     """Where /postschedule posts. None puts it back to the channel it is run in."""
     conn.execute("UPDATE leagues SET schedule_channel_id = ? WHERE id = ?",

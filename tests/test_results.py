@@ -306,3 +306,83 @@ class SheetShapeTests(unittest.TestCase):
     def test_a_match_that_does_not_exist_is_refused(self):
         with self.assertRaises(draft.DraftError):
             results.sheet_match(self.conn, self.league(), 1, 99)
+
+
+class PlannerPublishTests(unittest.TestCase):
+    """What the Draft Planner is given: the matchups, and nothing it would
+    have to guess at. See BRIDGE-NOTES.md."""
+
+    def setUp(self):
+        import planner
+        self.planner = planner
+        self.conn = database.connect(":memory:")
+        self.pool = make_draft(self.conn, channel_id=7300, players=4, min_picks=1,
+                               max_picks=2, tera_budget=28)
+        for _ in range(4):
+            live = draft.get_pool(self.conn, self.pool["id"])
+            player = draft.current_player(self.conn, live)
+            draft.make_pick(self.conn, live, player["user_id"], live["current_round"],
+                            f"Mon{player['id']}", 5)
+        self.league_id = self.pool["league_id"]
+        draft.generate_fixtures(self.conn, self.league_id, weeks=3)
+        draft.set_current_week(self.conn, self.league_id, 1)
+
+    def league(self):
+        return draft.get_league(self.conn, self.league_id)
+
+    def test_showdown_ids_are_how_showdown_makes_them(self):
+        for name, wanted in (("ryanxo.", "ryanxo"), ("._.biss._.", "biss"),
+                             ("Mega Charizard Y", "megacharizardy"),
+                             ("enzodave2123_77481", "enzodave212377481"), ("", "")):
+            self.assertEqual(self.planner.showdown_id(name), wanted)
+
+    def test_the_league_is_a_complete_season_league(self):
+        got = self.planner.draft_league(self.conn, self.league(), "tealdivision")
+        self.assertEqual(got["roomid"], "tealdivision")
+        self.assertEqual(got["phase"], "season",
+                         "the draft is over, so the server has nothing to time out")
+        self.assertEqual(got["week"], 1)
+        # Every key league-core's createLeague makes, so the server gets a whole league.
+        self.assertEqual(set(got), {"roomid", "phase", "settings", "pool", "players", "picks",
+                                    "pickNumber", "pickDeadline", "schedule", "week", "trades",
+                                    "nextTradeId", "transactions"})
+        self.assertEqual(set(got["settings"]),
+                         set(self.planner.DEFAULT_SETTINGS) | {"format"})
+        self.assertEqual(got["settings"]["type"], "free",
+                         "no points pool is published, so points are not claimed")
+        self.assertTrue(got["settings"]["tera"], "a Tera league says so")
+        self.assertEqual(got["settings"]["bestOf"], 3)
+
+    def test_every_coach_is_there_with_an_empty_roster(self):
+        got = self.planner.draft_league(self.conn, self.league(), "room")
+        self.assertEqual(len(got["players"]), 4)
+        self.assertEqual([p["roster"] for p in got["players"]], [[], [], [], []],
+                         "rosters would need Showdown species ids; the schedule does not")
+        self.assertEqual(got["pool"], {})
+        ids = {p["id"] for p in got["players"]}
+        self.assertEqual(len(ids), 4, "and each has its own id")
+
+    def test_the_schedule_is_a_list_of_weeks_of_matches(self):
+        got = self.planner.draft_league(self.conn, self.league(), "room")
+        self.assertEqual(len(got["schedule"]), 3, "three weeks, in order")
+        week_one = got["schedule"][0]
+        self.assertEqual(len(week_one), 2, "four coaches, two matches")
+        ids = {p["id"] for p in got["players"]}
+        for match in week_one:
+            self.assertEqual(match["week"], 1)
+            self.assertIn(match["p1"], ids)
+            self.assertIn(match["p2"], ids)
+        self.assertEqual(got["settings"]["weeks"], 3)
+
+    def test_a_league_with_no_fixtures_publishes_an_empty_schedule(self):
+        self.conn.execute("DELETE FROM fixtures WHERE league_id = ?", (self.league_id,))
+        self.conn.commit()
+        got = self.planner.draft_league(self.conn, self.league(), "room")
+        self.assertEqual(got["schedule"], [])
+
+    def test_the_body_says_whose_league_it_is(self):
+        body = self.planner.body_for(self.conn, self.league(), "room")
+        self.assertEqual(body["data"]["roomid"], "room")
+        self.assertEqual(body["title"], self.league()["name"])
+        self.assertFalse(body["isPrivate"], "a public league is public on the site too")
+        self.assertEqual(body["event"]["action"], "publish")

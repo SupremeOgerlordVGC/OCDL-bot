@@ -150,6 +150,7 @@ class CommandOptionTests(unittest.TestCase):
         "rejectextension": {"number", "name"},
         "extensions": {"name"},
         "schedulechannel": {"name", "channel"},
+        "publishleague": {"name", "room", "off"},
         "hostapplications": {"waiting"},
         "approvehost": {"user"},
         "rejecthost": {"user", "reason"},

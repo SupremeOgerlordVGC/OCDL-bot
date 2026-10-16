@@ -20,6 +20,7 @@ from discord.ext import commands
 import config
 import database
 import draft as rules
+import planner
 import results
 import sheets
 import ui
@@ -748,6 +749,14 @@ class AdminCog(commands.Cog):
         if footnote:
             extra.append(footnote)
 
+        # A published league follows the weeks by itself, so the planner is
+        # never a week behind.
+        if league["planner_room"]:
+            try:
+                await self.publish_to_planner(rules.get_league(self.bot.conn, league["id"]))
+            except Exception:
+                log.exception("could not publish week %s to the planner", week)
+
         report = f"✅ Posted {len(pairs)} match(es) for week {week}."
         if extended:
             report += f" {len(extended)} of them carried over on an extension."
@@ -888,6 +897,55 @@ class AdminCog(commands.Cog):
         )
 
     # ---- /schedulechannel -----------------------------------------------
+
+    @app_commands.command(
+        name="publishleague",
+        description="Moderator only: publish this league's matchups to the Draft Planner.")
+    @app_commands.describe(
+        name="The league's name",
+        room="Its room on OgreClan's Showdown server, like tealdivision",
+        off="True stops publishing it (the planner keeps what it imported)")
+    async def publishleague(self, interaction: discord.Interaction, name: str,
+                            room: str = None, off: bool = False):
+        """The planner imports a league from its pages on the Showdown server, and those
+        leagues live in the site's database - so this writes it there. Matchups only; see
+        planner.py for why rosters are left out."""
+        ui.require_moderator(self.bot, interaction)
+        league = rules.require_season_league_by_name(self.bot.conn, interaction.guild_id, name)
+        await interaction.response.defer(ephemeral=True)
+
+        if off:
+            rules.set_planner_room(self.bot.conn, league["id"], None)
+            await interaction.followup.send(
+                f"🛑 **{league['name']}** is no longer published to the Draft Planner. "
+                f"What it has already imported stays until somebody imports again.",
+                ephemeral=True)
+            return
+
+        roomid = planner.showdown_id(room or league["planner_room"] or "")
+        if not roomid:
+            raise rules.DraftError(
+                "❌ Which Showdown room? Give `room:` the league's room on "
+                "play.ogreclan.com, like `tealdivision`.")
+
+        revision = await self.publish_to_planner(league, roomid)
+        rules.set_planner_room(self.bot.conn, league["id"], roomid)
+        weeks = len(planner.schedule_for(self.bot.conn, league["id"]))
+        await interaction.followup.send(
+            f"📋 **{league['name']}** is published to **{roomid}** (revision {revision}).\n"
+            f"• {weeks} week(s) of matchups and "
+            f"{len(planner.players_for(self.bot.conn, league['id']))} coaches\n"
+            f"• Open the room's draft page on play.ogreclan.com, or `/planner`, and the "
+            f"planner imports it. Each week posts itself from now on.\n"
+            f"• Rosters and points are **not** published — the planner would need every "
+            f"Pokémon's Showdown species id, which the bot does not have.",
+            ephemeral=True)
+
+    async def publish_to_planner(self, league, roomid=None):
+        """Write a league to the site for the Showdown server to load. Returns the revision."""
+        roomid = roomid or league["planner_room"]
+        body = planner.body_for(self.bot.conn, league, roomid)
+        return await planner.publish(body, roomid)
 
     @app_commands.command(
         name="schedulechannel",

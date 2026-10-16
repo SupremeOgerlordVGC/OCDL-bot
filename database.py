@@ -91,6 +91,9 @@ CREATE TABLE IF NOT EXISTS leagues (
     site_only         INTEGER NOT NULL DEFAULT 0,
     -- The Discord user who made it (with /setup or on draft.ogreclan.com)
     created_by        INTEGER,
+    -- The Showdown room this league is published to for the Draft Planner
+    -- (see planner.py), or NULL when it is not published.
+    planner_room      TEXT,
     -- 'setup' | 'active' | 'complete' | 'archived' | 'cancelled'
     status            TEXT NOT NULL DEFAULT 'setup',
     created_at        TEXT NOT NULL,
@@ -443,6 +446,7 @@ FROM pools JOIN leagues ON leagues.id = pools.league_id;
 # every connect and is safe to run repeatedly.
 ADDED_COLUMNS = [
     ("leagues", "best_of", "INTEGER NOT NULL DEFAULT 3"),
+    ("leagues", "planner_room", "TEXT"),
     ("match_reports", "walkover_id", "INTEGER"),
     ("match_reports", "note", "TEXT"),
     ("pools", "grace_ended_at", "TEXT"),

@@ -316,6 +316,24 @@ def get_ogreclan_api():
     return int(port), secret
 
 
+# The Showdown format a published league is labelled with, and the mod the
+# site files it under. Only what the Draft Planner shows; the bot does not
+# run battles.
+PLANNER_FORMAT = "gen9nationaldexvgc"
+PLANNER_MOD = "gen9"
+
+
+def get_site_internal():
+    """draft.ogreclan.com's internal API (the one the Showdown server uses): its address and the
+    internal secret, or None when either is unset. Publishing a league to the planner goes through
+    it - see planner.py."""
+    url = os.environ.get("OGRECLAN_SITE_URL", "").strip().rstrip("/")
+    secret = os.environ.get("OGRECLAN_INTERNAL_SECRET", "").strip()
+    if not url or len(secret) < 24:
+        return None
+    return url, secret
+
+
 def get_site_api():
     """draft.ogreclan.com's API, for reading kills and deaths from replay links (/reportreplay): its address
     (OGRECLAN_SITE_URL, on the server http://127.0.0.1:8100) and the shared secret, or None when it is off."""
